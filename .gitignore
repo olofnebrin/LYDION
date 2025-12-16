@@ -1,0 +1,18 @@
+# Julia
+*.jl.cov
+*.jl.mem
+*.jl.*.cov
+*.ji
+Manifest.toml
+
+# VS Code
+.vscode/
+
+# Outputs / data (adjust to taste)
+*.h5
+*.dat
+*.txt
+*.mp4
+*.png
+*.pdf
+output/
