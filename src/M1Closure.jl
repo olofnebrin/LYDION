@@ -30,8 +30,8 @@ end
 
 
 const OneThird::Float64     = 1 / 3        # For isotropic limit, often used  
-const fmin::Float64         = 1e-12      
-const fmax::Float64         = 1.0 - 1e-12  # To avoid rounding errors from calculation of χ 
+const fmin::Float64         = 1e-15      
+const fmax::Float64         = 1.0 - 1e-15  # To avoid rounding errors from calculation of χ 
 const Jeps::Float64         = 1e-60
 const Heps::Float64         = 1e-100
 const Heps_squared::Float64 = Heps * Heps 
@@ -46,7 +46,7 @@ const Heps_squared::Float64 = Heps * Heps
     # Squared magnitude of H:
     Hmag_squared = H_r * H_r  +  H_Z * H_Z
 
-    if J < Jeps || Hmag_squared < Heps_squared
+    if J ≤ Jeps || Hmag_squared ≤ Heps_squared 
         # If the flux is near zero, or if we have ≈ no intensity at all,
         # we assume isotropic intensity:
         D_rr = OneThird
@@ -62,8 +62,8 @@ const Heps_squared::Float64 = Heps * Heps
  
         # Convenient factors:
         inv_Hmag = 1 / Hmag
-        a        = (1  -  χ) / 2
-        b        = (3 * χ  -  1) / 2
+        a        = (1  -  χ) * 0.5
+        b        = (3 * χ  -  1) * 0.5
         nr       = H_r * inv_Hmag  # r-component of the flux unit vector n
         nZ       = H_Z * inv_Hmag  # Z-component of the flux unit vector n
 
@@ -78,39 +78,15 @@ const Heps_squared::Float64 = Heps * Heps
 end
 
 
-
-""" Updates the relevant Eddington factors D = K / J, for a single 
-    frequency bin. This version uses threading over spatial cells. """
-function Update_D_Edd!( D_rr::AbstractArray{Float64, 2},  # rr-component of D (N_r x N_Z elements)
-                                  D_ZZ::AbstractArray{Float64, 2},  # ZZ-component of D (N_r x N_Z elements)
-                                  D_rZ::AbstractArray{Float64, 2},  # rZ-component of D (N_r x N_Z elements)
-                                   H_r::AbstractArray{Float64, 2},  # H in r-direction  (N_r x N_Z elements)
-                                   H_Z::AbstractArray{Float64, 2},  # H in Z-direction  (N_r x N_Z elements) 
-                                     J::AbstractArray{Float64, 2}   # J                 (N_r x N_Z elements)
-                                  )
-
-    N_r, N_Z    = size( J )  # Grid size
-    dN_r        = 1:N_r
-    dN_Z        = 1:N_Z
-
-    @threads for j in dN_Z 
-        @inbounds @simd for i in dN_r 
-            D_rr[i,j], D_ZZ[i,j], D_rZ[i,j] = Compute_D_Edd( H_r[i,j], H_Z[i,j], J[i,j] )
-        end # End of i-loop
-    end # End of j-loop 
-
-end
-
-
 """ Updates the relevant Eddington factors D = K / J, for a single 
     frequency bin. This version does *not* use threading over spatial cells. """
-@fastmath function Update_D_Edd_Serial!( D_rr::AbstractArray{Float64, 2},  # rr-component of D (N_r x N_Z elements)
-                                         D_ZZ::AbstractArray{Float64, 2},  # ZZ-component of D (N_r x N_Z elements)
-                                         D_rZ::AbstractArray{Float64, 2},  # rZ-component of D (N_r x N_Z elements)
+@fastmath function Update_D_Edd_Serial!( D_rr::AbstractArray{TypeOfD, 2},  # rr-component of D (N_r x N_Z elements)
+                                         D_ZZ::AbstractArray{TypeOfD, 2},  # ZZ-component of D (N_r x N_Z elements)
+                                         D_rZ::AbstractArray{TypeOfD, 2},  # rZ-component of D (N_r x N_Z elements)
                                           H_r::AbstractArray{Float64, 2},  # H in r-direction  (N_r x N_Z elements)
                                           H_Z::AbstractArray{Float64, 2},  # H in Z-direction  (N_r x N_Z elements) 
                                             J::AbstractArray{Float64, 2}   # J                 (N_r x N_Z elements)
-                                        )
+                                        )  where {TypeOfD<:AbstractFloat}
 
     N_r, N_Z    = size( J )  # Grid size
     dN_r        = 1:N_r
@@ -118,7 +94,10 @@ end
 
     for j in dN_Z 
         @inbounds @simd for i in dN_r       
-            D_rr[i,j], D_ZZ[i,j], D_rZ[i,j] = Compute_D_Edd( H_r[i,j], H_Z[i,j], J[i,j] )
+            Drr, DZZ, DrZ = Compute_D_Edd( H_r[i,j], H_Z[i,j], J[i,j] )
+            D_rr[i,j]     = TypeOfD( Drr )
+            D_ZZ[i,j]     = TypeOfD( DZZ )
+            D_rZ[i,j]     = TypeOfD( DrZ )
         end # End of i-loop
     end # End of j-loop 
 
@@ -127,13 +106,13 @@ end
 
 """ Updates the relevant Eddington factors D = K / J, for a single 
     frequency bin. This version does use threading over spatial cells. """
-function Update_D_Edd_Threaded!( D_rr::AbstractArray{Float64, 2},  # rr-component of D (N_r x N_Z elements)
-                                           D_ZZ::AbstractArray{Float64, 2},  # ZZ-component of D (N_r x N_Z elements)
-                                           D_rZ::AbstractArray{Float64, 2},  # rZ-component of D (N_r x N_Z elements)
+@fastmath function Update_D_Edd_Threaded!( D_rr::AbstractArray{TypeOfD, 2},  # rr-component of D (N_r x N_Z elements)
+                                           D_ZZ::AbstractArray{TypeOfD, 2},  # ZZ-component of D (N_r x N_Z elements)
+                                           D_rZ::AbstractArray{TypeOfD, 2},  # rZ-component of D (N_r x N_Z elements)
                                             H_r::AbstractArray{Float64, 2},  # H in r-direction  (N_r x N_Z elements)
                                             H_Z::AbstractArray{Float64, 2},  # H in Z-direction  (N_r x N_Z elements) 
                                               J::AbstractArray{Float64, 2}   # J                 (N_r x N_Z elements)
-                                          )
+                                          )  where {TypeOfD<:AbstractFloat}
 
     N_r, N_Z    = size( J )  # Grid size
     dN_r        = 1:N_r
@@ -141,7 +120,10 @@ function Update_D_Edd_Threaded!( D_rr::AbstractArray{Float64, 2},  # rr-componen
 
     @threads for j in dN_Z 
         @inbounds @simd for i in dN_r       
-            D_rr[i,j], D_ZZ[i,j], D_rZ[i,j] = Compute_D_Edd( H_r[i,j], H_Z[i,j], J[i,j] )
+            Drr, DZZ, DrZ = Compute_D_Edd( H_r[i,j], H_Z[i,j], J[i,j] )
+            D_rr[i,j]     = TypeOfD( Drr )
+            D_ZZ[i,j]     = TypeOfD( DZZ )
+            D_rZ[i,j]     = TypeOfD( DrZ )
         end # End of i-loop
     end # End of j-loop 
 
@@ -190,7 +172,6 @@ end
                                          H_Z_R::Float64
                                           )
 
-    #return -1.0, 1.0, -1.0, 1.0
 
     # Compute magnitudes of fluxes on the left & right:
     Hmag_L = sqrt( H_r_L * H_r_L  +  H_Z_L * H_Z_L )
@@ -227,7 +208,6 @@ end
                                          H_Z_R::Float64
                                           )
 
-    #return -1.0, 1.0, -1.0, 1.0
 
     # Compute magnitudes of fluxes on the left & right:
     Hmag_L = sqrt( H_r_L * H_r_L  +  H_Z_L * H_Z_L )

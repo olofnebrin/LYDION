@@ -10,7 +10,7 @@
 using .Structs: GeometryCylindrical, GeometryCartesian
 using  StaticArrays, LinearAlgebra  # For some matrix algebra to determine some WENO3 coefficients 
 
-export SetupCylindricalGrid, SetupCartesianGrid
+export SetupCylindricalGrid, SetupCylindricalGrid_FromSaved, SetupCartesianGrid
 
 
 ###############################################################
@@ -609,6 +609,89 @@ function SetupCylindricalGrid( rmax::T,     rmax_lin::T,
                                    w_plus_j_p1, w_minus_j_p1  )
 end
 
+
+const Tol_ΔV_Float64::Float64 = 1e-12
+const Tol_ΔV_Float32::Float64 = 1e-5
+
+""" This function sets up a cylindrical grid from saved r, rCoM, Z, and Z arrays.
+    It is useful for restarting RHD simulations where the grid is saved, but not 
+    WENO3 coefficients or interface areas. """
+function SetupCylindricalGrid_FromSaved( r::AbstractArray{T}, rCoM::AbstractArray{T},
+                                         Z::AbstractArray{T}, ZCoM::AbstractArray{T},
+                                         ΔV::AbstractArray{T, 2} )  where {T<:AbstractFloat}
+
+    N_r, N_Z = size( ΔV )
+    @assert length( r )    == N_r + 1
+    @assert length( rCoM ) == N_r
+    @assert length( Z )    == N_Z + 1
+    @assert length( ZCoM ) == N_Z
+
+
+    # Before proceeding, make a sanity check that the saved cell volumes 
+    # are physically reasonable, i.e. can be derived from r and Z:
+    ΔV_check = similar( ΔV )
+    Get_ΔV_Cylindrical!( r, Z, ΔV_check )  
+
+    RelError = maximum( abs.( ( ΔV_check .- ΔV ) ./ ΔV_check ) )
+    if T == Float64
+        Tol_ΔV = T(Tol_ΔV_Float64)
+    elseif T == Float32
+        Tol_ΔV = T(Tol_ΔV_Float32)
+    else
+        error("Spatial grid is neither Float64 or Float32.") 
+    end
+
+    if RelError > Tol_ΔV
+        error("SetupCylindricalGrid_FromSaved: Saved CellVolumes mismatch recomputed volumes. Max relative error = $(RelError).")
+    end
+
+    # Initialize other needed arrays:
+    inv_ΔV       = zeros( T, N_r, N_Z )      # Inverse cell volumes, 1 / ΔV, often needed in advection updates
+    A_r          = zeros( T, N_r + 1, N_Z )  # r-direction cell interface areas 
+    A_Z          = zeros( T, N_r, N_Z + 1 )  # Z-direction cell interface areas
+    inv_r_cell   = zeros( T, N_r ) 
+
+    # Initialize WENO3 weights for conversion between cell-averages & cell-centers:
+    w_i_m1_r     = zeros( T, N_r )
+    w_i_0_r      = zeros( T, N_r )
+    w_i_p1_r     = zeros( T, N_r )
+    w_j_m1_Z     = zeros( T, N_Z )
+    w_j_0_Z      = zeros( T, N_Z )
+    w_j_p1_Z     = zeros( T, N_Z )
+
+    q_i_m1_r     = zeros( T, N_r )
+    q_i_0_r      = zeros( T, N_r )
+    q_i_p1_r     = zeros( T, N_r )
+    q_j_m1_Z     = zeros( T, N_Z )
+    q_j_0_Z      = zeros( T, N_Z )
+    q_j_p1_Z     = zeros( T, N_Z )
+
+    # Initialize WENO3 weights for interface reconstruction:  
+    w_plus_i_p1  = zeros( T, N_r )
+    w_minus_i_p1 = zeros( T, N_r )
+
+    w_plus_j_p1  = zeros( T, N_Z )
+    w_minus_j_p1 = zeros( T, N_Z )
+
+    # Get A_r, A_Z, inv_r_cell ≡ ⟨1/r⟩, and WENO3 weights:
+    Get_A_r_Cylindrical!( r, Z, A_r )
+    Get_A_Z_Cylindrical!( r, Z, A_Z )
+    Get_inv_r_cell_Cylindrical!( inv_r_cell, r )
+    Get_WENO3_CellAvCenter_weights_Cylindrical!( w_i_m1_r, q_i_m1_r, w_i_0_r, q_i_0_r, w_i_p1_r, q_i_p1_r, 
+                                                 w_j_m1_Z, q_j_m1_Z, w_j_0_Z, q_j_0_Z, w_j_p1_Z, q_j_p1_Z, 
+                                                 r, rCoM, Z, ZCoM )
+    Get_WENO3_w_plus_w_minus_r!( r, w_plus_i_p1, w_minus_i_p1 )
+    Get_WENO3_w_plus_w_minus_Z!( Z, w_plus_j_p1, w_minus_j_p1 )
+
+    # Get 1 / ΔV:
+    inv_ΔV    .= T(1.0) ./ ΔV
+
+    return GeometryCylindrical{T}( Val(:Cylindrical), r, Z, rCoM, ZCoM, ΔV, inv_ΔV, A_r, A_Z, inv_r_cell, 
+                                   w_i_m1_r, w_i_0_r, w_i_p1_r, w_j_m1_Z, w_j_0_Z, w_j_p1_Z,
+                                   q_i_m1_r, q_i_0_r, q_i_p1_r, q_j_m1_Z, q_j_0_Z, q_j_p1_Z,
+                                   w_plus_i_p1, w_minus_i_p1, 
+                                   w_plus_j_p1, w_minus_j_p1  )
+end
 
 ###############################################################
 #######                                                 #######

@@ -68,95 +68,65 @@ const inv_c::Float64          = 1 / c  # Convenient constant
 end
 
 
-""" The interpolation function ϵ(τ_cell) used to 
-    to get the correct diffusion limit. It is ≃ 1
-    at low cell optical depth τ_cell, and ≃ 1/τ_cell 
-    as τ_cell ≫ 1. """
-@inline function Getϵ( τ_cell::Float64, 
-                          S_R::Float64 = 1.0,
-                          S_L::Float64 = - 1.0,
-                          f_L::Float64 = 0.0,
-                          f_R::Float64 = 0.0
-                       )
+const τ_diff_floor::Float64 = 1.0
+const ψ_fluxlimiter::Float64 = 1.1   # Flux limiter in the highly optically thick regime
 
-    # Compute f:
-    f = 0.5 * ( f_L + f_R )
-
-    # Compute ϵ:
-    ϵ = 1 / ( 1  -  S_R * S_L * 3 * τ_cell / ( S_R - S_L ) )
-
-    return ϵ
-end
-
-
-""" The HLL flux for H (ignoring velocity advection), corrected so 
-    that the asymptotic diffusion limit is obtained when the cell 
-    optical depth is ≳ 1. """
-@inline function GetFluxHLL_H( F_L::Float64,
-                                         F_R::Float64,
-                                         H_L::Float64,
-                                         H_R::Float64,
-                                        λ1_L::Float64, 
-                                        λ1_R::Float64,
-                                        λ3_L::Float64, 
-                                        λ3_R::Float64,
-                                         τ_L::Float64,
-                                         τ_R::Float64
-                                        )
+""" Computes the HLL fluxes for J, H_r, and H_Z. Uses 
+    a correction factor ϵ for the asymptotic diffusion limit for J,
+    important when τ_cell ≳ 1. The correction factor is taken 
+    from Bloch et al. (2021).  """
+@inline function GetFluxHLL( FJ_L::Float64,
+                             FJ_R::Float64,
+                            FHr_L::Float64, FHr_R::Float64,
+                            FHZ_L::Float64, FHZ_R::Float64,
+                              J_L::Float64, 
+                              J_R::Float64, 
+                             Hr_L::Float64, Hr_R::Float64,
+                             HZ_L::Float64, HZ_R::Float64,
+                             λ1_L::Float64, 
+                             λ1_R::Float64,
+                             λ3_L::Float64, 
+                             λ3_R::Float64,
+                              τ_L::Float64,
+                              τ_R::Float64,
+                              J_i::Float64, J_ip1::Float64 )
 
     # Wavespeeds (in units of c̃) from eigenvalues:
-    S_R     = max( max( λ3_L, λ3_R ), 0.0 )
-    S_L     = min( min( λ1_L, λ1_R ), 0.0 )
+    S_R          = max( max( λ3_L, λ3_R ), 0.0 )
+    S_L          = min( min( λ1_L, λ1_R ), 0.0 )
 
-    # Effective cell optical depth:
-    τ_cell  = τ_L + τ_R
+    # Pre-compute some quantities:
+    S_R_mult_S_L = S_R * S_L 
+    inv_ΔS       = 1 / ( S_R - S_L ) 
 
-    # Optical depth correction:
-    #ϵ       = Getϵ( τ_cell )
-    #ϵ_sq    = ϵ * ϵ
+    # Get the reduced flux factor f_{i+1/2} = ( f_L + F_R ) / 2:
+    f_L          = sqrt( Hr_L * Hr_L  +  HZ_L * HZ_L ) / max( J_L, Jeps )
+    f_R          = sqrt( Hr_R * Hr_R  +  HZ_R * HZ_R ) / max( J_R, Jeps )
+    f_interface  = 0.5 * ( f_L + f_R )
+    oneminusf    = max( 1 - f_interface, 0.0 )
 
-    # HLL flux, with corrections in the optically thick limit:
-    #F_H     = ( ( ϵ_sq * ( S_R * F_L  -  S_L * F_R )  +  ϵ * S_R * S_L * ( H_R - H_L ) ) / ( S_R - S_L )
-
-    #        +  max( 1 - ϵ_sq, 0.0 ) * 0.5 * ( F_L  +  F_R ) )
-
-    #F_H     = ( ϵ * ( ( S_R * F_L  -  S_L * F_R )  +  ϵ * S_R * S_L * ( H_R - H_L ) ) / ( S_R - S_L )
-
-    #         +  max( 1 - ϵ, 0.0 ) * 0.5 * ( F_L  +  F_R ) )
-
-    F_H =  ( ( S_R * F_L  -  S_L * F_R )  +  S_R * S_L * ( H_R - H_L ) ) / ( S_R - S_L )
-
-    return F_H
-end
-
-
-""" The HLL flux for J (ignoring velocity advection), corrected so 
-    that the asymptotic diffusion limit is obtained when the cell 
-    optical depth is ≳ 1. """
-@inline function GetFluxHLL_J( F_L::Float64, F_R::Float64,
-                                         J_L::Float64, J_R::Float64,
-                                        λ1_L::Float64, λ1_R::Float64,
-                                        λ3_L::Float64, λ3_R::Float64,
-                                         τ_L::Float64,  τ_R::Float64,
-                                       J_ip1::Float64,  J_i::Float64
-                                         )
-
-    # Effective cell optical depth:
-    τ_cell   = τ_L + τ_R
-
-    # Wavespeeds (in units of c̃) from eigenvalues:
-    S_R      = max( max( λ3_L, λ3_R ), 0.0 )
-    S_L      = min( min( λ1_L, λ1_R ), 0.0 )
-
-    # Optical depth correction:
-    f_L      = abs(F_L) / J_L
-    f_R      = abs(F_R) / J_R
-    ϵ        = Getϵ( τ_cell, S_R, S_L, f_L, f_R )
+    # Effective cell optical depth & correction factor for diffusion limit:
+    τ_cell       = τ_L + τ_R 
+    ϵ            = min( 1, 1 / ( oneminusf * τ_cell ) )
+    oneminusϵ    = max( 1 - ϵ, 0.0 )
 
     # Interface flux for J:
-    F_J      =  ϵ * ( ( S_R * F_L  -  S_L * F_R ) +  S_R * S_L * ( J_R - J_L ) ) / ( S_R - S_L )
-    
-    return F_J
+    F_J          = ( ( S_R * FJ_L  -  S_L * FJ_R )  +  ϵ * S_R_mult_S_L * ( J_R - J_L ) ) * inv_ΔS
+    if ϵ < 1
+        # Fick's law flux in the isotropic diffusion limit:
+        Fdiff = - ( J_ip1 - J_i ) / ( 3 * τ_cell )
+        # Limit actual numerical flux to physically reasonable values:
+        F_J   = MinMod( F_J, ψ_fluxlimiter * Fdiff )
+    end
+
+    # Flux for H_r and H_Z:
+    F_Hrdiff     = 0.5 * ( FHr_L + FHr_R ) 
+    F_Hr         = ϵ * ( ( S_R * FHr_L  -  S_L * FHr_R )  +  S_R_mult_S_L * ( Hr_R - Hr_L ) ) * inv_ΔS  +  oneminusϵ * F_Hrdiff
+
+    F_HZdiff     = 0.5 * ( FHZ_L + FHZ_R ) 
+    F_HZ         = ϵ * ( ( S_R * FHZ_L  -  S_L * FHZ_R )  +  S_R_mult_S_L * ( HZ_R - HZ_L ) ) * inv_ΔS  +  oneminusϵ * F_HZdiff 
+
+    return F_J, F_Hr, F_HZ
 end
 
 
@@ -302,9 +272,9 @@ end
                                       J::AbstractArray{Float64,2},
                                     H_r::AbstractArray{Float64,2},
                                     H_Z::AbstractArray{Float64,2},
-                                   D_rr::AbstractArray{Float64,2},
-                                   D_ZZ::AbstractArray{Float64,2},
-                                   D_rZ::AbstractArray{Float64,2},
+                                   D_rr::AbstractArray{TypeOfD,2},
+                                   D_ZZ::AbstractArray{TypeOfD,2},
+                                   D_rZ::AbstractArray{TypeOfD,2},
                             K_ϕϕ_iphalf::AbstractArray{Float64,2},
                             K_ϕϕ_imhalf::AbstractArray{Float64,2},
                                     F_r::AbstractArray{Float64,2},
@@ -328,7 +298,7 @@ end
                               BC_r_left::Symbol,
                              BC_r_right::Symbol,
                                        ::Val{:Threaded}  # Threaded version 
-                                      )
+                                      )  where {TypeOfD<:AbstractFloat}
 
     N_r, N_Z = size( J )
     dN_r     = 1:N_r 
@@ -407,12 +377,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at i = 1/2:
-            F_r[1,j]     = GetFluxHLL_J( Hr_L, Hr_R, J_L, J_R,   λ1_L, λ1_R, λ3_L, λ3_R,   
-                                         τ_L, τ_R,  J[1,j], J_0 )                             # Radial flux of J at i = 1/2
-            F_r_Hr[1,j]  = GetFluxHLL_H( Krr_L, Krr_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                         τ_L, τ_R, )                                          # Radial flux of H_r at i = 1/2
-            F_r_HZ[1,j]  = GetFluxHLL_H( KrZ_L, KrZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                         τ_L, τ_R, )                                          # Radial flux of H_Z at i = 1/2
+            F_r[1,j], F_r_Hr[1,j], F_r_HZ[1,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+                                                             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                             τ_L, τ_R, J_0, J[1,j] )
 
             # Add advection fluxes:
             u_contact    = u_r_star[1,j]
@@ -453,12 +421,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at i = 3/2:
-            F_r[2,j]    = GetFluxHLL_J( Hr_L, Hr_R, J_L, J_R,   λ1_L, λ1_R, λ3_L, λ3_R,   
-                                        τ_L, τ_R,  J[2,j], J[1,j] )                         # Radial flux of J at i = 3/2
-            F_r_Hr[2,j] = GetFluxHLL_H( Krr_L, Krr_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                        τ_L, τ_R, )                                         # Radial flux of H_r at i = 3/2
-            F_r_HZ[2,j] = GetFluxHLL_H( KrZ_L, KrZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                        τ_L, τ_R, )                                         # Radial flux of H_Z at i = 3/2
+            F_r[2,j], F_r_Hr[2,j], F_r_HZ[2,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+                                                             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                             τ_L, τ_R, J[1,j], J[2,j] )
 
             # Add advection fluxes:
             u_contact    = u_r_star[2,j]
@@ -507,20 +473,11 @@ end
                 KrZ_L = D_rZ_L * J_L
                 KrZ_R = D_rZ_R * J_R
 
-                # Radial flux of J:
-                F_r[i+1,j]     = GetFluxHLL_J( Hr_L, Hr_R, J_L, J_R, 
-                                               λ1_L,  λ1_R,  λ3_L,  λ3_R,  
-                                               τ_L,  τ_R,  J[ip1,j], J[i,j] )
-
-                # Radial flux of H_r:
-                F_r_Hr[i+1,j]  = GetFluxHLL_H( Krr_L, Krr_R,
-                                               Hr_L,  Hr_R,
-                                               λ1_L,  λ1_R,  λ3_L,  λ3_R,  τ_L, τ_R, )
-
-                # Radial flux of H_Z:
-                F_r_HZ[i+1,j]  = GetFluxHLL_H( KrZ_L, KrZ_R,
-                                               HZ_L,  HZ_R,
-                                               λ1_L,  λ1_R,  λ3_L,  λ3_R,  τ_L, τ_R, )
+                # Radial flux of J, H_r, and H_Z:
+                F_r[i+1,j], F_r_Hr[i+1,j], F_r_HZ[i+1,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+                                                                       J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                                       λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                                       τ_L, τ_R, J[i,j], J[ip1,j] )
 
                 # Add advection fluxes:
                 u_contact      = u_r_star[i+1,j]
@@ -588,12 +545,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface i = N_r - 1/2:
-            F_r[N_r, j]    = GetFluxHLL_J( Hr_L, Hr_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                           τ_L, τ_R,  J[N_r,j], J[N_r-1,j] )                   # Radial flux of J at i = N_r-1/2
-            F_r_Hr[N_r,j]  = GetFluxHLL_H( Krr_L, Krr_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                           τ_L, τ_R, )                                         # Radial flux of H_r at i = N_r-1/2
-            F_r_HZ[N_r,j]  = GetFluxHLL_H( KrZ_L, KrZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                           τ_L, τ_R, )                                         # Radial flux of H_Z at i = N_r-1/2
+            F_r[N_r,j], F_r_Hr[N_r,j], F_r_HZ[N_r,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+                                                                   J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                                   λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                                   τ_L, τ_R, J[N_r-1,j], J[N_r,j] )
 
             # Add advection fluxes:
             u_contact      = u_r_star[N_r,j]
@@ -638,12 +593,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface i = N_r + 1/2:
-            F_r[N_r+1, j]    = GetFluxHLL_J( Hr_L, Hr_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                             τ_L, τ_R,  J_Np1, J[N_r,j] )                       # Radial flux of J at i = N_r+1/2
-            F_r_Hr[N_r+1,j]  = GetFluxHLL_H( Krr_L, Krr_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                             τ_L, τ_R, )                                        # Radial flux of H_r at i = N_r+1/2
-            F_r_HZ[N_r+1,j]  = GetFluxHLL_H( KrZ_L, KrZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                             τ_L, τ_R, )                                        # Radial flux of H_Z at i = N_r+1/2
+            F_r[N_r+1,j], F_r_Hr[N_r+1,j], F_r_HZ[N_r+1,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+                                                                         J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                                         λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                                         τ_L, τ_R, J[N_r,j], J_Np1 )
 
             # Add advection fluxes:
             u_contact        = u_r_star[N_r+1,j]
@@ -677,16 +630,18 @@ end
                 # If using cylindrical coordinates, add contribution from geometric source term,
                 # (1/c̃) ∂H_r/∂t = K_ϕϕ/r = (1 - D_rr - D_ZZ) * J / r, using,
                 # ⟨1/r⟩ ≡ ∫dV (1/r) / ΔV = 2π * Δr * ΔZ / ΔV = 1 / [( r[i+1] + r[i] ) / 2] (pre-computed)
+
+                Drr = Float64(D_rr[i,j]);  DrZ = Float64(D_rZ[i,j]);  DZZ = Float64(D_ZZ[i,j])
                 if CylindricalCoords 
                     K_ϕϕ_av   = 0.5 * ( K_ϕϕ_imhalf[i,j]  +  K_ϕϕ_iphalf[i,j] )
                     H_r[i,j] += c̃Δt * K_ϕϕ_av * inv_r_cell[i]
 
                     # Also compute D:∇u, needed below:
-                    D_colon_∇u = D_colon_∇u_Cylindrical( D_rr[i,j], D_rZ[i,j], D_ZZ[i,j], 
+                    D_colon_∇u = D_colon_∇u_Cylindrical( Drr, DrZ, DZZ, 
                                                          ∂u_r_∂r[i,j], ∂u_r_∂Z[i,j], ∂u_Z_∂r[i,j], ∂u_Z_∂Z[i,j],
                                                          u_r_over_r[i,j] )
                 else
-                    D_colon_∇u = D_colon_∇u_Cartesian( D_rr[i,j], D_rZ[i,j], D_ZZ[i,j], 
+                    D_colon_∇u = D_colon_∇u_Cartesian( Drr, DrZ, DZZ, 
                                                        ∂u_r_∂r[i,j], ∂u_r_∂Z[i,j], ∂u_Z_∂r[i,j], ∂u_Z_∂Z[i,j] ) 
                 end
 
@@ -709,9 +664,9 @@ end
                                       J::AbstractArray{Float64,2},
                                     H_r::AbstractArray{Float64,2},
                                     H_Z::AbstractArray{Float64,2},
-                                   D_rr::AbstractArray{Float64,2},
-                                   D_ZZ::AbstractArray{Float64,2},
-                                   D_rZ::AbstractArray{Float64,2},
+                                   D_rr::AbstractArray{TypeOfD,2},
+                                   D_ZZ::AbstractArray{TypeOfD,2},
+                                   D_rZ::AbstractArray{TypeOfD,2},
                             K_ϕϕ_iphalf::AbstractArray{Float64,2},
                             K_ϕϕ_imhalf::AbstractArray{Float64,2},
                                     F_r::AbstractArray{Float64,2},
@@ -735,7 +690,7 @@ end
                               BC_r_left::Symbol,
                              BC_r_right::Symbol,
                                        ::Val{:Serial}  # Serial version 
-                                      )
+                                      )  where {TypeOfD<:AbstractFloat}
 
     N_r, N_Z = size( J )
     dN_r     = 1:N_r 
@@ -814,12 +769,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at i = 1/2:
-            F_r[1,j]     = GetFluxHLL_J( Hr_L, Hr_R, J_L, J_R,   λ1_L, λ1_R, λ3_L, λ3_R,   
-                                         τ_L, τ_R,  J[1,j], J_0 )                             # Radial flux of J at i = 1/2
-            F_r_Hr[1,j]  = GetFluxHLL_H( Krr_L, Krr_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                         τ_L, τ_R, )                                          # Radial flux of H_r at i = 1/2
-            F_r_HZ[1,j]  = GetFluxHLL_H( KrZ_L, KrZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                         τ_L, τ_R, )                                          # Radial flux of H_Z at i = 1/2
+            F_r[1,j], F_r_Hr[1,j], F_r_HZ[1,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+                                                             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                             τ_L, τ_R, J_0, J[1,j] )
 
             # Add advection fluxes:
             u_contact    = u_r_star[1,j]
@@ -860,12 +813,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at i = 3/2:
-            F_r[2,j]    = GetFluxHLL_J( Hr_L, Hr_R, J_L, J_R,   λ1_L, λ1_R, λ3_L, λ3_R,   
-                                        τ_L, τ_R,  J[2,j], J[1,j] )                         # Radial flux of J at i = 3/2
-            F_r_Hr[2,j] = GetFluxHLL_H( Krr_L, Krr_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                        τ_L, τ_R, )                                         # Radial flux of H_r at i = 3/2
-            F_r_HZ[2,j] = GetFluxHLL_H( KrZ_L, KrZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                        τ_L, τ_R, )                                         # Radial flux of H_Z at i = 3/2
+            F_r[2,j], F_r_Hr[2,j], F_r_HZ[2,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+                                                             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                             τ_L, τ_R, J[1,j], J[2,j] )
 
             # Add advection fluxes:
             u_contact    = u_r_star[2,j]
@@ -914,20 +865,11 @@ end
                 KrZ_L = D_rZ_L * J_L
                 KrZ_R = D_rZ_R * J_R
 
-                # Radial flux of J:
-                F_r[i+1,j]     = GetFluxHLL_J( Hr_L, Hr_R, J_L, J_R, 
-                                               λ1_L,  λ1_R,  λ3_L,  λ3_R,  
-                                               τ_L,  τ_R,  J[ip1,j], J[i,j] )
-
-                # Radial flux of H_r:
-                F_r_Hr[i+1,j]  = GetFluxHLL_H( Krr_L, Krr_R,
-                                               Hr_L,  Hr_R,
-                                               λ1_L,  λ1_R,  λ3_L,  λ3_R,  τ_L, τ_R, )
-
-                # Radial flux of H_Z:
-                F_r_HZ[i+1,j]  = GetFluxHLL_H( KrZ_L, KrZ_R,
-                                               HZ_L,  HZ_R,
-                                               λ1_L,  λ1_R,  λ3_L,  λ3_R,  τ_L, τ_R, )
+                # Radial flux of J, H_r, and H_Z:
+                F_r[i+1,j], F_r_Hr[i+1,j], F_r_HZ[i+1,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+                                                                       J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                                       λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                                       τ_L, τ_R, J[i,j], J[ip1,j] )
 
                 # Add advection fluxes:
                 u_contact      = u_r_star[i+1,j]
@@ -995,12 +937,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface i = N_r - 1/2:
-            F_r[N_r, j]    = GetFluxHLL_J( Hr_L, Hr_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                           τ_L, τ_R,  J[N_r,j], J[N_r-1,j] )                   # Radial flux of J at i = N_r-1/2
-            F_r_Hr[N_r,j]  = GetFluxHLL_H( Krr_L, Krr_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                           τ_L, τ_R, )                                         # Radial flux of H_r at i = N_r-1/2
-            F_r_HZ[N_r,j]  = GetFluxHLL_H( KrZ_L, KrZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                           τ_L, τ_R, )                                         # Radial flux of H_Z at i = N_r-1/2
+            F_r[N_r,j], F_r_Hr[N_r,j], F_r_HZ[N_r,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+                                                                   J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                                   λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                                   τ_L, τ_R, J[N_r-1,j], J[N_r,j] )
 
             # Add advection fluxes:
             u_contact      = u_r_star[N_r,j]
@@ -1045,12 +985,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface i = N_r + 1/2:
-            F_r[N_r+1, j]    = GetFluxHLL_J( Hr_L, Hr_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                             τ_L, τ_R,  J_Np1, J[N_r,j] )                       # Radial flux of J at i = N_r+1/2
-            F_r_Hr[N_r+1,j]  = GetFluxHLL_H( Krr_L, Krr_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                             τ_L, τ_R, )                                        # Radial flux of H_r at i = N_r+1/2
-            F_r_HZ[N_r+1,j]  = GetFluxHLL_H( KrZ_L, KrZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R,
-                                             τ_L, τ_R, )                                        # Radial flux of H_Z at i = N_r+1/2
+            F_r[N_r+1,j], F_r_Hr[N_r+1,j], F_r_HZ[N_r+1,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+                                                                         J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                                         λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                                         τ_L, τ_R, J[N_r,j], J_Np1 )
 
             # Add advection fluxes:
             u_contact        = u_r_star[N_r+1,j]
@@ -1084,22 +1022,33 @@ end
                 # If using cylindrical coordinates, add contribution from geometric source term,
                 # (1/c̃) ∂H_r/∂t = K_ϕϕ/r = (1 - D_rr - D_ZZ) * J / r, using,
                 # ⟨1/r⟩ ≡ ∫dV (1/r) / ΔV = 2π * Δr * ΔZ / ΔV = 1 / [( r[i+1] + r[i] ) / 2] (pre-computed)
+
+                Drr = Float64(D_rr[i,j]);  DrZ = Float64(D_rZ[i,j]);  DZZ = Float64(D_ZZ[i,j])
                 if CylindricalCoords 
                     @fastmath K_ϕϕ_av    = 0.5 * ( K_ϕϕ_imhalf[i,j]  +  K_ϕϕ_iphalf[i,j] )
                     @fastmath H_r[i,j]  += c̃Δt * K_ϕϕ_av * inv_r_cell[i]
 
                     # Also compute D:∇u, needed below:
-                    D_colon_∇u = D_colon_∇u_Cylindrical( D_rr[i,j], D_rZ[i,j], D_ZZ[i,j], 
+                    D_colon_∇u = D_colon_∇u_Cylindrical( Drr, DrZ, DZZ, 
                                                          ∂u_r_∂r[i,j], ∂u_r_∂Z[i,j], ∂u_Z_∂r[i,j], ∂u_Z_∂Z[i,j],
                                                          u_r_over_r[i,j] )
                 else
-                    D_colon_∇u = D_colon_∇u_Cartesian( D_rr[i,j], D_rZ[i,j], D_ZZ[i,j], 
+                    D_colon_∇u = D_colon_∇u_Cartesian( Drr, DrZ, DZZ, 
                                                        ∂u_r_∂r[i,j], ∂u_r_∂Z[i,j], ∂u_Z_∂r[i,j], ∂u_Z_∂Z[i,j] ) 
                 end
 
                 # Finally, also add the contribution from (1/c̃) ∂J/∂t = - 0.5 × (D:∇u/c) J, where again 
                 # the factor 0.5 is from the even split between r & Z directions. 
-                @fastmath J[i,j] -= 0.5 * (D_colon_∇u * inv_c) * J_stored * c̃Δt
+                J[i,j] = max( J[i,j] - 0.5 * (D_colon_∇u * inv_c) * J_stored * c̃Δt,  Jeps ) 
+
+                # Enforce causality:
+                #f_sq = H_r[i,j] * H_r[i,j]  +  H_Z[i,j] * H_Z[i,j]
+                #if f_sq > J[i,j] * J[i,j]
+                #    inv_f    = 1 / sqrt(f_sq)
+                #    H_r[i,j] = H_r[i,j] * inv_f
+                #    H_Z[i,j] = H_Z[i,j] * inv_f
+                #end
+
             end
             
         end # End of inbounds     
@@ -1117,9 +1066,9 @@ end
                                       J::AbstractArray{Float64,2},
                                     H_r::AbstractArray{Float64,2},
                                     H_Z::AbstractArray{Float64,2},
-                                   D_rr::AbstractArray{Float64,2},
-                                   D_ZZ::AbstractArray{Float64,2},
-                                   D_rZ::AbstractArray{Float64,2},
+                                   D_rr::AbstractArray{TypeOfD,2},
+                                   D_ZZ::AbstractArray{TypeOfD,2},
+                                   D_rZ::AbstractArray{TypeOfD,2},
                                     F_Z::AbstractArray{Float64,2},
                                  F_Z_Hr::AbstractArray{Float64,2},
                                  F_Z_HZ::AbstractArray{Float64,2},
@@ -1140,7 +1089,7 @@ end
                                BC_Z_bot::Symbol,
                                BC_Z_top::Symbol,
                                        ::Val{:Threaded}  # Threaded version
-                                         )
+                                         )  where {TypeOfD<:AbstractFloat}
 
     N_r, N_Z = size( J )
     dN_r     = 1:N_r
@@ -1218,10 +1167,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = 1/2:
-            F_Z[i,1]     = GetFluxHLL_J( HZ_L, HZ_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                         τ_L, τ_R,  J[i,1], J_0 )
-            F_Z_HZ[i,1]  = GetFluxHLL_H( KZZ_L, KZZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
-            F_Z_Hr[i,1]  = GetFluxHLL_H( KrZ_L, KrZ_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
+            F_Z[i,1], F_Z_Hr[i,1], F_Z_HZ[i,1] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+                                                             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                             τ_L, τ_R, J_0, J[i,1] )
 
             # Add advection fluxes:
             u_contact    = u_Z_star[i,1]
@@ -1258,10 +1207,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = 3/2:
-            F_Z[i,2]     = GetFluxHLL_J( HZ_L, HZ_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                         τ_L, τ_R,  J[i,2], J[i,1] )
-            F_Z_HZ[i,2]  = GetFluxHLL_H( KZZ_L, KZZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
-            F_Z_Hr[i,2]  = GetFluxHLL_H( KrZ_L, KrZ_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R ) 
+            F_Z[i,2], F_Z_Hr[i,2], F_Z_HZ[i,2] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+                                                             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                             τ_L, τ_R, J[i,1], J[i,2] )
             
             # Add advection fluxes:
             u_contact    = u_Z_star[i,2]
@@ -1296,9 +1245,10 @@ end
             KrZ_L = D_rZ_L * J_L;   KrZ_R = D_rZ_R * J_R
 
             # Write interior Z-fluxes:
-            F_Z[i,jp1]     = GetFluxHLL_J(  HZ_L, HZ_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R, J[i,jp1], J[i,j] )
-            F_Z_HZ[i,jp1]  = GetFluxHLL_H(  KZZ_L, KZZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
-            F_Z_Hr[i,jp1]  = GetFluxHLL_H(  KrZ_L, KrZ_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
+            F_Z[i,jp1], F_Z_Hr[i,jp1], F_Z_HZ[i,jp1] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+                                                                   J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                                   λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                                   τ_L, τ_R, J[i,j], J[i,jp1] )
 
             # Add advection fluxes:
             u_contact      = u_Z_star[i,jp1]
@@ -1361,10 +1311,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = N_Z - 1/2:
-            F_Z[i,N_Z]     = GetFluxHLL_J( HZ_L, HZ_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                           τ_L, τ_R,  J[i,N_Z], J[i,N_Z-1] )
-            F_Z_HZ[i,N_Z]  = GetFluxHLL_H( KZZ_L, KZZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
-            F_Z_Hr[i,N_Z]  = GetFluxHLL_H( KrZ_L, KrZ_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
+            F_Z[i,N_Z], F_Z_Hr[i,N_Z], F_Z_HZ[i,N_Z] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+                                                                   J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                                   λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                                   τ_L, τ_R, J[i,N_Z-1], J[i,N_Z] )
 
             # Add advection fluxes:
             u_contact      = u_Z_star[i,N_Z]
@@ -1402,10 +1352,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = N_Z + 1/2:
-            F_Z[i,N_Z+1]     = GetFluxHLL_J( HZ_L, HZ_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                             τ_L, τ_R,  J_Np1, J[i,N_Z] )
-            F_Z_HZ[i,N_Z+1]  = GetFluxHLL_H( KZZ_L, KZZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
-            F_Z_Hr[i,N_Z+1]  = GetFluxHLL_H( KrZ_L, KrZ_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )  
+            F_Z[i,N_Z+1], F_Z_Hr[i,N_Z+1], F_Z_HZ[i,N_Z+1] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+                                                                         J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                                         λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                                         τ_L, τ_R, J[i,N_Z], J_Np1 )
             
             # Add advection fluxes:
             u_contact        = u_Z_star[i,N_Z+1]
@@ -1437,18 +1387,21 @@ end
                                                    F_Z_Hr[i,j], F_Z_Hr[i,j+1] )
 
             # Get D:∇u, needed below:
+
+            Drr = Float64(D_rr[i,j]);  DrZ = Float64(D_rZ[i,j]);  DZZ = Float64(D_ZZ[i,j])
             if CylindricalCoords
-                D_colon_∇u = D_colon_∇u_Cylindrical( D_rr[i,j], D_rZ[i,j], D_ZZ[i,j], 
+                D_colon_∇u = D_colon_∇u_Cylindrical( Drr, DrZ, DZZ, 
                                                      ∂u_r_∂r[i,j], ∂u_r_∂Z[i,j], ∂u_Z_∂r[i,j], ∂u_Z_∂Z[i,j],
                                                      u_r_over_r[i,j] )
             else
-                D_colon_∇u = D_colon_∇u_Cartesian( D_rr[i,j], D_rZ[i,j], D_ZZ[i,j], 
+                D_colon_∇u = D_colon_∇u_Cartesian( Drr, DrZ, DZZ, 
                                                    ∂u_r_∂r[i,j], ∂u_r_∂Z[i,j], ∂u_Z_∂r[i,j], ∂u_Z_∂Z[i,j] )
             end
 
             # Finally, also add the contribution from (1/c̃) ∂J/∂t = - 0.5 × (D:∇u/c) J, where again 
             # the factor 0.5 is from the even split between r & Z directions. 
-            J[i,j] -= 0.5 * (D_colon_∇u * inv_c) * J_stored * c̃Δt
+            J[i,j] = max( J[i,j] - 0.5 * (D_colon_∇u * inv_c) * J_stored * c̃Δt,  Jeps ) 
+
         end # End of i-loop 
     end # End of j-loop 
 
@@ -1464,9 +1417,9 @@ end
                                       J::AbstractArray{Float64,2},
                                     H_r::AbstractArray{Float64,2},
                                     H_Z::AbstractArray{Float64,2},
-                                   D_rr::AbstractArray{Float64,2},
-                                   D_ZZ::AbstractArray{Float64,2},
-                                   D_rZ::AbstractArray{Float64,2},
+                                   D_rr::AbstractArray{TypeOfD,2},
+                                   D_ZZ::AbstractArray{TypeOfD,2},
+                                   D_rZ::AbstractArray{TypeOfD,2},
                                     F_Z::AbstractArray{Float64,2},
                                  F_Z_Hr::AbstractArray{Float64,2},
                                  F_Z_HZ::AbstractArray{Float64,2},
@@ -1487,7 +1440,7 @@ end
                                BC_Z_bot::Symbol,
                                BC_Z_top::Symbol,
                                        ::Val{:Serial}  # Serial version
-                                         )
+                                         )  where {TypeOfD<:AbstractFloat}
 
     N_r, N_Z = size( J )
     dN_r     = 1:N_r
@@ -1565,10 +1518,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = 1/2:
-            F_Z[i,1]     = GetFluxHLL_J( HZ_L, HZ_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                         τ_L, τ_R,  J[i,1], J_0 )
-            F_Z_HZ[i,1]  = GetFluxHLL_H( KZZ_L, KZZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
-            F_Z_Hr[i,1]  = GetFluxHLL_H( KrZ_L, KrZ_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
+            F_Z[i,1], F_Z_Hr[i,1], F_Z_HZ[i,1] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+                                                             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                             τ_L, τ_R, J_0, J[i,1] )
 
             # Add advection fluxes:
             u_contact    = u_Z_star[i,1]
@@ -1605,10 +1558,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = 3/2:
-            F_Z[i,2]     = GetFluxHLL_J( HZ_L, HZ_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                         τ_L, τ_R,  J[i,2], J[i,1] )
-            F_Z_HZ[i,2]  = GetFluxHLL_H( KZZ_L, KZZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
-            F_Z_Hr[i,2]  = GetFluxHLL_H( KrZ_L, KrZ_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )  
+            F_Z[i,2], F_Z_Hr[i,2], F_Z_HZ[i,2] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+                                                             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                             τ_L, τ_R, J[i,1], J[i,2] ) 
 
             # Add advection fluxes:
             u_contact    = u_Z_star[i,2]
@@ -1643,9 +1596,10 @@ end
             KrZ_L = D_rZ_L * J_L;   KrZ_R = D_rZ_R * J_R
 
             # Write interior Z-fluxes:
-            F_Z[i,jp1]     = GetFluxHLL_J(HZ_L, HZ_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R, J[i,jp1], J[i,j])
-            F_Z_HZ[i,jp1]  = GetFluxHLL_H(  KZZ_L, KZZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
-            F_Z_Hr[i,jp1]  = GetFluxHLL_H(  KrZ_L, KrZ_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
+            F_Z[i,jp1], F_Z_Hr[i,jp1], F_Z_HZ[i,jp1] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+                                                                   J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                                   λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                                   τ_L, τ_R, J[i,j], J[i,jp1] )
 
             # Add advection fluxes:
             u_contact      = u_Z_star[i,jp1]
@@ -1708,10 +1662,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = N_Z - 1/2:
-            F_Z[i,N_Z]     = GetFluxHLL_J( HZ_L, HZ_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                           τ_L, τ_R,  J[i,N_Z], J[i,N_Z-1] )
-            F_Z_HZ[i,N_Z]  = GetFluxHLL_H( KZZ_L, KZZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
-            F_Z_Hr[i,N_Z]  = GetFluxHLL_H( KrZ_L, KrZ_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
+            F_Z[i,N_Z], F_Z_Hr[i,N_Z], F_Z_HZ[i,N_Z] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+                                                                   J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                                   λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                                   τ_L, τ_R, J[i,N_Z-1], J[i,N_Z] )
 
             # Add advection fluxes:
             u_contact      = u_Z_star[i,N_Z]
@@ -1749,10 +1703,10 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = N_Z + 1/2:
-            F_Z[i,N_Z+1]     = GetFluxHLL_J( HZ_L, HZ_R, J_L, J_R, λ1_L, λ1_R, λ3_L, λ3_R, 
-                                             τ_L, τ_R,  J_Np1, J[i,N_Z] )
-            F_Z_HZ[i,N_Z+1]  = GetFluxHLL_H( KZZ_L, KZZ_R, HZ_L, HZ_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )
-            F_Z_Hr[i,N_Z+1]  = GetFluxHLL_H( KrZ_L, KrZ_R, Hr_L, Hr_R, λ1_L, λ1_R, λ3_L, λ3_R, τ_L, τ_R )  
+            F_Z[i,N_Z+1], F_Z_Hr[i,N_Z+1], F_Z_HZ[i,N_Z+1] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+                                                                         J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
+                                                                         λ1_L, λ1_R, λ3_L, λ3_R,   
+                                                                         τ_L, τ_R, J[i,N_Z], J_Np1 )
             
             # Add advection fluxes:
             u_contact        = u_Z_star[i,N_Z+1]
@@ -1784,18 +1738,28 @@ end
                                                    F_Z_Hr[i,j], F_Z_Hr[i,j+1] )
 
             # Get D:∇u, needed below:
+
+            Drr = Float64(D_rr[i,j]);  DrZ = Float64(D_rZ[i,j]);  DZZ = Float64(D_ZZ[i,j])
             if CylindricalCoords
-                D_colon_∇u = D_colon_∇u_Cylindrical( D_rr[i,j], D_rZ[i,j], D_ZZ[i,j], 
+                D_colon_∇u = D_colon_∇u_Cylindrical( Drr, DrZ, DZZ, 
                                                      ∂u_r_∂r[i,j], ∂u_r_∂Z[i,j], ∂u_Z_∂r[i,j], ∂u_Z_∂Z[i,j],
                                                      u_r_over_r[i,j] )
             else
-                D_colon_∇u = D_colon_∇u_Cartesian( D_rr[i,j], D_rZ[i,j], D_ZZ[i,j], 
+                D_colon_∇u = D_colon_∇u_Cartesian( Drr, DrZ, DZZ, 
                                                    ∂u_r_∂r[i,j], ∂u_r_∂Z[i,j], ∂u_Z_∂r[i,j], ∂u_Z_∂Z[i,j] )
             end
 
             # Finally, also add the contribution from (1/c̃) ∂J/∂t = - 0.5 × (D:∇u/c) J, where again 
             # the factor 0.5 is from the even split between r & Z directions. 
-            @fastmath J[i,j] -= 0.5 * (D_colon_∇u * inv_c) * J_stored * c̃Δt
+            J[i,j] = max( J[i,j] - 0.5 * (D_colon_∇u * inv_c) * J_stored * c̃Δt,  Jeps ) 
+
+            # Enforce causality:
+            #f_sq = H_r[i,j] * H_r[i,j]  +  H_Z[i,j] * H_Z[i,j]
+            #if f_sq > J[i,j] * J[i,j]
+            #    inv_f    = 1 / sqrt(f_sq)
+            #    H_r[i,j] = H_r[i,j] * inv_f
+            #    H_Z[i,j] = H_Z[i,j] * inv_f
+            #end
         end # End of i-loop 
     end # End of j-loop 
 
@@ -1805,17 +1769,14 @@ end
 
 """ This function performs an RK2 step of J and H in the 
     r-direction, over a time-step Δt. """
- function RK2_r!( c̃Δt::Float64,
+ function ForwardEuler_r_ThreadingOrNot!( c̃Δt::Float64,
                            α_F::AbstractArray{Float64,2},
                              J::AbstractArray{Float64,2},
                            H_r::AbstractArray{Float64,2},
                            H_Z::AbstractArray{Float64,2},
-                       J_stage::AbstractArray{Float64,2},  # Array needed to store the old state 
-                     H_r_stage::AbstractArray{Float64,2},  # Array needed to store the old state
-                     H_Z_stage::AbstractArray{Float64,2},  # Array needed to store the old state
-                          D_rr::AbstractArray{Float64,2},
-                          D_ZZ::AbstractArray{Float64,2},
-                          D_rZ::AbstractArray{Float64,2},
+                          D_rr::AbstractArray{TypeOfD,2},
+                          D_ZZ::AbstractArray{TypeOfD,2},
+                          D_rZ::AbstractArray{TypeOfD,2},
                    K_ϕϕ_iphalf::AbstractArray{Float64,2},
                    K_ϕϕ_imhalf::AbstractArray{Float64,2},
                            F_r::AbstractArray{Float64,2},
@@ -1836,26 +1797,11 @@ end
                     u_r_over_r::AbstractArray{Float64,2},
 
              CylindricalCoords::Bool,
-                       UpdateH::Bool,
                      BC_r_left::Symbol,
                     BC_r_right::Symbol,
                               ::Val{:Threaded}             # Threaded version 
-                        )
+                        )  where {TypeOfD<:AbstractFloat}
 
-    N_r, N_Z = size( J )
-    dN_r     = 1:N_r  
-    dN_Z     = 1:N_Z
-
-    # 1) Store old state:
-    @threads for j in dN_Z 
-        @inbounds @simd for i in dN_r 
-            J_stage[i,j]   = J[i,j]
-            H_r_stage[i,j] = H_r[i,j]
-            H_Z_stage[i,j] = H_Z[i,j]
-        end
-    end
-
-    # 2) Forward Euler: Q^n → Q^(1)
     ForwardEuler_r!( c̃Δt, α_F,
                      J, H_r, H_Z,
                      D_rr, D_ZZ, D_rZ,
@@ -1869,57 +1815,20 @@ end
                      BC_r_left, BC_r_right,
                      Val(:Threaded)  )
 
-    if UpdateH
-        # Flux absorption (with BDF1):
-        #@threads for j in dN_Z 
-        #    @inbounds @simd for i in dN_r 
-        #        inv_denom  = 1 / ( 1  +  α_F[i,j] * c̃Δt )
-        #        H_r[i,j]   = H_r[i,j] * inv_denom
-        #        H_Z[i,j]   = H_Z[i,j] * inv_denom
-        #    end
-        #end
-    end
-
-    # 3) Second Forward Euler stage: Q^(1) → Q^(2)
-    ForwardEuler_r!( c̃Δt, α_F,
-                     J, H_r, H_Z,
-                     D_rr, D_ZZ, D_rZ,
-                     K_ϕϕ_iphalf, K_ϕϕ_imhalf,
-                     F_r, F_r_Hr, F_r_HZ,
-                     inv_ΔV, A_r,
-                     r, rCoM,
-                     inv_r_cell,
-                     u_r_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                     CylindricalCoords,
-                     BC_r_left, BC_r_right,
-                     Val(:Threaded)  )
-
-    # 4) Combine to get RK2 update: Q^(n+1) = 0.5 × [ Q^n + Q^(2) ]
-    @threads for j in dN_Z
-        @inbounds @simd for i in dN_r
-            J[i,j]   = 0.5 * ( J_stage[i,j]   + J[i,j] )
-            H_r[i,j] = 0.5 * ( H_r_stage[i,j] + H_r[i,j] )
-            H_Z[i,j] = 0.5 * ( H_Z_stage[i,j] + H_Z[i,j] )
-        end
-    end
-
     return nothing 
 end
 
 
 """ This function performs an RK2 step of J and H in the 
     r-direction, over a time-step Δt. """
- function RK2_r!( c̃Δt::Float64,
+ function ForwardEuler_r_ThreadingOrNot!( c̃Δt::Float64,
                            α_F::AbstractArray{Float64,2},
                              J::AbstractArray{Float64,2},
                            H_r::AbstractArray{Float64,2},
                            H_Z::AbstractArray{Float64,2},
-                       J_stage::AbstractArray{Float64,2},  # Array needed to store the old state 
-                     H_r_stage::AbstractArray{Float64,2},  # Array needed to store the old state
-                     H_Z_stage::AbstractArray{Float64,2},  # Array needed to store the old state
-                          D_rr::AbstractArray{Float64,2},
-                          D_ZZ::AbstractArray{Float64,2},
-                          D_rZ::AbstractArray{Float64,2},
+                          D_rr::AbstractArray{TypeOfD,2},
+                          D_ZZ::AbstractArray{TypeOfD,2},
+                          D_rZ::AbstractArray{TypeOfD,2},
                    K_ϕϕ_iphalf::AbstractArray{Float64,2},
                    K_ϕϕ_imhalf::AbstractArray{Float64,2},
                            F_r::AbstractArray{Float64,2},
@@ -1940,26 +1849,11 @@ end
                     u_r_over_r::AbstractArray{Float64,2},
 
              CylindricalCoords::Bool,
-                       UpdateH::Bool,
                      BC_r_left::Symbol,
                     BC_r_right::Symbol,
                               ::Val{:Serial}             # Serial version 
-                        )
+                        )  where {TypeOfD<:AbstractFloat}
 
-    N_r, N_Z = size( J )
-    dN_r     = 1:N_r  
-    dN_Z     = 1:N_Z
-
-    # 1) Store old state:
-    for j in dN_Z 
-        @inbounds @simd for i in dN_r 
-            J_stage[i,j]   = J[i,j]
-            H_r_stage[i,j] = H_r[i,j]
-            H_Z_stage[i,j] = H_Z[i,j]
-        end
-    end
-
-    # 2) Forward Euler: Q^n → Q^(1)
     ForwardEuler_r!( c̃Δt, α_F,
                      J, H_r, H_Z,
                      D_rr, D_ZZ, D_rZ,
@@ -1973,72 +1867,20 @@ end
                      BC_r_left, BC_r_right,
                      Val(:Serial)  )
 
-    if UpdateH
-        # Flux absorption (with BDF1):
-        #for j in dN_Z 
-        #    @inbounds @simd for i in dN_r 
-        #        inv_denom  = 1 / ( 1  +  α_F[i,j] * c̃Δt )
-        #        H_r[i,j]   = H_r[i,j] * inv_denom
-        #        H_Z[i,j]   = H_Z[i,j] * inv_denom
-
-                # Ensure J ≥ H:
-        #        Hmag_squared = H_r[i,j] * H_r[i,j]  +  H_Z[i,j] * H_Z[i,j]
-        #        fcorr        = min( 1.0,  J[i,j] / sqrt( Hmag_squared ) )
-        #        H_r[i,j]     = H_r[i,j] * fcorr
-        #        H_Z[i,j]     = H_Z[i,j] * fcorr
-        #    end
-        #end
-    end
-
-    # 3) Second Forward Euler stage: Q^(1) → Q^(2)
-    #ForwardEuler_r!( c̃Δt, α_F,
-    #                 J, H_r, H_Z,
-    #                 D_rr, D_ZZ, D_rZ,
-    #                 K_ϕϕ_iphalf, K_ϕϕ_imhalf,
-    #                 F_r, F_r_Hr, F_r_HZ,
-    #                 inv_ΔV, A_r,
-    #                 r, rCoM,
-    #                 inv_r_cell,
-    #                 u_r_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-    #                 CylindricalCoords,
-    #                 BC_r_left, BC_r_right,
-    #                 Val(:Serial)  )
-
-
-    # 4) Combine to get RK2 update: Q^(n+1) = 0.5 × [ Q^n + Q^(2) ]
-    #for j in dN_Z
-    #    @inbounds @simd for i in dN_r
-    #        J[i,j]     = 0.5 * ( J_stage[i,j]   + J[i,j] )
-
-    #        inv_denom  = 1 / ( 1  +  0.5 * α_F[i,j] * c̃Δt )
-    #        H_r[i,j]   = 0.5 * ( H_r_stage[i,j] + H_r[i,j] ) * inv_denom
-    #        H_Z[i,j]   = 0.5 * ( H_Z_stage[i,j] + H_Z[i,j] ) * inv_denom
-
-            # Ensure J ≥ H:
-    #        Hmag_squared = H_r[i,j] * H_r[i,j]  +  H_Z[i,j] * H_Z[i,j]
-    #        fcorr        = min( 1.0,  J[i,j] / sqrt( Hmag_squared ) )
-    #        H_r[i,j]     = H_r[i,j] * fcorr
-    #        H_Z[i,j]     = H_Z[i,j] * fcorr
-    #    end
-    #end
-
     return nothing 
 end
 
 
 """ This function performs an RK2 step of J and H in the 
     Z-direction, over a time-step Δt. """
- function RK2_Z!( c̃Δt::Float64,
+ function ForwardEuler_Z_ThreadingOrNot!( c̃Δt::Float64,
                            α_F::AbstractArray{Float64,2},
                              J::AbstractArray{Float64,2},
                            H_r::AbstractArray{Float64,2},
                            H_Z::AbstractArray{Float64,2},
-                       J_stage::AbstractArray{Float64,2},  # Array needed to store the old state 
-                     H_r_stage::AbstractArray{Float64,2},  # Array needed to store the old state
-                     H_Z_stage::AbstractArray{Float64,2},  # Array needed to store the old state
-                          D_rr::AbstractArray{Float64,2},
-                          D_ZZ::AbstractArray{Float64,2},
-                          D_rZ::AbstractArray{Float64,2},
+                          D_rr::AbstractArray{TypeOfD,2},
+                          D_ZZ::AbstractArray{TypeOfD,2},
+                          D_rZ::AbstractArray{TypeOfD,2},
                            F_Z::AbstractArray{Float64,2},
                         F_Z_Hr::AbstractArray{Float64,2},
                         F_Z_HZ::AbstractArray{Float64,2},
@@ -2056,26 +1898,11 @@ end
                     u_r_over_r::AbstractArray{Float64,2},
 
              CylindricalCoords::Bool,
-                       UpdateH::Bool,
                       BC_Z_bot::Symbol,
                       BC_Z_top::Symbol,
                               ::Val{:Threaded}             # Threaded version 
-                        )
+                        )  where {TypeOfD<:AbstractFloat}
 
-    N_r, N_Z = size( J )
-    dN_r     = 1:N_r  
-    dN_Z     = 1:N_Z
-
-    # 1) Store old state:
-    @threads for j in dN_Z 
-        @inbounds @simd for i in dN_r 
-            J_stage[i,j]   = J[i,j]
-            H_r_stage[i,j] = H_r[i,j]
-            H_Z_stage[i,j] = H_Z[i,j]
-        end
-    end
-
-    # 2) Forward Euler: Q^n → Q^(1)
     ForwardEuler_Z!( c̃Δt, α_F,
                      J, H_r, H_Z,
                      D_rr, D_ZZ, D_rZ,
@@ -2085,37 +1912,6 @@ end
                      u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
                      CylindricalCoords, BC_Z_bot, BC_Z_top,
                      Val(:Threaded) )
-
-    if UpdateH
-        # Flux absorption (with BDF1):
-        #@threads for j in dN_Z 
-        #    @inbounds @simd for i in dN_r 
-        #        inv_denom  = 1 / ( 1  +  α_F[i,j] * c̃Δt )
-        #        H_r[i,j]   = H_r[i,j] * inv_denom
-        #        H_Z[i,j]   = H_Z[i,j] * inv_denom
-        #    end
-        #end
-    end
-
-    # 3) Second Forward Euler stage: Q^(1) → Q^(2)
-    ForwardEuler_Z!( c̃Δt, α_F,
-                     J, H_r, H_Z,
-                     D_rr, D_ZZ, D_rZ,
-                     F_Z, F_Z_Hr, F_Z_HZ,
-                     inv_ΔV, A_Z,
-                     Z, ZCoM,
-                     u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                     CylindricalCoords, BC_Z_bot, BC_Z_top,
-                     Val(:Threaded) )
-
-    # 4) Combine to get RK2 update: Q^(n+1) = 0.5 × [ Q^n + Q^(2) ]
-    @threads for j in dN_Z
-        @inbounds @simd for i in dN_r
-            J[i,j]   = 0.5 * ( J_stage[i,j]   + J[i,j] )
-            H_r[i,j] = 0.5 * ( H_r_stage[i,j] + H_r[i,j] )
-            H_Z[i,j] = 0.5 * ( H_Z_stage[i,j] + H_Z[i,j] )
-        end
-    end
 
     return nothing 
 end
@@ -2123,17 +1919,14 @@ end
 
 """ This function performs an RK2 step of J and H in the 
     Z-direction, over a time-step Δt. """
- function RK2_Z!( c̃Δt::Float64,
+ function ForwardEuler_Z_ThreadingOrNot!( c̃Δt::Float64,
                            α_F::AbstractArray{Float64,2},
                              J::AbstractArray{Float64,2},
                            H_r::AbstractArray{Float64,2},
                            H_Z::AbstractArray{Float64,2},
-                       J_stage::AbstractArray{Float64,2},  # Array needed to store the old state 
-                     H_r_stage::AbstractArray{Float64,2},  # Array needed to store the old state
-                     H_Z_stage::AbstractArray{Float64,2},  # Array needed to store the old state
-                          D_rr::AbstractArray{Float64,2},
-                          D_ZZ::AbstractArray{Float64,2},
-                          D_rZ::AbstractArray{Float64,2},
+                          D_rr::AbstractArray{TypeOfD,2},
+                          D_ZZ::AbstractArray{TypeOfD,2},
+                          D_rZ::AbstractArray{TypeOfD,2},
                            F_Z::AbstractArray{Float64,2},
                         F_Z_Hr::AbstractArray{Float64,2},
                         F_Z_HZ::AbstractArray{Float64,2},
@@ -2151,26 +1944,11 @@ end
                     u_r_over_r::AbstractArray{Float64,2},
 
              CylindricalCoords::Bool,
-                       UpdateH::Bool,
                       BC_Z_bot::Symbol,
                       BC_Z_top::Symbol,
                               ::Val{:Serial}             # Serial version 
-                        )
+                        )  where {TypeOfD<:AbstractFloat}
 
-    N_r, N_Z = size( J )
-    dN_r     = 1:N_r  
-    dN_Z     = 1:N_Z
-
-    # 1) Store old state:
-    for j in dN_Z 
-        @inbounds @simd for i in dN_r 
-            J_stage[i,j]   = J[i,j]
-            H_r_stage[i,j] = H_r[i,j]
-            H_Z_stage[i,j] = H_Z[i,j]
-        end
-    end
-
-    # 2) Forward Euler: Q^n → Q^(1)
     ForwardEuler_Z!( c̃Δt, α_F,
                      J, H_r, H_Z,
                      D_rr, D_ZZ, D_rZ,
@@ -2180,51 +1958,6 @@ end
                      u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
                      CylindricalCoords, BC_Z_bot, BC_Z_top,
                      Val(:Serial) )
-
-    if UpdateH
-        # Flux absorption (with BDF1):
-        #for j in dN_Z 
-        #    @inbounds @simd for i in dN_r 
-                #inv_denom  = 1 / ( 1  +  α_F[i,j] * c̃Δt )
-                #H_r[i,j]   = H_r[i,j] * inv_denom
-                #H_Z[i,j]   = H_Z[i,j] * inv_denom
-
-                # Ensure J ≥ H:
-                #Hmag_squared = H_r[i,j] * H_r[i,j]  +  H_Z[i,j] * H_Z[i,j]
-                #fcorr        = min( 1.0,  J[i,j] / sqrt( Hmag_squared ) )
-                #H_r[i,j]     = H_r[i,j] * fcorr
-                #H_Z[i,j]     = H_Z[i,j] * fcorr
-        #    end
-        #end
-    end
-
-    # 3) Second Forward Euler stage: Q^(1) → Q^(2)
-    #ForwardEuler_Z!( c̃Δt, α_F,
-    #                 J, H_r, H_Z,
-    #                 D_rr, D_ZZ, D_rZ,
-    #                 F_Z, F_Z_Hr, F_Z_HZ,
-    #                 inv_ΔV, A_Z,
-    #                 Z, ZCoM,
-    #                 u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-    #                 CylindricalCoords, BC_Z_bot, BC_Z_top,
-    #                 Val(:Serial) )
-
-    # 4) Combine to get RK2 update: Q^(n+1) = 0.5 × [ Q^n + Q^(2) ]
-    #for j in dN_Z
-    #    @inbounds @simd for i in dN_r
-    #        J[i,j]     = 0.5 * ( J_stage[i,j]   + J[i,j] )
-
-    #        inv_denom  = 1 / ( 1  +  0.5 * α_F[i,j] * c̃Δt )
-    #        H_r[i,j]   = 0.5 * ( H_r_stage[i,j] + H_r[i,j] ) * inv_denom
-    #        H_Z[i,j]   = 0.5 * ( H_Z_stage[i,j] + H_Z[i,j] ) * inv_denom
-
-    #        # Ensure J ≥ H:
-    #        Hmag_squared = H_r[i,j] * H_r[i,j]  +  H_Z[i,j] * H_Z[i,j]
-    #        fcorr        = min( 1.0,  J[i,j] / sqrt( Hmag_squared ) )
-    #        H_r[i,j]     = H_r[i,j] * fcorr
-    #        H_Z[i,j]     = H_Z[i,j] * fcorr
-    #    end
-    #end
 
     return nothing 
 end
@@ -2241,13 +1974,9 @@ const ThreadsOrNot = Union{Val{:Threaded}, Val{:Serial}}
                                         H_r::AbstractArray{Float64, 2}, # r-direction component of H  (N_r x N_Z)
                                         H_Z::AbstractArray{Float64, 2}, # Z-direction component of H  (N_r x N_Z)
 
-                                    J_stage::AbstractArray{Float64,2},  # Array needed for RK2        (N_r x N_Z)
-                                  H_r_stage::AbstractArray{Float64,2},  # Array needed for RK2        (N_r x N_Z)
-                                  H_Z_stage::AbstractArray{Float64,2},  # Array needed for RK2        (N_r x N_Z)
-
-                                       D_rr::AbstractArray{Float64, 2}, # rr-components of the Eddington tensor (N_r x N_Z)
-                                       D_ZZ::AbstractArray{Float64, 2}, # ZZ-components of the Eddington tensor (N_r x N_Z)
-                                       D_rZ::AbstractArray{Float64, 2}, # rZ-components of the Eddington tensor (N_r x N_Z)
+                                       D_rr::AbstractArray{TypeOfD, 2}, # rr-components of the Eddington tensor (N_r x N_Z)
+                                       D_ZZ::AbstractArray{TypeOfD, 2}, # ZZ-components of the Eddington tensor (N_r x N_Z)
+                                       D_rZ::AbstractArray{TypeOfD, 2}, # rZ-components of the Eddington tensor (N_r x N_Z)
                                 K_ϕϕ_iphalf::AbstractArray{Float64, 2}, # ϕϕ-components of K at i+1/2           (N_r x N_Z)
                                 K_ϕϕ_imhalf::AbstractArray{Float64, 2}, # ϕϕ-components of K at i-1/2           (N_r x N_Z)
 
@@ -2278,7 +2007,6 @@ const ThreadsOrNot = Union{Val{:Threaded}, Val{:Serial}}
                                  u_r_over_r::AbstractArray{Float64,2},
                                  
                                  UpdateJold::Bool         = true,          # Whether to update J_old = J at the end (should be false for stellar RT)
-                                    UpdateH::Bool         = false,
 
                           CylindricalCoords::Bool         = true,          # Cylindrical coordinates assumed if true, otherwise Cartesian 
                                   BC_r_left::Symbol       = :Reflect,      # Boundary condition at i = 1/2 
@@ -2286,9 +2014,9 @@ const ThreadsOrNot = Union{Val{:Threaded}, Val{:Serial}}
                                    BC_Z_bot::Symbol       = :Reflect,      # Boundary condition at j = 1/2 
                                    BC_Z_top::Symbol       = :Outflow,      # Boundary condition at j = N_Z + 1/2
                                   Threading::ThreadsOrNot = Val(:Threaded)
-                                            )
+                                            )  where {TypeOfD<:AbstractFloat}
 
-    c̃Δt_half = c̃Δt / 2
+    c̃Δt_half = 0.5 * c̃Δt 
 
     ################################################################################
     ############                                     ###############################
@@ -2296,14 +2024,18 @@ const ThreadsOrNot = Union{Val{:Threaded}, Val{:Serial}}
     ############                                     ###############################
     ################################################################################
 
-    RK2_r!( c̃Δt_half, α_F, J, H_r, H_Z,
-            J_stage, H_r_stage,  H_Z_stage,  
-            D_rr, D_ZZ, D_rZ, K_ϕϕ_iphalf, K_ϕϕ_imhalf,
-            F_r, F_r_Hr, F_r_HZ, inv_ΔV, A_r,
-            r, rCoM,  inv_r_cell,
-            u_r_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-            CylindricalCoords, UpdateH, BC_r_left, BC_r_right,
-            Threading )
+    ForwardEuler_r_ThreadingOrNot!( c̃Δt_half, α_F,
+                     J, H_r, H_Z,
+                     D_rr, D_ZZ, D_rZ,
+                     K_ϕϕ_iphalf, K_ϕϕ_imhalf,
+                     F_r, F_r_Hr, F_r_HZ,
+                     inv_ΔV, A_r,
+                     r, rCoM,
+                     inv_r_cell,
+                     u_r_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+                     CylindricalCoords,
+                     BC_r_left, BC_r_right,
+                     Val(:Threaded)  )
 
     ################################################################################
     ############                                     ###############################
@@ -2311,13 +2043,12 @@ const ThreadsOrNot = Union{Val{:Threaded}, Val{:Serial}}
     ############                                     ###############################
     ################################################################################
 
-    RK2_Z!( c̃Δt, α_F, J, H_r, H_Z,
-            J_stage, H_r_stage, H_Z_stage, 
+    ForwardEuler_Z_ThreadingOrNot!( c̃Δt, α_F, J, H_r, H_Z,
             D_rr, D_ZZ, D_rZ,
             F_Z, F_Z_Hr, F_Z_HZ,
             inv_ΔV, A_Z, Z, ZCoM,
             u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-            CylindricalCoords, UpdateH, BC_Z_bot, BC_Z_top,
+            CylindricalCoords, BC_Z_bot, BC_Z_top,
             Threading )
 
     ################################################################################
@@ -2326,13 +2057,12 @@ const ThreadsOrNot = Union{Val{:Threaded}, Val{:Serial}}
     ############                                     ###############################
     ################################################################################
 
-    RK2_r!( c̃Δt_half, α_F, J, H_r, H_Z,
-            J_stage, H_r_stage,  H_Z_stage,  
+    ForwardEuler_r_ThreadingOrNot!( c̃Δt_half, α_F, J, H_r, H_Z,
             D_rr, D_ZZ, D_rZ, K_ϕϕ_iphalf, K_ϕϕ_imhalf,
             F_r, F_r_Hr, F_r_HZ, inv_ΔV, A_r,
             r, rCoM,  inv_r_cell,
             u_r_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-            CylindricalCoords, UpdateH, BC_r_left, BC_r_right,
+            CylindricalCoords, BC_r_left, BC_r_right,
             Threading )
 
     # Update J_old if the option is turned on 
@@ -2354,13 +2084,9 @@ end
                                         H_r::AbstractArray{Float64, 2}, # r-direction component of H  (N_r x N_Z)
                                         H_Z::AbstractArray{Float64, 2}, # Z-direction component of H  (N_r x N_Z)
 
-                                    J_stage::AbstractArray{Float64,2},  # Array needed for RK2        (N_r x N_Z)
-                                  H_r_stage::AbstractArray{Float64,2},  # Array needed for RK2        (N_r x N_Z)
-                                  H_Z_stage::AbstractArray{Float64,2},  # Array needed for RK2        (N_r x N_Z)
-
-                                       D_rr::AbstractArray{Float64, 2}, # rr-components of the Eddington tensor (N_r x N_Z)
-                                       D_ZZ::AbstractArray{Float64, 2}, # ZZ-components of the Eddington tensor (N_r x N_Z)
-                                       D_rZ::AbstractArray{Float64, 2}, # rZ-components of the Eddington tensor (N_r x N_Z)
+                                       D_rr::AbstractArray{TypeOfD, 2}, # rr-components of the Eddington tensor (N_r x N_Z)
+                                       D_ZZ::AbstractArray{TypeOfD, 2}, # ZZ-components of the Eddington tensor (N_r x N_Z)
+                                       D_rZ::AbstractArray{TypeOfD, 2}, # rZ-components of the Eddington tensor (N_r x N_Z)
                                 K_ϕϕ_iphalf::AbstractArray{Float64, 2}, # ϕϕ-components of K at i+1/2           (N_r x N_Z)
                                 K_ϕϕ_imhalf::AbstractArray{Float64, 2}, # ϕϕ-components of K at i-1/2           (N_r x N_Z)
 
@@ -2391,7 +2117,6 @@ end
                                  u_r_over_r::AbstractArray{Float64,2},
                                  
                                  UpdateJold::Bool         = true,           # Whether to update J_old = J at the end (should be false for stellar RT)
-                                    UpdateH::Bool         = false,
 
                           CylindricalCoords::Bool         = true,           # Cylindrical coordinates assumed if true, otherwise Cartesian 
                                   BC_r_left::Symbol       = :Reflect,       # Boundary condition at i = 1/2 
@@ -2399,7 +2124,7 @@ end
                                    BC_Z_bot::Symbol       = :Reflect,       # Boundary condition at j = 1/2 
                                    BC_Z_top::Symbol       = :Outflow,       # Boundary condition at j = N_Z + 1/2
                                   Threading::ThreadsOrNot = Val(:Threaded)
-                                                 )
+                                                 )  where {TypeOfD<:AbstractFloat}
 
     c̃Δt_half = c̃Δt / 2
 
@@ -2409,13 +2134,12 @@ end
     ############                                     ###############################
     ################################################################################
 
-    RK2_Z!( c̃Δt_half, α_F, J, H_r, H_Z,
-            J_stage, H_r_stage, H_Z_stage, 
+    ForwardEuler_Z_ThreadingOrNot!( c̃Δt_half, α_F, J, H_r, H_Z,
             D_rr, D_ZZ, D_rZ,
             F_Z, F_Z_Hr, F_Z_HZ,
             inv_ΔV, A_Z, Z, ZCoM,
             u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-            CylindricalCoords, UpdateH, BC_Z_bot, BC_Z_top,
+            CylindricalCoords, BC_Z_bot, BC_Z_top,
             Threading )
 
     ################################################################################
@@ -2424,13 +2148,12 @@ end
     ############                                     ###############################
     ################################################################################
 
-    RK2_r!( c̃Δt, α_F, J, H_r, H_Z,
-            J_stage, H_r_stage,  H_Z_stage,  
+    ForwardEuler_r_ThreadingOrNot!( c̃Δt, α_F, J, H_r, H_Z,
             D_rr, D_ZZ, D_rZ, K_ϕϕ_iphalf, K_ϕϕ_imhalf,
             F_r, F_r_Hr, F_r_HZ, inv_ΔV, A_r,
             r, rCoM,  inv_r_cell,
             u_r_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-            CylindricalCoords, UpdateH, BC_r_left, BC_r_right,
+            CylindricalCoords, BC_r_left, BC_r_right,
             Threading )
 
     ################################################################################
@@ -2439,13 +2162,12 @@ end
     ############                                     ###############################
     ################################################################################
 
-    RK2_Z!( c̃Δt_half, α_F, J, H_r, H_Z,
-            J_stage, H_r_stage, H_Z_stage, 
+    ForwardEuler_Z_ThreadingOrNot!( c̃Δt_half, α_F, J, H_r, H_Z,
             D_rr, D_ZZ, D_rZ,
             F_Z, F_Z_Hr, F_Z_HZ,
             inv_ΔV, A_Z, Z, ZCoM,
             u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-            CylindricalCoords, UpdateH, BC_Z_bot, BC_Z_top,
+            CylindricalCoords, BC_Z_bot, BC_Z_top,
             Threading )
 
     # Update J_old if the option is turned on 
@@ -2468,13 +2190,9 @@ function AdvectJandH!( c̃Δt::Float64,                   # c̃ × Δt
                        H_r::AbstractArray{Float64, 2}, # r-direction component of H  (N_r x N_Z)
                        H_Z::AbstractArray{Float64, 2}, # Z-direction component of H  (N_r x N_Z)
 
-                   J_stage::AbstractArray{Float64, 2}, # Array needed for RK2        (N_r x N_Z)
-                 H_r_stage::AbstractArray{Float64, 2}, # Array needed for RK2        (N_r x N_Z)
-                 H_Z_stage::AbstractArray{Float64, 2}, # Array needed for RK2        (N_r x N_Z)
-
-                      D_rr::AbstractArray{Float64, 2}, # rr-components of the Eddington tensor (N_r x N_Z)
-                      D_ZZ::AbstractArray{Float64, 2}, # ZZ-components of the Eddington tensor (N_r x N_Z)
-                      D_rZ::AbstractArray{Float64, 2}, # rZ-components of the Eddington tensor (N_r x N_Z)
+                      D_rr::AbstractArray{TypeOfD, 2}, # rr-components of the Eddington tensor (N_r x N_Z)
+                      D_ZZ::AbstractArray{TypeOfD, 2}, # ZZ-components of the Eddington tensor (N_r x N_Z)
+                      D_rZ::AbstractArray{TypeOfD, 2}, # rZ-components of the Eddington tensor (N_r x N_Z)
                K_ϕϕ_iphalf::AbstractArray{Float64, 2}, # ϕϕ-components of K at i+1/2           (N_r x N_Z)
                K_ϕϕ_imhalf::AbstractArray{Float64, 2}, # ϕϕ-components of K at i-1/2           (N_r x N_Z)
 
@@ -2505,7 +2223,6 @@ function AdvectJandH!( c̃Δt::Float64,                   # c̃ × Δt
                 u_r_over_r::AbstractArray{Float64,2},
                                  
                 UpdateJold::Bool         = true,           # Whether to update J_old = J at the end (should be false for stellar RT)
-                   UpdateH::Bool         = false,
 
          CylindricalCoords::Bool         = true,           # Cylindrical coordinates assumed if true, otherwise Cartesian 
                  BC_r_left::Symbol       = :Reflect,       # Boundary condition at i = 1/2 
@@ -2514,12 +2231,11 @@ function AdvectJandH!( c̃Δt::Float64,                   # c̃ × Δt
                   BC_Z_top::Symbol       = :Outflow,       # Boundary condition at j = N_Z + 1/2 
                     rfirst::Bool         = true,
                  Threading::ThreadsOrNot = Val(:Threaded)
-                                   )
+                                   )  where {TypeOfD<:AbstractFloat}
 
     if rfirst 
         # In this case we use the order half-r, full-Z, half-r:
         AdvectJandH_rfirst!( c̃Δt, α_F, J, J_old, H_r, H_Z, 
-                             J_stage, H_r_stage, H_Z_stage,
                              D_rr, D_ZZ, D_rZ, 
                              K_ϕϕ_iphalf, K_ϕϕ_imhalf, 
                              F_r, F_Z, F_r_Hr,
@@ -2528,7 +2244,7 @@ function AdvectJandH!( c̃Δt::Float64,                   # c̃ × Δt
                              r, rCoM, Z, ZCoM,
                              inv_r_cell, 
                              u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                             UpdateJold, UpdateH,
+                             UpdateJold, 
                              CylindricalCoords, 
                              BC_r_left, BC_r_right,
                              BC_Z_bot, BC_Z_top,
@@ -2536,7 +2252,6 @@ function AdvectJandH!( c̃Δt::Float64,                   # c̃ × Δt
     else
         # Else we use the order half-Z, full-r, half-Z:
         AdvectJandH_Zfirst!( c̃Δt, α_F, J, J_old, H_r, H_Z, 
-                             J_stage, H_r_stage, H_Z_stage,
                              D_rr, D_ZZ, D_rZ, 
                              K_ϕϕ_iphalf, K_ϕϕ_imhalf, 
                              F_r, F_Z, F_r_Hr,
@@ -2545,7 +2260,7 @@ function AdvectJandH!( c̃Δt::Float64,                   # c̃ × Δt
                              r, rCoM, Z, ZCoM,
                              inv_r_cell, 
                              u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                             UpdateJold, UpdateH,
+                             UpdateJold, 
                              CylindricalCoords, 
                              BC_r_left, BC_r_right,
                              BC_Z_bot, BC_Z_top,
@@ -2554,4 +2269,3 @@ function AdvectJandH!( c̃Δt::Float64,                   # c̃ × Δt
 
     return nothing 
 end
-

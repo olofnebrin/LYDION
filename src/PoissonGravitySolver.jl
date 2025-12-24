@@ -47,6 +47,10 @@ function CreateGravityStateAndCoefficients( A_r::AbstractArray{Float64, 2},
     ∂Φ∂r        = zeros( Float64, N_r, N_Z )
     ∂Φ∂Z        = zeros( Float64, N_r, N_Z )
 
+    # Arrays for tracking the gravitational force per unit volume, - ρ ∇Φ:
+    f_gravity_r = zeros( Float64, N_r, N_Z )
+    f_gravity_Z = zeros( Float64, N_r, N_Z )
+
     # Initialize coefficients for the Poisson equation:
     RPoiss_ijp  = zeros( Float64, N_r, N_Z ) 
     RPoiss_ij   = zeros( Float64, N_r, N_Z ) 
@@ -94,7 +98,7 @@ function CreateGravityStateAndCoefficients( A_r::AbstractArray{Float64, 2},
     Δτ_max   = max( r[end]^2, Z[end]^2 ) / 4
     Δτ_min   = min( minimum(diff(r))^2, minimum(diff(Z))^2 ) / 4
 
-    return GravityState(Φ, Φ_half, Φ_old, Φ_snapshot, ∂Φ∂r, ∂Φ∂Z), 
+    return GravityState(Φ, Φ_half, Φ_old, Φ_snapshot, ∂Φ∂r, ∂Φ∂Z, f_gravity_r, f_gravity_Z), 
            GravityCoeffs(RPoiss_ijp, RPoiss_ij, RPoiss_ijm, ZPoiss_ijp, ZPoiss_ij, ZPoiss_ijm, Δτ_max, Δτ_min)
 end
 
@@ -526,6 +530,9 @@ end
 @fastmath function Update_∇Φ!( ∂Φ∂r::AbstractArray{Float64, 2}, 
                                ∂Φ∂Z::AbstractArray{Float64, 2},
                                   Φ::AbstractArray{Float64, 2},
+                        f_gravity_r::AbstractArray{Float64, 2},
+                        f_gravity_Z::AbstractArray{Float64, 2},
+                                  ρ::AbstractArray{Float64, 2},
                                rCoM::AbstractArray{Float64},
                                ZCoM::AbstractArray{Float64} ) 
     N_r, N_Z = size( Φ )
@@ -624,6 +631,15 @@ end
 
         end # End of inbounds 
     end # End of j-loop 
+
+
+    # Update gravitational force per unit volume (mainly for tracking):
+    @threads for j in dN_Z
+        @inbounds @simd for i in dN_r
+            f_gravity_r[i,j] = - ρ[i,j] * ∂Φ∂r[i,j]
+            f_gravity_Z[i,j] = - ρ[i,j] * ∂Φ∂Z[i,j]
+        end
+    end
 
     return nothing
 end

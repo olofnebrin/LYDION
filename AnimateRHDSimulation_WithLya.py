@@ -8,7 +8,8 @@ import matplotlib.patheffects as pe
 from matplotlib.ticker import MultipleLocator  # if you want it later
 
 # ---------------- user inputs ----------------
-filename  = "RHDSim_128x128_withLya.h5"        # <-- change to your file
+filename  = "RHDSim_Lya_2025-12-23.h5"
+#filename  = "RHDSim_128x128_withLya.h5"    
 frameskip = 1                  # use >1 to skip frames
 save_mp4  = True               # True to save mp4 instead of interactive show
 outname   = "density_T_withLyaSpec.mp4"
@@ -20,7 +21,7 @@ edge_indices = [0]            # e.g. [0, 5, 10]
 # ν-window settings for the spectrum panel
 use_nu_window       = True
 nu_Lya              = 2.466e15             # Hz
-nu_window_fraction  = 0.013                # total width = 2% of ν_Lya (±1% around center)
+nu_window_fraction  = 0.02                # total width = 2% of ν_Lya (±1% around center)
 # ---------------------------------------------
 
 # constants
@@ -310,7 +311,7 @@ cb4.set_ticklabels(['10$^{-8}$', '10$^{-6}$', '10$^{-4}$', '0.01', '1'])
 ax4.text(0.9, 0.9, "x$_{HI}$", transform=ax4.transAxes, **panel_label_style)
 
 # --- spectrum panel ---
-ax_spec.set_ylim(0.0, 1.2e-14)
+ax_spec.set_ylim(0.0, 0.25 * 1.2e-14)
 ax_spec.set_xlabel(r"$\nu$ (Hz)", labelpad=12)
 ax_spec.set_ylabel(r"$J_{Ly\alpha}$", labelpad=12)
 ax_spec.set_xlim(nuC_plot.min(), nuC_plot.max())

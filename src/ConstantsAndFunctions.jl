@@ -18,7 +18,9 @@ export LyαArrays, GenerateLyαArrays, H, Htophat, b, a, σ0,
        Update_Hvoigt!, Update_ϕν!, Update_e_Lyα!,
        AbsorptionUpdateJorH, LyαEmissionUpdate!, LyαAbsorptionUpdate!, Update_f_Lyα_MF_L_Lyα!,
        Reset_Δρu!, AbsorptionUpdateH, Update_∇u_RHD!, D_colon_∇u_Cylindrical, 
-       D_colon_∇u_Cartesian, GetHydrogenDensities, GetHeliumDensities, GetElectronDensity,
+       eLyα_sphere_point, eLyα_sphere_uni,
+       D_colon_∇u_Cartesian, Compute_f_esc_Cylindrical, Compute_f_esc_Lyα_Cylindrical,
+       GetHydrogenDensities, GetHeliumDensities, GetElectronDensity,
        GetElectronDensityFromFracs, MinMod
 
 
@@ -91,14 +93,15 @@ const Four_π::Float64        = 4 * π
 const Two_π::Float64         = 2 * π
 const Sqrt_π::Float64        = sqrt(π) 
 const Sqrt_2::Float64        = sqrt(2)
-const Four_π_over_c::Float64 = Four_π / c              
+const Four_π_over_c::Float64 = Four_π / c    
+const inv_c::Float64         = 1 / c          
 
 # Export constants:
 export c, h, G, kB, mH, mH2, me, mHe, mC, mCO, e, σSB, νLyα, νLyC, ELyα, ELyC, ALyα, A_2γ, A_2p2s,
        A_2s2p, f_lu_Lyα, σT, X, Y, Dsun, TCMB0, D_H_ratio, C_H_ratio, N_H_ratio, O_H_ratio,
        Ne_H_ratio, Mg_H_ratio, Si_H_ratio, S_H_ratio, Fe_H_ratio,
        Lsun, Msun, AU, pc, Mpc, Gpc, kms, day, yr, Myr, Gyr, eV, Ang, nm, μm, F_Habing,
-       Four_π, Two_π, Sqrt_π, Sqrt_2, Four_π_over_c
+       Four_π, Two_π, Sqrt_π, Sqrt_2, Four_π_over_c, inv_c
 
 
 ###############################################################
@@ -252,8 +255,6 @@ end
 end
 
 
-const Four_π_c::Float64 = Four_π / c 
-
 """ Update the Lyα energy density e_Lyα(r,Z) = 4π ∫dν J(r,Z,ν) / c. """
 function Update_e_Lyα!( e_Lyα::AbstractArray{Float64, 2}, 
                            Δν::AbstractArray{Float64},
@@ -276,7 +277,7 @@ function Update_e_Lyα!( e_Lyα::AbstractArray{Float64, 2},
             end
 
             # Get Lyα energy density:
-            @inbounds e_Lyα[i,j] = Four_π_c * ∫dν_J
+            @inbounds e_Lyα[i,j] = Four_π_over_c * ∫dν_J
         end
     end # End of for-loop
 
@@ -337,7 +338,9 @@ end
         
         = (4π/c) (1/c̃) ∫dν (H_old - H)
 
-    where we have used (1/c̃)(∂H/∂t) = - α_F H (for the absorption step). """
+    where we have used (1/c̃)(∂H/∂t) = - α_F H (for the absorption step).
+    
+    NOTE: This function also updates the old values of H. """
 function LyαAbsorptionUpdate!( J_Lyα::AbstractArray{Float64, 3},
                              H_r_Lyα::AbstractArray{Float64, 3}, 
                              H_Z_Lyα::AbstractArray{Float64, 3},
@@ -372,24 +375,24 @@ function LyαAbsorptionUpdate!( J_Lyα::AbstractArray{Float64, 3},
                 # Update J:
                 J_Lyα[i,j,k] = AbsorptionUpdateJorH( J_Lyα[i,j,k], Δt, 0.0, αabs_J, c̃ )
 
-                # Store old (un-updated) H components:
+                # Store & set old (un-updated) H components:
                 H_r_old_Lyα[i,j,k] = H_r_Lyα[i,j,k] 
                 H_Z_old_Lyα[i,j,k] = H_Z_Lyα[i,j,k]
 
                 # Candidate updates for H_r and H_Z:
-                H_r_new  = AbsorptionUpdateJorH( H_r_old_Lyα[i,j,k], Δt, 0.0, αabs_H, c̃ )
-                H_Z_new  = AbsorptionUpdateJorH( H_Z_old_Lyα[i,j,k], Δt, 0.0, αabs_H, c̃ )
+                H_r_Lyα[i,j,k]  = AbsorptionUpdateJorH( H_r_old_Lyα[i,j,k], Δt, 0.0, αabs_H, c̃ )
+                H_Z_Lyα[i,j,k]  = AbsorptionUpdateJorH( H_Z_old_Lyα[i,j,k], Δt, 0.0, αabs_H, c̃ )
 
                 # Ensure that H ≤ J:
-                H_mag = sqrt( H_r_new * H_r_new  +  H_Z_new * H_Z_new )
-                if H_mag > J_Lyα[i,j,k]
-                    f              = H_mag / J_Lyα[i,j,k]
-                    H_r_Lyα[i,j,k] = H_r_new / f
-                    H_Z_Lyα[i,j,k] = H_Z_new / f
-                else
-                    H_r_Lyα[i,j,k] = H_r_new
-                    H_Z_Lyα[i,j,k] = H_Z_new
-                end
+                #H_mag = sqrt( H_r_new * H_r_new  +  H_Z_new * H_Z_new )
+                #if H_mag > J_Lyα[i,j,k]
+                #    f              = H_mag / J_Lyα[i,j,k]
+                #    H_r_Lyα[i,j,k] = H_r_new / f
+                #    H_Z_Lyα[i,j,k] = H_Z_new / f
+                #else
+                #    H_r_Lyα[i,j,k] = H_r_new
+                #    H_Z_Lyα[i,j,k] = H_Z_new
+                #end
 
             end # End of i-loop 
         end # End of j-loop 
@@ -410,15 +413,23 @@ function LyαAbsorptionUpdate!( J_Lyα::AbstractArray{Float64, 3},
             end
 
             # Change in gas momentum from Lyα radiation pressure:
-            Δρu_Lyα_r[i,j] += Four_π_c * inv_c̃ * ∫dν_ΔH_r
-            Δρu_Lyα_Z[i,j] += Four_π_c * inv_c̃ * ∫dν_ΔH_Z
+            Δρu_Lyα_r[i,j] += Four_π_over_c * inv_c̃ * ∫dν_ΔH_r
+            Δρu_Lyα_Z[i,j] += Four_π_over_c * inv_c̃ * ∫dν_ΔH_Z
         end
     end
+
+    # Update old H components a final time:
+    H_r_old_Lyα .= H_r_Lyα 
+    H_Z_old_Lyα .= H_Z_Lyα
 
     return nothing 
 end
 
 
+""" This function updates the Lyα radiation pressure force per unit volume components 
+    f_Lyα = (f_Lyα_r, f_Lyα_Z) from the accumulated change in momentum over time-step Δt. 
+    
+    The function also computes the Lyα force multiplier M_F. """
 @inline function Update_f_Lyα_MF_L_Lyα!( f_Lyα_r::AbstractArray{Float64, 2}, 
                                          f_Lyα_Z::AbstractArray{Float64, 2},
                                        Δρu_Lyα_r::AbstractArray{Float64, 2},
@@ -470,6 +481,93 @@ end
     end
 
     return M_F, L_Lyα_tot
+end
+
+
+""" This function updates the Lyα radiation pressure force per unit volume components 
+    f_Lyα = (f_Lyα_r, f_Lyα_Z) from the accumulated change in momentum over time-step Δt. 
+    
+    The function also computes the Lyα force multiplier M_F, and the force multiplier 
+    *anti-parallel* to gravity, which is a better measure of its feedback strength. """
+@inline function Update_f_Lyα_MF_L_Lyα!( f_Lyα_r::AbstractArray{Float64, 2}, 
+                                         f_Lyα_Z::AbstractArray{Float64, 2},
+                                       Δρu_Lyα_r::AbstractArray{Float64, 2},
+                                       Δρu_Lyα_Z::AbstractArray{Float64, 2},
+                                          ∫dν_js::AbstractArray{Float64, 2},
+                                              ΔV::AbstractArray{Float64, 2},
+                                              Δt::Float64,
+                                        f_grav_r::AbstractArray{Float64, 2}, 
+                                        f_grav_Z::AbstractArray{Float64, 2}, 
+                                        BC_Z_bot::Symbol = :Reflect
+                                        )
+
+    # Grid size & intervals:
+    N_r, N_Z  = size( f_Lyα_r )  # Grid size 
+    dN_r      = 1:N_r            # r-interval 
+    dN_Z      = 1:N_Z            # Z-interval
+
+    # Save radiation pressure force per unit volume: 
+    inv_Δt = 1 / Δt     # Convenient constant 
+    @threads for j in dN_Z 
+        @inbounds @simd for i in dN_r 
+            f_Lyα_r[i,j]  = Δρu_Lyα_r[i,j] * inv_Δt
+            f_Lyα_Z[i,j]  = Δρu_Lyα_Z[i,j] * inv_Δt
+        end
+    end
+
+    # Compute force multiplier M_F = ∫dV |f_Lyα| / (L_Lyα/c) & Lyα luminosity L_Lyα = 4π ∫dV (∫dν js):
+    M_F   = 0.0
+    L_Lyα = 0.0
+    for j in dN_Z
+        @inbounds @simd for i in dN_r 
+            M_F   += ΔV[i,j] * sqrt( f_Lyα_r[i,j] * f_Lyα_r[i,j]  +  f_Lyα_Z[i,j] * f_Lyα_Z[i,j] )
+            L_Lyα += Four_π * ΔV[i,j] * ∫dν_js[i,j]
+        end
+    end
+
+    # Compute force multiplier anti-parallel to gravity, 
+    # M_F_antigravity = ∫dV ( - f_Lyα ⋅ â_grav ) / (L_Lyα/c)
+    # NOTE: Negative values mean that radiation pressure is 'helping' gravity 
+
+    M_F_antigravity = 0.0
+    for j in dN_Z 
+        @inbounds @simd for i in dN_r
+
+            # Magnitude of gravitatonal force:
+            f_grav_mag = sqrt( f_grav_r[i,j] * f_grav_r[i,j]  +  f_grav_Z[i,j] * f_grav_Z[i,j] )
+
+            if f_grav_mag > 0.0
+                f_Lyα_antiparallel = - ( f_Lyα_r[i,j] * f_grav_r[i,j]  +  f_Lyα_Z[i,j] * f_grav_Z[i,j] ) / f_grav_mag
+            else
+                # In regions without gravity, just set the force component to zero: 
+                f_Lyα_antiparallel = 0.0
+            end
+
+            # Get contribution to M_F_antigravity from this cell:
+            M_F_antigravity += ΔV[i,j] * f_Lyα_antiparallel
+        end
+    end
+
+    # Normalize M_F & M_F_antigravity:
+    if L_Lyα > 0.0
+        inv_Loverc      = 1 / (L_Lyα / c)
+        M_F             = M_F * inv_Loverc
+        M_F_antigravity = M_F_antigravity * inv_Loverc
+    else
+        M_F             = 0.0
+        M_F_antigravity = 0.0
+    end
+
+    # Compute the total Lyα luminosity in the cloud, *taking into account reflective BCs*:
+    if BC_Z_bot === :Reflect 
+        # If we have reflective BCs on the lower Z-plane, we double to get the total Lyα luminosity 
+        # in the physical cloud:
+        L_Lyα_tot = 2 * L_Lyα
+    else
+        L_Lyα_tot = L_Lyα
+    end
+
+    return M_F, M_F_antigravity, L_Lyα_tot
 end
 
 
@@ -575,6 +673,253 @@ end
 
     return D_colon_∇u
 end
+
+
+""" This function computes the escape fraction in a given frequency bin/band 
+    for a simulation in cylindrical coordinates. Assumes that the total luminosity 
+    in the simulation box is L_simvol.  """
+@inline function Compute_f_esc_Cylindrical( H_r::AbstractArray{Float64, 2}, 
+                                            H_Z::AbstractArray{Float64, 2},
+                                            A_r::AbstractArray{Float64, 2},
+                                            A_Z::AbstractArray{Float64, 2},
+                                     L_allspace::Float64,
+                                       BC_Z_bot::Symbol = :Reflect
+                                          )
+
+    N_r, N_Z = size( H_r )
+    dN_r     = 1:N_r 
+    dN_Z     = 1:N_Z
+    L_esc    = 0.0 # Initialize luminosity leaked 
+
+    if BC_Z_bot === :Reflect 
+        # If we only simulate Z > 0 with reflective BCs, then the luminosity 
+        # in simulated volume is half of that in all space 
+        # (the true full luminosity of the source):
+        L_simvol = 0.5 * L_allspace
+    else
+        L_simvol = L_allspace
+    end
+
+    # Contribution from leakage through outer-r boundary 
+    @inbounds @simd for j in dN_Z 
+        L_esc += A_r[N_r+1,j] * Four_π * max( H_r[N_r,j], 0.0 )
+    end
+
+    # Contribution from leakage through upper-Z boundary 
+    @inbounds @simd for i in dN_r 
+        L_esc += A_Z[i,N_Z+1] * Four_π * max( H_Z[i,N_Z], 0.0 )
+    end
+
+    if BC_Z_bot === :Outflow 
+        # Leakage through lower-Z boundary if there are outflow BCs there:
+        @inbounds @simd for i in dN_r 
+            L_esc += A_Z[i,1] * Four_π * max( - H_Z[i,1], 0.0 )
+        end
+    end
+
+    # Escape fraction:
+    if L_simvol > 0.0
+        f_esc = L_esc / L_simvol
+    else 
+        f_esc = 0.0
+    end
+
+    return f_esc 
+end
+
+
+""" The Lyα escape fraction in cylindrical coordinates. Computed as:
+
+    f_esc_Lyα = ∫dν ∫dA ⋅ 4π H_Lyα / L_simvol 
+
+    where L_Lyα_simvol is the Lyα luminosity (erg s⁻¹) in the simulated volume.  """
+@views @inline function Compute_f_esc_Lyα_Cylindrical( H_r_Lya::AbstractArray{Float64, 3}, 
+                                                       H_Z_Lya::AbstractArray{Float64, 3},
+                                                           A_r::AbstractArray{Float64, 2},
+                                                           A_Z::AbstractArray{Float64, 2},
+                                                            Δν::AbstractArray{Float64, 1},
+                                                L_Lyα_allspace::Float64,
+                                                      BC_Z_bot::Symbol = :Reflect
+                                                       )
+
+    N_ν  = length( Δν ) # Number of frequency bins 
+    dN_ν = 1:N_ν
+
+    # If Lyα luminosity is zero, exit early by setting f_esc_Lyα = 0:
+    if L_Lyα_allspace ≤ 0.0
+        return 0.0
+    end
+
+    f_esc_Lyα = 0.0
+    @inbounds @simd for k in dN_ν
+        f_esc_Lyα += Δν[k] * Compute_f_esc_Cylindrical( H_r_Lya[:,:,k], H_Z_Lya[:,:,k], A_r, A_Z, 
+                                                        L_Lyα_allspace, BC_Z_bot )
+    end
+
+    return f_esc_Lyα 
+end
+
+###############################################################
+#######                                                 #######
+#######      A N A L Y T I C A L  S O L U T I O N S     #######
+#######                                                 #######
+###############################################################
+
+# Below are some analytical spectra to compare numerically
+# solutions against. 
+
+""" Dijkstra+ (2006) solution for the emergent spectrum
+    from a uniform, static, dust-free sphere with a 
+    central Lyα point source. Arguments:
+    
+    **ARGUMENTS:**
+    
+    x     :  Dimensionless frequency (ν - νLyα)/Δν_D
+    T     :  Temperature (K)
+    τcl   :  Cloud optical depth at Lyα line center 
+    
+    **RETURNS:**
+    
+    J(x)  :  Normalized emergent spectrum, J(x)/∫dx J(x) 
+"""
+function J_sphere_point( x::Float64, 
+                         T::Float64, 
+                       τcl::Float64
+                       )
+    aτ = a(T)*τcl
+    J  = sqrt(π^3 / 24) * (x^2 / aτ) * sech( sqrt(π^3 / 54) * abs.(x^3) / aτ )^2
+    return J
+end
+
+
+""" Lao & Smith (2020) solution for the emergent spectrum
+    from a uniform, static, dust-free sphere with a 
+    uniform Lyα source. 
+    
+    **ARGUMENTS:**
+    
+    x     :  Dimensionless frequency (ν - νLyα)/Δν_D
+    T     :  Temperature (K)
+    τcl   :  Cloud optical depth at Lyα line center 
+    
+    **RETURNS:**
+    
+    J(x)  :  Normalized emergent spectrum, J(x)/∫dx J(x) 
+"""
+function J_sphere_uni( x::Float64, 
+                       T::Float64, 
+                     τcl::Float64
+                     )
+    aτ = a(T)*τcl
+    J  = - sqrt(6/π) * (x^2 / aτ) * log(1 - exp(-sqrt(2 * π^3 / 27) * abs.(x^3) / aτ))
+    return J
+end
+
+
+# Below are the predicted Lyα pressure PLyα(r) for idealized setups, 
+# which can be used to compare simulations to. We also define needed 
+# series to evaluate PLyα(r).
+
+
+""" The polylogarithmic function evaluated for a unit circle z = exp(iθ),
+    Li_s( z = exp(iθ) ):
+    
+    Li_s(z) ≡ ∑_{n = 1 to ∞} z^n / n^s .
+   
+    Needed for some analytical expressions. 
+"""
+function Li_UnitCircle( θ::Float64, 
+                        s::Float64,
+                        K::Int64 = 20 )
+
+    if θ == 0.0
+        return zeta(s) + 0 * im
+    end
+
+    Sum = gamma(1-s) * exp( (s-1)*(log(θ) - im*π/2) )
+    for k in 0:K 
+        Sum += zeta(s-k) * (im*θ)^k / factorial(k)
+    end
+
+    return Sum
+end
+
+
+
+""" Predicted Lyα energy density e_Lyα for a uniform, static, dust-free 
+    cloud with a central Lyα point source, as found by Lao & Smith (2020).
+    
+    **ARGUMENTS:**
+    
+    r         :   Array of r-values (cm) 
+    L_Lyα     :   Lyα luminosity (erg/s)
+    T         :   Cloud temperature (K)
+    τcl       :   Cloud optical depth at Lyα line center 
+    
+    **RETURNS:**
+    
+    e_Lyα(r)  :   Array of e_Lyα for all r-values 
+ """
+function eLyα_sphere_point( r::AbstractVector{Float64}, 
+                        L_Lyα::Float64, 
+                            T::Float64, 
+                          τcl::Float64
+                          )
+    Rcl  = r[end]                         
+    rbar = r ./ Rcl
+    aτ   = a(T)*τcl          
+
+    # Put it all together to compute e_Lyα:
+    stuff  = (L_Lyα/(c * Rcl^2)) * gamma(1/3) * (2 * aτ)^(1/3) / (2 * π^(3/2))
+
+    e_Lyα  = (stuff ./ rbar) .* imag.( Li_UnitCircle.( π .* rbar, 1/3) )
+
+    return e_Lyα
+end
+
+
+""" Predicted Lyα energy density e_Lyα for a uniform, static, dust-free 
+    cloud with a uniform Lyα source, as found by Lao & Smith (2020).
+    
+    **ARGUMENTS:**
+    
+    r         :   Array of r-values (cm) 
+    L_Lyα     :   Lyα luminosity (erg/s)
+    T         :   Cloud temperature (K)
+    τcl       :   Cloud optical depth at Lyα line center 
+    
+    **RETURNS:**
+    
+    e_Lyα(r)  :   Array of e_Lyα for all r-values 
+ """
+function eLyα_sphere_uni( r::AbstractVector{Float64}, 
+                      L_Lyα::Float64, 
+                          T::Float64,
+                        τcl::Float64,
+                        Rcl::Float64
+                        )
+
+    rbar = min.( r ./ Rcl, 1.0 )
+    aτ   = a(T)*τcl          
+
+    # Put it all together to compute e_Lyα:
+    stuff = (3 * L_Lyα/(c * Rcl^2)) * gamma(1/3) * (2 * aτ)^(1/3) / (2 * π^(7/2))
+
+    # The argument for the polylogarithmic function is z = exp( - i π rbar ),
+    # or z = exp( i π (1 - rbar) ), and so θ =  π (1 - rbar). With this the 
+    # Lyα energy density is:
+    e_Lyα  = (stuff ./ rbar) .* imag.( Li_UnitCircle.( π .* (1 .- rbar), 7/3) )
+
+    return e_Lyα
+end
+
+
+###############################################################
+#######                                                 #######
+#######            M I S C E L L A N E O U S            #######
+#######                                                 #######
+###############################################################
+
 
 
 const X_over_mH::Float64 = X / mH

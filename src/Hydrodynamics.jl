@@ -28,7 +28,7 @@ using Printf
 
 export GetPrimitive, GetCFLTimeStep, 
        GetGravityTimeStep, GetRadPressureTimeStep, Getγad, Getμ, UpdateHydro!, 
-       GravitySolveAndKick!, GravityKick!, GenerateHydroArrays
+       GravitySolveAndKick!, GravityKick!, UpdateTotalMass!, GenerateHydroArrays
 
 ###############################################################
 #######                                                 #######
@@ -376,7 +376,7 @@ const ϵ_Shock_HLL_and_PLM::Float64 = 4.0 # Critical value of shock-indicator to
             inv_P   = 1 / max( min( P[i,j], P[im1,j], P[ip1,j], P[i,jm1], P[i,jp1] ), P_floor )
             ΔP      = ( abs( P[ip1,j] - P[im1,j] ) + abs( P[i,jp1] - P[i,jm1] ) ) * inv_P
 
-            if ΔP ≥ ϵ_Shock_HLL_and_PLM
+            if ΔP ≥ ϵ_Shock_HLL_and_PLM 
                 # In this case, we have a strong shock, and flag it so that we use 
                 # both HLL + linear reconstruction (instead of WENO3) near it:
                 Shock[i,j] = Shock_HLL_and_PLM  # (This arbitrary constant is defined in the WENO3 module)
@@ -3389,11 +3389,21 @@ function UpdateHydro!( Δt::Float64,
              w_minus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{j,1}
 
                  CoordSys::CoordSystem,
-               inv_r_cell::AbstractVector{Float64},
-                   Xfirst::Bool
+               inv_r_cell::AbstractVector{Float64}
                       )
 
+    # Select Strang-split order:    
+    Xfirst = HydroState.rfirst_Hydro
 
+    if Xfirst == true 
+        # If the last Strang-split order was r-first, change to Z-first:
+        Xfirst = false 
+    else
+        # If the last Strang-split order was Z-first, change to r-first:
+        Xfirst = true
+    end
+
+    # Update hydrodynamics: 
     UpdateHydro!( HydroState.ρ_new,
                   HydroState.ρu_X_new,
                   HydroState.ρu_Y_new,
@@ -3540,7 +3550,8 @@ function GravitySolveAndKick!( Δt::Float64,
                    GravCoeffs.Δτ_max, GravCoeffs.Δτ_min,
                    ΔV, XCoM, YCoM )
                            
-        Update_∇Φ!( GravState.∂Φ∂r, GravState.∂Φ∂Z, GravState.Φ, XCoM, YCoM )
+        Update_∇Φ!( GravState.∂Φ∂r, GravState.∂Φ∂Z, GravState.Φ, 
+                    GravState.f_gravity_r, GravState.f_gravity_Z, ρ, XCoM, YCoM )
     end
 
     # Finally, we perform a second-order in time gravity kick to the
@@ -3626,13 +3637,35 @@ end
 # and to setup tests of the hydro code. 
 
 
+@inline function UpdateTotalMass!( HydroState::HydrodynamicsState,
+                                           ΔV::AbstractMatrix{Float64}
+                                  )
+    
+    # Initialize total mass to zero before we compute it:
+    M = 0.0
+
+    # Grid size: 
+    N_r, N_Z = size( ΔV )
+    dN_r     = 1:N_r 
+    dN_Z     = 1:N_Z 
+
+    # Add mass from all cells:
+    for j in dN_Z 
+        @inbounds @simd for i in dN_r 
+            # Add mass contribution from cell:
+            M += ΔV[i,j] * HydroState.ρ[i,j]
+        end
+    end
+
+    # Store computed mass:
+    HydroState.M_simvol = M 
+
+    return nothing 
+end
+
+
 """ Initialize all the hydro arrays (cell-centered, interface,
-    slope and flux) for an (X, Y) grid. 
-
-    **ARGUMENTS:**
-
-    - X, Y       : interface vectors of length N_X+1, N_Y+1
-    - XCoM, YCoM : cell-center vectors of length N_X,   N_Y """
+    slope and flux) for an (X, Y) grid.  """
 function GenerateHydroArrays( X::AbstractVector{Float64},   
                            XCoM::AbstractVector{Float64},
                               Y::AbstractVector{Float64},   
@@ -3782,6 +3815,12 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
     e          = zeros(Float64, N_X, N_Y)
     T          = zeros(Float64, N_X, N_Y)
 
+    # Strang split order:
+    rfirst_Hydro = true 
+
+    # Total mass in simulation volume:
+    M_simvol = 0.0
+
     # Create structs:
     hydrostate = HydrodynamicsState( ρ_new, ρu_X_new, ρu_Y_new, E_new, ρ, ρu_X, ρu_Y, E, 
                                      ρ0, ρu_X0, ρu_Y0, E0, ρ_stage, ρu_X_stage, ρu_Y_stage, E_stage,
@@ -3795,7 +3834,8 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
                                      P, e, T, ρg_old, u_Xg_old, u_Yg_old, Pg_old,
                                      ρc, ρu_Xc, ρu_Yc, Ec, u_Xc, u_Yc, Pc,
                                      Shock,
-                                     BC_X_left, BC_X_right, BC_Y_left, BC_Y_right )
+                                     BC_X_left, BC_X_right, BC_Y_left, BC_Y_right,
+                                     rfirst_Hydro, M_simvol )
 
     ghostgrid  = GhostPaddedGrid( Xg, XCoMg, Yg, YCoMg )
   

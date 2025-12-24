@@ -8,7 +8,7 @@
 
 export A_mplus, A_m, A_mminus, ϕplus
 
-const Pmax::Float64 = 30.0   # Maximum magnitude of Péclet number to avoid overflow in exponentials and/or floating point errors (default = 30).
+const Pmax::Float64 = 40.0   # Maximum magnitude of Péclet number to avoid overflow in exponentials and/or floating point errors (default = 30).
 const Pmin::Float64 = 1e-6   # Minimum magnitude of Péclet number below which we use Taylor expansion
 
 """ The function [1 - exp(-P_m)]/C_m, where P_m is the Péclet number

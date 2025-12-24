@@ -9,7 +9,7 @@ from matplotlib.ticker import MultipleLocator  # add this import
 
 
 # ---------------- user inputs ----------------
-filename = "RHDSim.h5"        # <-- change to your file
+filename = "RHDSim_NoLya_512x512_2025-12-24.h5"        # <-- change to your file
 frameskip = 1                 # use >1 to skip frames
 save_mp4 = True               # True to save mp4 instead of interactive show
 outname = "density_T.mp4"
@@ -102,14 +102,11 @@ Nt, _, _   = rho_hist.shape
 # convert to number density
 nH_hist = X * rho_hist / mH   # (Nt, Nr, Nz)
 
-nH_max = np.max(nH_hist)
-print(f"Maximum n_H over all cells and time-steps = {nH_max:.3e} cm^-3")
-
 # grid for pcolormesh (edges, in pc)
 R, ZZ = np.meshgrid(r/pc, Z/pc, indexing='ij')
 
 # display ranges
-vmin_nH, vmax_nH = 10, 1e5
+vmin_nH, vmax_nH = 10.0, 1e5
 norm_nH = LogNorm(vmin=vmin_nH, vmax=vmax_nH)
 
 vmin_T, vmax_T = 10.0, 1e5
@@ -140,10 +137,10 @@ panel_label_style = dict(ha='right', va='top', color='black',
                          path_effects=[pe.withStroke(linewidth=3, foreground='white')])
 ax1.text(0.9, 0.2, "n$_{H}$ (cm$^{-3}$)", transform=ax1.transAxes, **panel_label_style)
 
-ax1.set_xlim(r[0]/pc, r[-1]/pc)
-ax1.set_ylim(Z[0]/pc, Z[-1]/pc)
-#ax1.set_xlim(r[0]/pc, 0.5)
-#ax1.set_ylim(Z[0]/pc, 0.5)
+#ax1.set_xlim(r[0]/pc, r[-1]/pc)
+#ax1.set_ylim(Z[0]/pc, Z[-1]/pc)
+ax1.set_xlim(r[0]/pc, 3)
+ax1.set_ylim(Z[0]/pc, 3)
 
 # --- temperature ---
 ax2.set_xlabel("r (pc)", labelpad=12)

@@ -8,8 +8,8 @@ import matplotlib.patheffects as pe
 from matplotlib.ticker import MultipleLocator  # kept (unused, but you had it)
 
 # ---------------- user inputs ----------------
-filename_noLya = "RHDSim_128x128_noLya.h5"     # Run ignoring Lyα feedback
-filename_Lya   = "RHDSim_128x128_withLya.h5"   # Run with Lyα feedback
+filename_noLya = "RHDSim_noLya_2025-12-23.h5"     # Run ignoring Lyα feedback
+filename_Lya   = "RHDSim_Lya_2025-12-23.h5"       # Run with Lyα feedback
 
 frameskip = 1                  # use >1 to skip frames
 save_mp4  = True               # True to save mp4 instead of interactive show
@@ -295,6 +295,6 @@ def update(p):
 ani = FuncAnimation(fig, update, frames=frames, init_func=init, blit=True)
 
 if save_mp4:
-    ani.save(outname, writer="ffmpeg", fps=fps, dpi=300)
+    ani.save(outname, writer="ffmpeg", fps=fps, dpi=600)
 else:
     plt.show()

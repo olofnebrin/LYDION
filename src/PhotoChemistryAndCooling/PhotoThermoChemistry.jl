@@ -19,17 +19,18 @@ include("./GasCoolingRates.jl")
 include("./StellarEmissionAbsorption.jl")  # For band opacities & stellar luminosities 
 
 
-const CFL_RT::Float64                  = 0.5   # CFL factor that determines the advection time-step for stellar & Lyα RT (Default: 0.5. NOTE: Must be < 1)
+const CFL_RT::Float64                  = 0.4   # CFL factor that determines the advection time-step for stellar & Lyα RT (Default: 0.5. NOTE: Must be < 1)
 const DEBUG_PhotoThermoChemistry::Bool = true  # Allow safety checks for physical values etc. Cheap & good for tracking bugs.
 
 
-# Export functions: 
-export UpdateRTandThermoChemistry!, StellarRTArrays, 
-       GenerateStellarRTArrays, FindRSL_StellarRT, FindRSL_LyαRT
+# Export constants and functions: 
+export CFL_RT, UpdateRTandThermoChemistry!, StellarRTArrays, 
+       GenerateStellarRTArrays, FindRSL_StellarRT, FindRSL_LyαRT,
+       Compute_fesc_LyC_and_LW_Cylindrical!
 
 
 
-const ϵ_RSL::Float64 = 5.0         # RSL is ≥ ϵ_RSL × max(|u|, c_s) (Default: 5.0)
+const ϵ_RSL::Float64 = 5.0        # RSL is ≥ ϵ_RSL × max(|u|, c_s) (Default: 5.0)
 const c̃_min::Float64 = 100 * kms   # Lower bound on RSL, regardless of gas conditions (Default: 100 km/s)
 
 """ This function determines a reduced speed of light c̃ for 
@@ -258,6 +259,32 @@ const N_H2_HDcrit = 2.34e19; const c_H2_HD = 5.2e-3; const p_H2_HD = 0.238
 end
 
 
+""" This function updates the LyC and Lyman-Werner escape fraction from the 
+    simulation volume (assumed cylindrical coordinates) in RHD simulations. """
+@inline function Compute_fesc_LyC_and_LW_Cylindrical!(  RT::StellarRTArrays,
+                                                       A_r::AbstractArray{Float64, 2}, # r-direction interface areas 
+                                                       A_Z::AbstractArray{Float64, 2}, # Z-direction interface areas 
+                                                  BC_Z_bot::Symbol = :Outflow          # Assumed BCs at the lower-Z boundary 
+                                                     )
+
+    # Lyman-Werner escape fraction: 
+    RT.f_esc_LW   = Compute_f_esc_Cylindrical( RT.H_r_LW, RT.H_Z_LW, A_r, A_Z, RT.Lum_LW, BC_Z_bot )
+
+    # Compute LyC photon number-weighted escape fraction:
+    f_esc_EUV1    = Compute_f_esc_Cylindrical( RT.H_r_EUV1, RT.H_Z_EUV1, A_r, A_Z, RT.Lum_EUV1, BC_Z_bot )
+    f_esc_EUV2    = Compute_f_esc_Cylindrical( RT.H_r_EUV2, RT.H_Z_EUV2, A_r, A_Z, RT.Lum_EUV2, BC_Z_bot )
+    f_esc_EUV3    = Compute_f_esc_Cylindrical( RT.H_r_EUV3, RT.H_Z_EUV3, A_r, A_Z, RT.Lum_EUV3, BC_Z_bot )
+
+    if RT.dN_dt_LyC > 0.0
+        RT.f_esc_LyC  = ( RT.dN_dt_EUV1 * f_esc_EUV1  +  RT.dN_dt_EUV2 * f_esc_EUV2  +  RT.dN_dt_EUV3 * f_esc_EUV3 ) / RT.dN_dt_LyC
+    else
+        RT.f_esc_LyC  = 0.0
+    end
+
+    return nothing 
+end
+
+
 const tol_Abs::Float64 = 0.05 
 
 function AbsorptionStep( Δt::Float64,
@@ -354,12 +381,12 @@ function AbsorptionStep( Δt::Float64,
     H_Z_LW      = AbsorptionUpdateJorH( H_Z_LW_old, Δt, dHZ_LWdt, αc_LW, c̃ )
 
     # Re-normalize so that H < J:
-    H_LW_mag    = sqrt( H_r_LW * H_r_LW  +  H_Z_LW * H_Z_LW )
-    if H_LW_mag > J_LW
-        f_LW   = H_LW_mag / J_LW
-        H_r_LW = H_r_LW   / f_LW
-        H_Z_LW = H_Z_LW   / f_LW 
-    end
+    #H_LW_mag    = sqrt( H_r_LW * H_r_LW  +  H_Z_LW * H_Z_LW )
+    #if H_LW_mag > J_LW
+    #    f_LW   = H_LW_mag / J_LW
+    #    H_r_LW = H_r_LW   / f_LW
+    #    H_Z_LW = H_Z_LW   / f_LW 
+    #end
 
     # Compute relative changes in LW J, H_r, and H_Z:
     ΔJ_LW       = abs( J_LW   - J_LW_old )   / max( J_LW_old,        J_floor )
@@ -392,12 +419,12 @@ function AbsorptionStep( Δt::Float64,
     H_Z_EUV1      = AbsorptionUpdateJorH( H_Z_EUV1_old, Δt, dHZ_EUV1dt, αc_EUV1, c̃ )
 
     # Re-normalize so that H < J:
-    H_EUV1_mag    = sqrt( H_r_EUV1 * H_r_EUV1  +  H_Z_EUV1 * H_Z_EUV1 )
-    if H_EUV1_mag > J_EUV1
-        f_EUV1   = H_EUV1_mag / J_EUV1
-        H_r_EUV1 = H_r_EUV1   / f_EUV1
-        H_Z_EUV1 = H_Z_EUV1   / f_EUV1 
-    end
+    #H_EUV1_mag    = sqrt( H_r_EUV1 * H_r_EUV1  +  H_Z_EUV1 * H_Z_EUV1 )
+    #if H_EUV1_mag > J_EUV1
+    #    f_EUV1   = H_EUV1_mag / J_EUV1
+    #    H_r_EUV1 = H_r_EUV1   / f_EUV1
+    #    H_Z_EUV1 = H_Z_EUV1   / f_EUV1 
+    #end
 
     # Compute relative changes in EUV1 J, H_r, and H_Z:
     ΔJ_EUV1       = abs( J_EUV1   - J_EUV1_old )   / max( J_EUV1_old,        J_floor )
@@ -430,12 +457,12 @@ function AbsorptionStep( Δt::Float64,
     H_Z_EUV2      = AbsorptionUpdateJorH( H_Z_EUV2_old, Δt, dHZ_EUV2dt, αc_EUV2, c̃ )
 
     # Re-normalize so that H < J:
-    H_EUV2_mag    = sqrt( H_r_EUV2 * H_r_EUV2  +  H_Z_EUV2 * H_Z_EUV2 )
-    if H_EUV2_mag > J_EUV2
-        f_EUV2   = H_EUV2_mag / J_EUV2
-        H_r_EUV2 = H_r_EUV2   / f_EUV2
-        H_Z_EUV2 = H_Z_EUV2   / f_EUV2 
-    end
+    #H_EUV2_mag    = sqrt( H_r_EUV2 * H_r_EUV2  +  H_Z_EUV2 * H_Z_EUV2 )
+    #if H_EUV2_mag > J_EUV2
+    #    f_EUV2   = H_EUV2_mag / J_EUV2
+    #    H_r_EUV2 = H_r_EUV2   / f_EUV2
+    #    H_Z_EUV2 = H_Z_EUV2   / f_EUV2 
+    #end
 
     # Compute relative changes in EUV2 J, H_r, and H_Z:
     ΔJ_EUV2       = abs( J_EUV2   - J_EUV2_old )   / max( J_EUV2_old,        J_floor )
@@ -468,12 +495,12 @@ function AbsorptionStep( Δt::Float64,
     H_Z_EUV3      = AbsorptionUpdateJorH( H_Z_EUV3_old, Δt, dHZ_EUV3dt, αc_EUV3, c̃ )
 
     # Re-normalize so that H < J:
-    H_EUV3_mag    = sqrt( H_r_EUV3 * H_r_EUV3  +  H_Z_EUV3 * H_Z_EUV3 )
-    if H_EUV3_mag > J_EUV3
-        f_EUV3   = H_EUV3_mag / J_EUV3
-        H_r_EUV3 = H_r_EUV3 / f_EUV3
-        H_Z_EUV3 = H_Z_EUV3 / f_EUV3 
-    end
+    #H_EUV3_mag    = sqrt( H_r_EUV3 * H_r_EUV3  +  H_Z_EUV3 * H_Z_EUV3 )
+    #if H_EUV3_mag > J_EUV3
+    #    f_EUV3   = H_EUV3_mag / J_EUV3
+    #    H_r_EUV3 = H_r_EUV3 / f_EUV3
+    #    H_Z_EUV3 = H_Z_EUV3 / f_EUV3 
+    #end
 
     # Compute relative changes in EUV2 J, H_r, and H_Z:
     ΔJ_EUV3       = abs( J_EUV3   - J_EUV3_old )   / max( J_EUV3_old,        J_floor )
@@ -516,13 +543,15 @@ const ϵ_ΔT::Float64               = 1e-3       # Use step-size ϵ_ΔT * T_old 
 const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider for heating/cooling
 
 """ This function performs a heating/cooling update 
-    over a step Δt. It solves:
+    over a step Δt. It solves the linearized heating/cooling 
+    equation using backward Euler (BDF1):
     
-    ∂e/∂t = Γ(e) - Λ(e) 
-          ≈ [ Γ(eⁿ) - Λ(eⁿ) ]  +  ( ∂Γ/∂e + ∂Λ/∂e ) × (e - eⁿ)
+    (eⁿ⁺¹ - eⁿ)/Δt = Γ(eⁿ⁺¹) - Λ(eⁿ⁺¹) 
+                   ≈ [ Γ(eⁿ) - Λ(eⁿ) ]  +  ( ∂Γ/∂e + ∂Λ/∂e ) × (eⁿ⁺¹ - eⁿ)
           
-    The integration is exact of the linearized equation, and because of this,
-    the overall solution e^(n+1) is second-order accurate. """
+    The update is accepted if the relative change in e was small (< tol_HeatCool),
+    if the updated e is physically acceptable, and if the linearized update was a 
+    good approximation to a fully implicit BDF1 update. """
 @inline function HeatingCoolingStep( Δt::Float64, 
                                   e_old::Float64,
                                     γad::Float64,
@@ -617,22 +646,33 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
 
     ∂HeatingRate∂e = ∂HeatingRate∂T * Conv_e_T  # Convert from ∂/∂T to ∂/∂e
 
-    # Finally, use all of this to update e:
-    ∂HeatCool = ∂HeatingRate∂e - ∂CoolingRate∂e
-    Quantity  = ∂HeatCool * Δt
-    if abs( Quantity ) > Quantity_threshold
-        # Exact solution of linearized equation:
-        e_new = e_old  +  ( HeatingRate - CoolingRate ) * ( exp( Quantity ) - 1 ) / ∂HeatCool
-    else
-        # For small arguments in the exponential, we instead Taylor expand to 2:nd order:
-        e_new = e_old  +  ( HeatingRate - CoolingRate ) * ( 1  +  0.5 * Quantity ) * Δt
-    end
+    # Linearized backward-Euler update of e:
+    e_new = e_old  +  ( HeatingRate - CoolingRate ) * Δt / ( 1  +  ∂CoolingRate∂e * Δt )
+
+    # ------- STABILITY & ACCURACY CHECK FOR TEMPERATURE UPDATE -------------------
 
     # Check that the relative change in e was sufficiently small, and that 
     # other stability/accuracy checks are satisfied:
     Δe    = abs( e_new  -  e_old ) / e_old
 
-    if Δe > tol_HeatCool || e_new ≤ 0.0 || !isfinite(e_new)
+    # Tolerance cooling/heating time-scale for accuracy purposes:
+    Δt_e  = min( tol_HeatCool * e_old / abs( HeatingRate - CoolingRate ), Δt_e_max )
+
+    # Even if the change in e was small, we also check the residual, so that
+    # our linearized solution actually approximates a fully implicit BDF1 solution.
+
+    # The would-be new temperature:
+    T_new            = ( γad - 1 ) * e_new  / ( n * kB )     
+        
+    # Cooling rate at would-be new temperature:
+    CoolingRate_new  = Λ( T_new, nHI, nHII, nHeI, nHeII, nHeIII, ne,
+                          nH2, nHD, z, CaseB )
+
+    # Relative residual checking |(e_old + (Γ - Λ(e_new)*Δtsub) - e_new)| / |e_new - e_old| :
+    e_floor          = n * kB * T_floor / (γad - 1)   # e corresponding to temperature floor
+    Res_e            = abs( e_old  +  ( HeatingRate  -  CoolingRate_new ) * Δt  -  e_new ) / max( abs( e_new - e_old ), e_floor ) 
+
+    if Δe > tol_HeatCool || e_new ≤ 0.0 || !isfinite(e_new) || Res_e > tol_HeatCool
         # In this case, the update is deemed inaccurate or unstable, so we reject it:
         REDO = true
         return REDO, e_new, Δe, Δt_e
@@ -1274,7 +1314,6 @@ end
 
 
 function UpdateRTandThermoChemistry!( Δt_RT_max::Float64, 
-                                              c̃::Float64,
                                              RT::StellarRTArrays,
                                      HydroState::HydrodynamicsState,
                                       ChemState::ChemistryState,
@@ -1290,7 +1329,6 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                                               Z::AbstractArray{Float64, 1},
                                            ZCoM::AbstractArray{Float64, 1},
                                      inv_r_cell::AbstractArray{Float64, 1},
-                               rfirst_StellarRT::Bool,
 
                                           # Gas velocity field:
                                        u_r_star::AbstractArray{Float64,2},
@@ -1302,8 +1340,7 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                                      u_r_over_r::AbstractArray{Float64,2},
 
                                            # Lyα stuff:
-                                          c̃_Lyα::Float64,
-                                       LyaState::LyαArrays,
+                                       LyaState::Union{LyαArrays,Nothing},
                                             Lyα::Bool = false,
 
                                            # Boundary conditions:
@@ -1313,14 +1350,25 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                                        BC_Z_top::Symbol = :Outflow
                                               )
 
+    c̃         = RT.c̃
     Δt_CFL_RT = GetRHDCFLTimeStep( r, Z, c̃, HydroState.u_X, HydroState.u_Y, CFL_RT ) 
     Δt_RT     = min( Δt_CFL_RT, Δt_RT_max )  
-    c̃Δt_RT    = c̃ * Δt_RT    
-
-    @assert BC_r_left  == :Reflect 
-    @assert BC_r_right == :Outflow
-    @assert BC_Z_bot   == :Reflect 
-    @assert BC_Z_top   == :Outflow
+    c̃Δt_RT    = c̃ * Δt_RT 
+    
+    if Lyα
+        @assert LyaState.c̃_Lyα == c̃ "Lyα and stellar RT c̃ mismatch in the photothermochemistry solver."
+    end
+    
+    # Unpack hydro & chemistry arrays:
+    ρ      = HydroState.ρ
+    e      = HydroState.e 
+    T      = HydroState.T
+    xH2    = ChemState.xH2
+    xHII   = ChemState.xHII
+    xHD    = ChemState.xHD
+    xDII   = ChemState.xDII
+    xHeII  = ChemState.xHeII 
+    xHeIII = ChemState.xHeIII
 
     #######################################################################
     #######                                                         #######
@@ -1342,12 +1390,19 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
 
     # We advect the J and H for all bands, using the M1 moment method. 
 
+    # Select Strang-split order:
+    if RT.rfirst_StellarRT == true 
+        # If the last Strang-split order was r-first, change to Z-first:
+        RT.rfirst_StellarRT = false 
+    else
+        # If the last Strang-split order was Z-first, change to r-first:
+        RT.rfirst_StellarRT = true
+    end
+
     UpdateStellarJold = false # Don't update Jold, since we want the pre-(injection + transport) value to compute dJ/dt
-    UpdateStellarH    = false # Don't update H within the RK-2 update, since we sub-cycle H 
 
     # Advect LW photons:
     AdvectJandH!( c̃Δt_RT,   RT.α_F_LW,  RT.J_LW,     RT.J_LW_old,   RT.H_r_LW,   RT.H_Z_LW, 
-                  RT.J_LW_stage,     RT.H_r_LW_stage,   RT.H_Z_LW_stage,
                   RT.D_rr_LW,        RT.D_ZZ_LW,  RT.D_rZ_LW, 
                   RT.K_ϕϕ_iphalf_LW, RT.K_ϕϕ_imhalf_LW,
                   RT.F_r_LW,         RT.F_Z_LW,
@@ -1355,12 +1410,11 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                   RT.F_r_HZ_LW,      RT.F_Z_HZ_LW, 
                   inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
                   u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                  UpdateStellarJold, UpdateStellarH, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
-                  rfirst_StellarRT, Val(:Threaded) )
+                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  RT.rfirst_StellarRT, Val(:Threaded) )
 
     # Advect EUV1 photons:
     AdvectJandH!( c̃Δt_RT,   RT.α_F_EUV1,  RT.J_EUV1,     RT.J_EUV1_old,   RT.H_r_EUV1,   RT.H_Z_EUV1, 
-                  RT.J_EUV1_stage,     RT.H_r_EUV1_stage,   RT.H_Z_EUV1_stage,
                   RT.D_rr_EUV1,        RT.D_ZZ_EUV1,  RT.D_rZ_EUV1, 
                   RT.K_ϕϕ_iphalf_EUV1, RT.K_ϕϕ_imhalf_EUV1,
                   RT.F_r_EUV1,         RT.F_Z_EUV1,
@@ -1368,12 +1422,11 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                   RT.F_r_HZ_EUV1,      RT.F_Z_HZ_EUV1, 
                   inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
                   u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                  UpdateStellarJold, UpdateStellarH, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
-                  rfirst_StellarRT, Val(:Threaded) )
+                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  RT.rfirst_StellarRT, Val(:Threaded) )
 
     # Advect EUV2 photons:
     AdvectJandH!( c̃Δt_RT,   RT.α_F_EUV2,  RT.J_EUV2,     RT.J_EUV2_old,   RT.H_r_EUV2,   RT.H_Z_EUV2, 
-                  RT.J_EUV2_stage,     RT.H_r_EUV2_stage,   RT.H_Z_EUV2_stage,
                   RT.D_rr_EUV2,        RT.D_ZZ_EUV2,  RT.D_rZ_EUV2, 
                   RT.K_ϕϕ_iphalf_EUV2, RT.K_ϕϕ_imhalf_EUV2,
                   RT.F_r_EUV2,         RT.F_Z_EUV2,
@@ -1381,12 +1434,11 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                   RT.F_r_HZ_EUV2,      RT.F_Z_HZ_EUV2, 
                   inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
                   u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                  UpdateStellarJold, UpdateStellarH, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
-                  rfirst_StellarRT, Val(:Threaded) )
+                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  RT.rfirst_StellarRT, Val(:Threaded) )
 
     # Advect EUV3 photons:
     AdvectJandH!( c̃Δt_RT,   RT.α_F_EUV3,  RT.J_EUV3,     RT.J_EUV3_old,   RT.H_r_EUV3,   RT.H_Z_EUV3, 
-                  RT.J_EUV3_stage,     RT.H_r_EUV3_stage,   RT.H_Z_EUV3_stage,
                   RT.D_rr_EUV3,        RT.D_ZZ_EUV3,  RT.D_rZ_EUV3, 
                   RT.K_ϕϕ_iphalf_EUV3, RT.K_ϕϕ_imhalf_EUV3,
                   RT.F_r_EUV3,         RT.F_Z_EUV3,
@@ -1394,8 +1446,8 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                   RT.F_r_HZ_EUV3,      RT.F_Z_HZ_EUV3, 
                   inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
                   u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                  UpdateStellarJold, UpdateStellarH, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
-                  rfirst_StellarRT, Val(:Threaded) )
+                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  RT.rfirst_StellarRT, Val(:Threaded) )
     
 
     #######################################################################
@@ -1406,17 +1458,6 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
 
     # After the transport step, we sub-cycle absorption, emission, chemistry,
     # and cooling/heating for all cells.
-
-    # Unpack hydro & chemistry arrays:
-    ρ      = HydroState.ρ
-    e      = HydroState.e 
-    T      = HydroState.T
-    xH2    = ChemState.xH2
-    xHII   = ChemState.xHII
-    xHD    = ChemState.xHD
-    xDII   = ChemState.xDII
-    xHeII  = ChemState.xHeII 
-    xHeIII = ChemState.xHeIII
                                               
     # Grid size:
     N_r, N_Z  = size( ρ )
@@ -1510,14 +1551,20 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
         @simd for i in dN_r 
             @inbounds begin
                 # Update old J:
-                #RT.J_opt_old[i,j]   = RT.J_opt[i,j]
-                #RT.J_FUV_old[i,j]   = RT.J_FUV[i,j]
+                RT.J_opt_old[i,j]    = RT.J_opt[i,j]
+                RT.J_FUV_old[i,j]    = RT.J_FUV[i,j]
                 RT.J_LW_old[i,j]     = RT.J_LW[i,j]
                 RT.J_EUV1_old[i,j]   = RT.J_EUV1[i,j]
                 RT.J_EUV2_old[i,j]   = RT.J_EUV2[i,j]
                 RT.J_EUV3_old[i,j]   = RT.J_EUV3[i,j]
 
                 # Update old H:
+                RT.H_r_opt_old[i,j]  = RT.H_r_opt[i,j]
+                RT.H_Z_opt_old[i,j]  = RT.H_Z_opt[i,j]
+
+                RT.H_r_FUV_old[i,j]  = RT.H_r_FUV[i,j]
+                RT.H_Z_FUV_old[i,j]  = RT.H_Z_FUV[i,j]
+
                 RT.H_r_LW_old[i,j]   = RT.H_r_LW[i,j]
                 RT.H_Z_LW_old[i,j]   = RT.H_Z_LW[i,j]
 
@@ -1541,15 +1588,14 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
     #######                                                         #######
     #######################################################################
 
-    # If Lyα RT is turned on, we also call the Lyα advection + frequency diffusion 
-    # solver over generally smaller sub-steps that add up to the 
-    # stellar RT time-step Δt_RT:
+    # If Lyα RT is turned on, we also call the Lyα solver over the same time-step,
+    # assuming same RSL (set outside to be equal in the Update RHD function):
     if Lyα 
         N_ν  = length( LyaState.νC )
         dN_ν = 1:N_ν
 
         # Update α (H I opacity @ line center), pd (destruction probability),
-        # and js_Lyα (frequency-integrated emissivity):
+        # and ∫dν_js_Lyα (frequency-integrated emissivity):
         @threads for j in dN_Z 
             @inbounds for i in dN_r
                 # Get all needed number densities:
@@ -1566,7 +1612,11 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                 LyaState.α_Lyα[i,j]  = nHI * σ0( T[i,j] )
 
                 # Update pd (Lyα destruction probability):
-                LyaState.pd[i,j]     = pd_Lyα( nHII, ne, nHI, nHeI, nH2, T[i,j], z )
+                if LyaState.LyαDestruction 
+                    LyaState.pd[i,j] = pd_Lyα( nHII, ne, nHI, nHeI, nH2, T[i,j], z )
+                else
+                    LyaState.pd[i,j] = 0.0
+                end
 
                 # Update the frequency integrated emissivity: 
                 LyaState.∫dν_js_Lyα[i,j] = ( ∫dν_js_recLyα( T[i,j], nHII, ne, true, true )
@@ -1575,9 +1625,8 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
             end # End of i-loop
         end # End of j-loop 
 
-        # Set all frequency diffusion + Doppler shift coefficients (the F's)
-        # using the latest values of the gas temperature T and hydro/chemical state:
-        UpdateFreqFactors!( LyaState, T, ∂u_r_∂r, ∂u_r_∂Z,  ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r  )
+        # Update the Lyα Voigt profile & emission profile for all cells:
+        UpdateVoigtAndEmissionProfile!( LyaState, T )
 
         # Update the flux opacity using the newly updated Hvoigt:
         @threads for k in dN_ν 
@@ -1586,42 +1635,17 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                     LyaState.α_F_Lyα[i,j,k] = LyaState.α_Lyα[i,j] * LyaState.Hvoigt[i,j,k]  
                 end # End of i-loop
             end # End of j-loop 
-        end # End of k-loop 
+        end # End of k-loop
+        
+        # Lyα emission:
+        LyαEmissionUpdate!( LyaState.J_Lyα, LyaState.∫dν_js_Lyα,
+                            LyaState.ϕ_ν, c̃, Δt_RT )
 
+        # Lyα Advection + Absorption (including rad. pressure) + frequency diffusion & Doppler shift:
+        UpdateLyαJandH!( Δt_RT, c̃, LyaState, inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell, T,
+                         u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+                         true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top )
 
-        # Determine the Lyα CFL time-step: 
-        Δt_Lyα_CFL = GetRHDCFLTimeStep( r, Z, c̃_Lyα, HydroState.u_X, HydroState.u_Y, CFL_RT )
-
-        # Start the Lyα RT solve:
-        t_Lyα = 0.0
-        while t_Lyα < Δt_RT
-            # Set maximum Lyα RT transport time-step:
-            Δt_Lyα_max = max( Δt_RT - t_Lyα, 0.0 )
-            Δt_Lyα     = min( Δt_Lyα_max, Δt_Lyα_CFL )
-            c̃Δt_Lyα    = c̃_Lyα * Δt_Lyα
-
-            # Lyα emission:
-            LyαEmissionUpdate!( LyaState.J_Lyα, LyaState.∫dν_js_Lyα,
-                                LyaState.ϕ_ν, c̃_Lyα, Δt_Lyα )
-
-            # Lyα Advection + frequency diffusion & Doppler shift:
-            UpdateLyαJandH!( c̃Δt_Lyα, LyaState, inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell, 
-                             u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                             true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top )
-
-            # Lyα absorption & destruction, and change in gas momentum from Lyα radiation pressure:
-            LyαAbsorptionUpdate!( LyaState.J_Lyα, 
-                                  LyaState.H_r_Lyα, LyaState.H_Z_Lyα,
-                                  LyaState.H_r_Lyα_old, LyaState.H_Z_Lyα_old,
-                                  LyaState.Hvoigt, LyaState.α_Lyα, LyaState.αc_Lyα, LyaState.α_F_Lyα, 
-                                  LyaState.pd, 
-                                  LyaState.Δρu_Lyα_r, LyaState.Δρu_Lyα_Z,
-                                  LyaState.Δν,
-                                  c̃_Lyα, Δt_Lyα )
-
-            # Update time:
-            t_Lyα += Δt_Lyα
-        end
     end
 
     return Δt_RT
@@ -1678,7 +1702,8 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
                                           r::AbstractArray{Float64, 1},
                                           Z::AbstractArray{Float64, 1},
                                   Zstar_pos::Float64,
-                                 σstar_cell::Float64  = 2.0
+                                 σstar_cell::Float64,
+                                          c̃::Float64
                                  )
    
     # Grid size: 
@@ -1692,37 +1717,31 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
     zeros_zf() = zeros(Float64, N_r,   N_Z+1) # For Z-interface fluxes 
 
     # Intensities (latest & old, and stage values for RK2) for all bands: 
-    J_opt    = zeros_c();  J_opt_old  = copy(J_opt);  J_opt_stage  = copy(J_opt)
-    J_FUV    = zeros_c();  J_FUV_old  = copy(J_FUV);  J_FUV_stage  = copy(J_opt)
-    J_LW     = zeros_c();  J_LW_old   = copy(J_LW);   J_LW_stage   = copy(J_opt)
-    J_EUV1   = zeros_c();  J_EUV1_old = copy(J_EUV1); J_EUV1_stage = copy(J_opt)
-    J_EUV2   = zeros_c();  J_EUV2_old = copy(J_EUV2); J_EUV2_stage = copy(J_opt)
-    J_EUV3   = zeros_c();  J_EUV3_old = copy(J_EUV3); J_EUV3_stage = copy(J_opt)
+    J_opt    = zeros_c();  J_opt_old  = copy(J_opt)
+    J_FUV    = zeros_c();  J_FUV_old  = copy(J_FUV)
+    J_LW     = zeros_c();  J_LW_old   = copy(J_LW)
+    J_EUV1   = zeros_c();  J_EUV1_old = copy(J_EUV1)
+    J_EUV2   = zeros_c();  J_EUV2_old = copy(J_EUV2)
+    J_EUV3   = zeros_c();  J_EUV3_old = copy(J_EUV3)
 
     # H ≡ ∫dΩ I n̂ / 4π arrays for all bands:
     H_r_opt        = zeros_c();  H_Z_opt       = zeros_c()
     H_r_opt_old    = zeros_c();  H_Z_opt_old   = zeros_c()
-    H_r_opt_stage  = zeros_c();  H_Z_opt_stage = zeros_c()
 
     H_r_FUV        = zeros_c();  H_Z_FUV       = zeros_c()
     H_r_FUV_old    = zeros_c();  H_Z_FUV_old   = zeros_c()
-    H_r_FUV_stage  = zeros_c();  H_Z_FUV_stage = zeros_c()
 
     H_r_LW         = zeros_c();  H_Z_LW       = zeros_c()
     H_r_LW_old     = zeros_c();  H_Z_LW_old   = zeros_c()
-    H_r_LW_stage   = zeros_c();  H_Z_LW_stage = zeros_c()
 
     H_r_EUV1       = zeros_c();  H_Z_EUV1       = zeros_c()
     H_r_EUV1_old   = zeros_c();  H_Z_EUV1_old   = zeros_c()
-    H_r_EUV1_stage = zeros_c();  H_Z_EUV1_stage = zeros_c()
 
     H_r_EUV2       = zeros_c();  H_Z_EUV2       = zeros_c()
     H_r_EUV2_old   = zeros_c();  H_Z_EUV2_old   = zeros_c()
-    H_r_EUV2_stage = zeros_c();  H_Z_EUV2_stage = zeros_c()
 
     H_r_EUV3       = zeros_c();  H_Z_EUV3     = zeros_c()
     H_r_EUV3_old   = zeros_c();  H_Z_EUV3_old = zeros_c()
-    H_r_EUV3_stage = zeros_c();  H_Z_EUV3_stage = zeros_c()
 
     # Eddington tensor components for all bands:
     D_rr_opt  = fill(1/3, N_r, N_Z);  D_ZZ_opt  = fill(1/3, N_r, N_Z);  D_rZ_opt  = zeros_c()
@@ -1799,6 +1818,15 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
     Lum_EUV1      = L_EUV1(mstarZAMS, Zstar_Zsun) * Lsun 
     Lum_EUV2      = L_EUV2(mstarZAMS, Zstar_Zsun) * Lsun 
     Lum_EUV3      = L_EUV3(mstarZAMS, Zstar_Zsun) * Lsun 
+
+    # Get photon emission rates in all bands:
+    dN_dt_opt     = dNdt_opt(mstarZAMS, Zstar_Zsun)
+    dN_dt_FUV     = dNdt_FUV(mstarZAMS, Zstar_Zsun)
+    dN_dt_LW      = dNdt_LW(mstarZAMS, Zstar_Zsun)
+    dN_dt_EUV1    = dNdt_EUV1(mstarZAMS, Zstar_Zsun)
+    dN_dt_EUV2    = dNdt_EUV2(mstarZAMS, Zstar_Zsun)
+    dN_dt_EUV3    = dNdt_EUV2(mstarZAMS, Zstar_Zsun)
+    dN_dt_LyC     = dN_dt_EUV1 + dN_dt_EUV2 + dN_dt_EUV3
     
     # Compute weight factors f_ij that determine the emissivity 
     # and stellar mass in a given cell (i,j):
@@ -1828,38 +1856,41 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
         end
     end
 
+    # Initialize Strang split order:
+    rfirst_StellarRT = true 
 
-    return StellarRTArrays(
-        J_opt, J_opt_old,   J_opt_stage,
-        J_FUV, J_FUV_old,   J_FUV_stage,
-        J_LW, J_LW_old,     J_LW_stage,
-        J_EUV1, J_EUV1_old, J_EUV1_stage, 
-        J_EUV2, J_EUV2_old, J_EUV2_stage, 
-        J_EUV3, J_EUV3_old, J_EUV3_stage, 
+    # Initialize LyC and LW escape fractions:
+    f_esc_LyC = 0.0
+    f_esc_LW  = 0.0 
+
+
+    return StellarRTArrays( 
+        c̃,
+
+        J_opt, J_opt_old,  
+        J_FUV, J_FUV_old,  
+        J_LW, J_LW_old,     
+        J_EUV1, J_EUV1_old, 
+        J_EUV2, J_EUV2_old,  
+        J_EUV3, J_EUV3_old, 
 
         H_r_opt,        H_Z_opt, 
         H_r_opt_old,    H_Z_opt_old,
-        H_r_opt_stage,  H_Z_opt_stage,
 
         H_r_FUV,        H_Z_FUV,
         H_r_FUV_old,    H_Z_FUV_old,
-        H_r_FUV_stage,  H_Z_FUV_stage,
         
         H_r_LW,         H_Z_LW,
         H_r_LW_old,     H_Z_LW_old,
-        H_r_LW_stage,   H_Z_LW_stage,
 
         H_r_EUV1,       H_Z_EUV1, 
         H_r_EUV1_old,   H_Z_EUV1_old,
-        H_r_EUV1_stage, H_Z_EUV1_stage,
 
         H_r_EUV2,       H_Z_EUV2, 
         H_r_EUV2_old,   H_Z_EUV2_old,
-        H_r_EUV2_stage, H_Z_EUV2_stage,
 
         H_r_EUV3,       H_Z_EUV3,
         H_r_EUV3_old,   H_Z_EUV3_old,
-        H_r_EUV3_stage, H_Z_EUV3_stage,
 
         D_rr_opt,  D_ZZ_opt, D_rZ_opt, 
         D_rr_FUV,  D_ZZ_FUV, D_rZ_FUV, 
@@ -1881,12 +1912,19 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
         F_r_EUV3, F_Z_EUV3, F_r_Hr_EUV3, F_Z_Hr_EUV3, F_r_HZ_EUV3, F_Z_HZ_EUV3,
 
         α_F_opt, α_F_FUV, α_F_LW, α_F_EUV1, α_F_EUV2, α_F_EUV3,
+
         Lum_opt, Lum_FUV, Lum_LW, Lum_EUV1, Lum_EUV2, Lum_EUV3,
+
+        dN_dt_opt, dN_dt_FUV, dN_dt_LW, dN_dt_EUV1, dN_dt_EUV2, dN_dt_EUV3, dN_dt_LyC,
 
         js_opt, js_FUV, js_LW, js_EUV1, js_EUV2, js_EUV3, ρ_star,
 
         Δρu_stellar_r, Δρu_stellar_Z, 
-        f_stellar_r,   f_stellar_Z
+        f_stellar_r,   f_stellar_Z,
+
+        rfirst_StellarRT, 
+
+        f_esc_LyC, f_esc_LW
     )
 
 end

@@ -8,8 +8,11 @@ export LyαArrays, StellarRTArrays, HydrodynamicsState, ChemistryState,
 
 """ A useful struct for storing all Lyα related arrays/quantities/settings. """
 mutable struct LyαArrays 
+    # Lyα reduced speed of light:
+    c̃_Lyα::Float64
+
     # Intensities (latest & old) for all bands: 
-    J_Lyα::Array{Float64, 3};  J_Lyα_old::Array{Float64, 3};  J_Lyα_stage::Array{Float64, 3}
+    J_Lyα::Array{Float64, 3};  J_Lyα_old::Array{Float64, 3}
 
     # Lyα energy density:
     e_Lyα::Array{Float64, 2}
@@ -19,13 +22,14 @@ mutable struct LyαArrays
     H_r_Lyα_old::Array{Float64, 3};    H_Z_Lyα_old::Array{Float64, 3}
 
     # Eddington tensor components:
-    D_rr_Lyα::Array{Float64, 3};  D_ZZ_Lyα::Array{Float64, 3};  D_rZ_Lyα::Array{Float64, 3}
+    D_rr_Lyα::Array{Float32, 3};  D_ZZ_Lyα::Array{Float32, 3};  D_rZ_Lyα::Array{Float32, 3}
 
     # ϕϕ-component of radiation pressure tensor K = D × J at interfaces, 
-    # needed for geometric source term:
+    # needed for geometric source term. To reduce memory storage, we make them scratch 
+    # arrays of size N_r × N_Z × nthread:
     K_ϕϕ_iphalf_Lyα::Array{Float64, 3};     K_ϕϕ_imhalf_Lyα::Array{Float64, 3}
 
-    # Flux components for all bands: 
+    # Interface flux scratch arrays, of size of order N_r × N_Z × nthread: 
     F_r_Lyα::Array{Float64, 3};     F_Z_Lyα::Array{Float64, 3}
     F_r_Hr_Lyα::Array{Float64, 3};  F_Z_Hr_Lyα::Array{Float64, 3}
     F_r_HZ_Lyα::Array{Float64, 3};  F_Z_HZ_Lyα::Array{Float64, 3}
@@ -62,6 +66,9 @@ mutable struct LyαArrays
     # Recoil setting (true if on, false if off):
     Recoil::Bool 
 
+    # Lyα destruction (pd > 0) setting (true if on, false if off):
+    LyαDestruction::Bool
+
     # Opacity floor (very small), set to avoid 0 in the frequency leakage coefficients 
     α_Lyα_floor::Float64 
 
@@ -73,57 +80,57 @@ mutable struct LyαArrays
     f_Lyα_r::Array{Float64, 2}
     f_Lyα_Z::Array{Float64, 2}
 
-    # Strang-split order for M1 advection (changes every advection step):
+    # Strang-split order for M1 advection (changes automatically every advection step):
     rfirst_Lyα::Bool 
 
-    # Force multiplier & Lyα luminosity:
+    # Force multiplier, Lyα luminosity, Lyα escape fraction:
     M_F::Float64
+    M_F_antigravity::Float64       # Force multiplier anti-parallel to gravity 
     L_Lyα::Float64
+    f_esc_Lyα::Float64
+
 end
 
 
 """ A struct for organizing stellar RT arrays, and the stellar mass density. """
-struct StellarRTArrays
+mutable struct StellarRTArrays
+    # Stellar RT reduced speed of light:
+    c̃::Float64
+
     # Intensities (latest & old) for all bands: 
-    J_opt::Array{Float64, 2};     J_opt_old::Array{Float64, 2};  J_opt_stage::Array{Float64, 2}
-    J_FUV::Array{Float64, 2};     J_FUV_old::Array{Float64, 2};  J_FUV_stage::Array{Float64, 2}
-    J_LW::Array{Float64, 2};      J_LW_old::Array{Float64, 2};   J_LW_stage::Array{Float64, 2}
-    J_EUV1::Array{Float64, 2};    J_EUV1_old::Array{Float64, 2}; J_EUV1_stage::Array{Float64, 2}
-    J_EUV2::Array{Float64, 2};    J_EUV2_old::Array{Float64, 2}; J_EUV2_stage::Array{Float64, 2}
-    J_EUV3::Array{Float64, 2};    J_EUV3_old::Array{Float64, 2}; J_EUV3_stage::Array{Float64, 2}
+    J_opt::Array{Float64, 2};     J_opt_old::Array{Float64, 2}
+    J_FUV::Array{Float64, 2};     J_FUV_old::Array{Float64, 2}
+    J_LW::Array{Float64, 2};      J_LW_old::Array{Float64, 2}
+    J_EUV1::Array{Float64, 2};    J_EUV1_old::Array{Float64, 2}
+    J_EUV2::Array{Float64, 2};    J_EUV2_old::Array{Float64, 2}
+    J_EUV3::Array{Float64, 2};    J_EUV3_old::Array{Float64, 2}
 
     # H ≡ ∫dΩ I n̂ / 4π arrays for all bands:
     H_r_opt::Array{Float64, 2};        H_Z_opt::Array{Float64, 2}
     H_r_opt_old::Array{Float64, 2};    H_Z_opt_old::Array{Float64, 2}
-    H_r_opt_stage::Array{Float64, 2};  H_Z_opt_stage::Array{Float64, 2}
 
     H_r_FUV::Array{Float64, 2};        H_Z_FUV::Array{Float64, 2}
     H_r_FUV_old::Array{Float64, 2};    H_Z_FUV_old::Array{Float64, 2}
-    H_r_FUV_stage::Array{Float64, 2};  H_Z_FUV_stage::Array{Float64, 2}
 
     H_r_LW::Array{Float64, 2};         H_Z_LW::Array{Float64, 2}
     H_r_LW_old::Array{Float64, 2};     H_Z_LW_old::Array{Float64, 2}
-    H_r_LW_stage::Array{Float64, 2};   H_Z_LW_stage::Array{Float64, 2}
 
     H_r_EUV1::Array{Float64, 2};       H_Z_EUV1::Array{Float64, 2}
     H_r_EUV1_old::Array{Float64, 2};   H_Z_EUV1_old::Array{Float64, 2}
-    H_r_EUV1_stage::Array{Float64, 2}; H_Z_EUV1_stage::Array{Float64, 2}
 
     H_r_EUV2::Array{Float64, 2};       H_Z_EUV2::Array{Float64, 2}
     H_r_EUV2_old::Array{Float64, 2};   H_Z_EUV2_old::Array{Float64, 2}
-    H_r_EUV2_stage::Array{Float64, 2}; H_Z_EUV2_stage::Array{Float64, 2}
 
     H_r_EUV3::Array{Float64, 2};       H_Z_EUV3::Array{Float64, 2}
     H_r_EUV3_old::Array{Float64, 2};   H_Z_EUV3_old::Array{Float64, 2}
-    H_r_EUV3_stage::Array{Float64, 2}; H_Z_EUV3_stage::Array{Float64, 2}
 
     # Eddington tensor componens for all bands:
-    D_rr_opt::Array{Float64, 2};  D_ZZ_opt::Array{Float64, 2};  D_rZ_opt::Array{Float64, 2}
-    D_rr_FUV::Array{Float64, 2};  D_ZZ_FUV::Array{Float64, 2};  D_rZ_FUV::Array{Float64, 2}
-    D_rr_LW::Array{Float64, 2};   D_ZZ_LW::Array{Float64, 2};   D_rZ_LW::Array{Float64, 2}
-    D_rr_EUV1::Array{Float64, 2}; D_ZZ_EUV1::Array{Float64, 2}; D_rZ_EUV1::Array{Float64, 2}
-    D_rr_EUV2::Array{Float64, 2}; D_ZZ_EUV2::Array{Float64, 2}; D_rZ_EUV2::Array{Float64, 2}
-    D_rr_EUV3::Array{Float64, 2}; D_ZZ_EUV3::Array{Float64, 2}; D_rZ_EUV3::Array{Float64, 2}
+    D_rr_opt::Array{Float32, 2};  D_ZZ_opt::Array{Float32, 2};  D_rZ_opt::Array{Float32, 2}
+    D_rr_FUV::Array{Float32, 2};  D_ZZ_FUV::Array{Float32, 2};  D_rZ_FUV::Array{Float32, 2}
+    D_rr_LW::Array{Float32, 2};   D_ZZ_LW::Array{Float32, 2};   D_rZ_LW::Array{Float32, 2}
+    D_rr_EUV1::Array{Float32, 2}; D_ZZ_EUV1::Array{Float32, 2}; D_rZ_EUV1::Array{Float32, 2}
+    D_rr_EUV2::Array{Float32, 2}; D_ZZ_EUV2::Array{Float32, 2}; D_rZ_EUV2::Array{Float32, 2}
+    D_rr_EUV3::Array{Float32, 2}; D_ZZ_EUV3::Array{Float32, 2}; D_rZ_EUV3::Array{Float32, 2}
 
     # ϕϕ-component of radiation pressure tensor K = D × J at interfaces, 
     # needed for geometric source term:
@@ -173,6 +180,15 @@ struct StellarRTArrays
     Lum_EUV2::Float64
     Lum_EUV3::Float64
 
+    # Stellar photon emission rates in all bands:
+    dN_dt_opt::Float64
+    dN_dt_FUV::Float64
+    dN_dt_LW::Float64
+    dN_dt_EUV1::Float64
+    dN_dt_EUV2::Float64
+    dN_dt_EUV3::Float64
+    dN_dt_LyC::Float64    # Total LyC (EUV1 + EUV2 + EUV3) emission rate 
+
     # Emissivities for all bands:
     js_opt::Array{Float64, 2}
     js_FUV::Array{Float64, 2}
@@ -189,6 +205,13 @@ struct StellarRTArrays
     Δρu_stellar_Z::Array{Float64, 2}
     f_stellar_r::Array{Float64, 2}
     f_stellar_Z::Array{Float64, 2}
+
+    # Strang-split order for M1 advection (changes automatically every advection step):
+    rfirst_StellarRT::Bool 
+
+    # LyC & LW escape fraction:
+    f_esc_LyC::Float64 
+    f_esc_LW::Float64
 
 end
 
@@ -316,6 +339,12 @@ mutable struct HydrodynamicsState{T<:AbstractFloat}
     BC_X_right::Symbol
     BC_Y_left::Symbol
     BC_Y_right::Symbol
+
+    # Strang split order:
+    rfirst_Hydro::Bool
+
+    # Total mass (g) in simulation volume:
+    M_simvol::Float64
 end
 
 
@@ -422,7 +451,8 @@ struct GeometryCartesian{T<:AbstractFloat}
 end
 
 
-""" A struct for the gravitational potential & its gradient components. """
+""" A struct for the gravitational potential, its gradient components,
+    and the gravitational force per unit volume (f_grav). """
 mutable struct GravityState{T<:AbstractFloat}
     Φ::Array{T, 2} 
     Φ_half::Array{T, 2} 
@@ -430,6 +460,8 @@ mutable struct GravityState{T<:AbstractFloat}
     Φ_snapshot::Array{T, 2}
     ∂Φ∂r::Array{T, 2}   
     ∂Φ∂Z::Array{T, 2}
+    f_gravity_r::Array{T, 2}
+    f_gravity_Z::Array{T, 2}
 end
 
 """ A struct for the Poisson equation coefficients. These never 

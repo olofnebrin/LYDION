@@ -3,6 +3,7 @@
 *.jl.mem
 *.jl.*.cov
 *.ji
+*_OLD.jl
 Manifest.toml
 
 # VS Code
@@ -15,4 +16,3 @@ Manifest.toml
 *.mp4
 *.png
 *.pdf
-output/

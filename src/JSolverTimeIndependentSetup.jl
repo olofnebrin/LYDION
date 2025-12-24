@@ -42,12 +42,12 @@ function JSolver_UniformCloud_New(nHcl::Float64 = 7380.0, T0::Float64 = 5e4,
     #######                  P R O B L E M  S E T U P                #######
     #######################################################################
 
-    N_r   = 16; dN_r = 1:N_r
-    N_Z   = 16; dN_Z = 1:N_Z
+    N_r   = 2*16; dN_r = 1:N_r
+    N_Z   = 2*16; dN_Z = 1:N_Z
     rmax  = pc
     Zmax  = pc
     Rcl   = 0.75 * rmax
-    Rs    = 0.6 * Rcl
+    Rs    = 0.5 * Rcl
     L_Lyα = 1e5 * Lsun
 
     ϵ = 0.0
@@ -67,6 +67,8 @@ function JSolver_UniformCloud_New(nHcl::Float64 = 7380.0, T0::Float64 = 5e4,
     inv_r_cell = geom.inv_r_cell 
 
     # Gas state (hydro is OFF – just zeros)
+    u_r        = zeros(Float64, N_r, N_Z)
+    u_Z        = zeros(Float64, N_r, N_Z)
     u_r_star   = zeros(Float64, N_r + 1, N_Z)
     u_Z_star   = zeros(Float64, N_r, N_Z + 1)
     ∂u_r_∂r    = zeros(Float64, N_r, N_Z)
@@ -126,10 +128,12 @@ function JSolver_UniformCloud_New(nHcl::Float64 = 7380.0, T0::Float64 = 5e4,
             # H I opacity at line center:
             #α[i,j] = (R <= Rcl && R >  Rs) ? (nHI * σ0(T0)) : 1e-30
 
-            if R > Rs && j > 0
+            if R > Rs #&& j > 2
+                # Neutral shell 
                 xHII = 0.0
                 xHI  = 1 - xHII
             else 
+                # Ionized gas 
                 xHII = 1 - ϵ 
                 xHI  = 1 - xHII 
             end 
@@ -179,9 +183,6 @@ function JSolver_UniformCloud_New(nHcl::Float64 = 7380.0, T0::Float64 = 5e4,
         end
     end
 
-    println("Max Hvoigt: $(maximum(Hvoigt))" )
-    println("Max α_Lyα: $(maximum(α_Lyα))" )
-
     #######################################################################
     #######                   S P E C T R U M   S I T E              #######
     #######################################################################
@@ -212,10 +213,10 @@ function JSolver_UniformCloud_New(nHcl::Float64 = 7380.0, T0::Float64 = 5e4,
     #######                  T I M E   I N T E G R A T I O N          #######
     #######################################################################
 
-    CFL    = 0.6
-    Δt_CFL = GetRHDCFLTimeStep(r, Z, c̃, CFL)
+    CFL    = 0.3
+    Δt_CFL = GetRHDCFLTimeStep(r, Z, c̃, u_r, u_Z, CFL)
     t      = 0.0
-    tmax   = 200 * Rcl / c̃
+    tmax   = 10 * Rcl / c̃
     step   = 0
 
     while t < tmax
@@ -223,48 +224,22 @@ function JSolver_UniformCloud_New(nHcl::Float64 = 7380.0, T0::Float64 = 5e4,
         Δt     = min(Δt_CFL, tmax - t)
         c̃Δt    = c̃ * Δt
 
-        if t / tmax > 0.5
-            #@inbounds for j in dN_Z
-            #    @simd for i in dN_r
-            #        if j < 3
-            #            nHII        = (1 - ϵ) * nHcl
-            #            nHI         = ϵ * nHcl
-            #            ne          = nHII 
-            #            α_Lyα[i,j]  = nHI * σ0(T0)
-            #            ∫dν_js_Lyα[i,j] = ( ∫dν_js_recLyα( T[i,j], nHII, ne, true, true ) 
-            #                            +   ∫dν_js_collLyα( T[i,j], nHI, ne ) )
-            #        end
-            #    end
-            #end
-
-            # Update frequency factors:
-            UpdateFreqFactors!( LyaState, T, ∂u_r_∂r, ∂u_r_∂Z,  ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r )
-
-            # Flux opacity α_F = α * Hvoigt
-            @threads for k in dN_ν
-                for j in dN_Z 
-                    for i in dN_r
-                        α_F[i,j,k] = α_Lyα[i,j] * Hvoigt[i,j,k] 
-                    end
-                end
-            end
-        end
-
         # 1) Lyα emission
         LyαEmissionUpdate!( J, ∫dν_js_Lyα, ϕ_ν, c̃, Δt )
 
         # 2) Advection + frequency diffusion + Doppler shift (new solver)
-        UpdateLyαJandH!( c̃Δt, LyaState,
+        UpdateLyαJandH!( c̃Δt, c̃, LyaState,
                          inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
+                         T,
                          u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
                          true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top )
 
         # 3) Lyα absorption & destruction
-        LyαAbsorptionUpdate!( J, H_r, H_Z,
-                              H_r_old, H_Z_old,
-                              Hvoigt, α_Lyα, αc, α_F, pd,
-                              Δρu_r, Δρu_Z, Δν,
-                              c̃, Δt )
+        #LyαAbsorptionUpdate!( J, H_r, H_Z,
+        #                      H_r_old, H_Z_old,
+        #                      Hvoigt, α_Lyα, αc, α_F, pd,
+        #                      Δρu_r, Δρu_Z, Δν,
+        #                      c̃, Δt )
 
         # 4) Update energy density
         Update_e_Lyα!( e_Lyα, Δν, J )

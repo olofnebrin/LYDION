@@ -2,18 +2,38 @@
 using .Structs
 using .ConstantsAndFunctions     # Needed constants  
 using HDF5
-using HDF5: create_dataset, h5open, resize!, attrs, datatype
+using HDF5: create_dataset, create_group, h5open, resize!, attrs, datatype
 
 
 export CreateHDF5File, SaveGridHDF5File, SaveLyαFreqGridHDF5File, SaveRHDTimeStepHDF5
 
 
-function CreateHDF5File( FileName::String, 
-                              N_r::Int,
-                              N_Z::Int, 
-                           Nsaved::Int,
-                              Lyα::Bool,    # Whether to add storage for Lyα arrays 
-                              N_ν::Int = 0  # Number of Lyα frequency bins 
+""" This function sets up an HDF5 file of a given name, containing storage 
+    for all arrays and settings for RHD simulations of a single star of mass mstar (M⊙)
+    in 2D cylindrical coordinates. """
+function CreateHDF5File( FileName::String,                # File name 
+                              N_r::Int,                   # Number of cells along r-axis  
+                              N_Z::Int,                   # Number of cells along Z-axis 
+                           Nsaved::Int, 
+                          Gravity::Bool,                  # Whether to add storage for gravity & gravity is on/off
+                              Lyα::Bool,                  # Whether to add storage for Lyα arrays & Lyα RT is on/off  
+                           Recoil::Bool,                  # Whether atomic recoil is on/off (relevant only if Lyα is on)
+                   LyαDestruction::Bool,                  # Whether Lyα destruction (pd > 0) is on/off (relevant only if Lyα is on)
+                      RadPressure::Bool,                  # Whether radiation pressure feedback is on/off
+                                z::Float64,               # Redshift 
+                              N_ν::Int = 0,               # Number of Lyα frequency bins 
+                             tmax::Float64 = 1e5 * yr,    # Desired time tmax to end the simulation  
+                            mstar::Float64 = 30.0,        # Stellar mass (Msun)
+                      Z_star_Zsun::Float64 = 0.0,         # Metallicity of star(s) in units of Solar metallicity  
+                      σ_star_cell::Float64 = 3.0,         # Gaussian extent of star(s) in units of cell width 
+                            Z_pos::Float64 = 0.0,         # Central Z-position of stellar mass
+                       BC_r_right::Symbol  = :Outflow,    # BCs at outer r-boundary 
+                        BC_Z_left::Symbol  = :Reflect,    # BCs at lower Z-boundary
+                       BC_Z_right::Symbol  = :Outflow,    # BCs at upper Z-boundary
+                              CFL::Float64 = 0.4,         # CFL factor for hydrodynamics 
+                           CFL_RT::Float64 = 0.4,         # CFL factor for M1 RT (both stellar & Lyα)
+                                c̃::Float64 = 300 * kms,   # RSL for both stellar & Lyα RT
+                  FileDescription::String  = "RHD simulation in $(N_r) × $(N_Z) resolution"
                         )
 
     h5open(FileName, "w") do file
@@ -43,6 +63,121 @@ function CreateHDF5File( FileName::String,
         create_dataset(file, "CellVolumes", Float64,
                        (N_r, N_Z) )
 
+        ############################# SETTINGS ###################################
+
+        settings = create_group(file, "Settings")
+
+        # Save simulation/file description:
+        attrs(settings)["FileDescription"] = FileDescription
+
+        # Save desired tmax & stellar properties:
+        attrs(settings)["tmax"]        = string(tmax)
+        attrs(settings)["mstar_Msun"]  = string(mstar)
+        attrs(settings)["Z_star_Zsun"] = string(Z_star_Zsun)
+        attrs(settings)["σ_star_cell"] = string(σ_star_cell)
+        attrs(settings)["Z_pos"]       = string(Z_pos)
+
+        # Save redshift:
+        attrs(settings)["z"] = string(z)
+
+        # Save BCs:
+        attrs(settings)["BC_r_right"]  = string(BC_r_right)
+        attrs(settings)["BC_Z_left"]   = string(BC_Z_left)
+        attrs(settings)["BC_Z_right"]  = string(BC_Z_right)
+
+        # Save CFL factors:
+        attrs(settings)["CFL"]         = string(CFL)
+        attrs(settings)["CFL_RT"]      = string(CFL_RT)
+
+        # Save gravity setting (on/off):
+        attrs(settings)["Gravity"]     = string(Gravity)
+
+        # Save Lyα setting (on/off):
+        attrs(settings)["Lya"]         = string(Lyα)
+
+        # Save atomic recoil for Lyα setting (on/off) - only relevant if Lyα RT is on:
+        attrs(settings)["Recoil"]      = string(Recoil)
+
+        # Save Lyα destruction (pd > 0) setting (on/off) - only relevant if Lyα RT is on:
+        attrs(settings)["Lya_pd_on"]   = string(LyαDestruction)
+
+        # Save radiation pressure feedback setting (on/off):
+        attrs(settings)["RadPressure"] = string(RadPressure)
+
+        ############################# RESTART AT CHECKPOINT ######################
+
+        # We also store needed arrays for re-starting a simulation:
+
+        CheckPoint = create_group(file, "Checkpoint")
+
+        # For saving time and time-step at latest CheckPoint:
+        attrs(CheckPoint)["t_current"]  = 0.0
+        attrs(CheckPoint)["dt"]         = 0.0
+        attrs(CheckPoint)["step"]       = 0
+
+
+        # Hydro CheckPoint (Float64)
+        attrs(CheckPoint)["rfirst_Hydro"] = true  
+
+        create_dataset(CheckPoint, "GasDensity", Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "rMomentum",  Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "ZMomentum",  Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "Energy",     Float64, (N_r, N_Z))
+
+        # Thermo-chemistry CheckPoint
+        create_dataset(CheckPoint, "T",      Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xHII",   Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xH2",    Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xHeII",  Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xHeIII", Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xDII",   Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xHD",    Float64, (N_r, N_Z))
+
+        # Stellar RT CheckPoint:
+        attrs(CheckPoint)["RSL"]              = c̃
+        attrs(CheckPoint)["rfirst_StellarRT"] = true
+
+        create_dataset(CheckPoint, "J_opt",    Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "H_r_opt",  Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "H_Z_opt",  Float64, (N_r, N_Z))
+
+        create_dataset(CheckPoint, "J_FUV",    Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "H_r_FUV",  Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "H_Z_FUV",  Float64, (N_r, N_Z))
+
+        create_dataset(CheckPoint, "J_LW",     Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "H_r_LW",   Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "H_Z_LW",   Float64, (N_r, N_Z))
+
+        create_dataset(CheckPoint, "J_EUV1",   Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "H_r_EUV1", Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "H_Z_EUV1", Float64, (N_r, N_Z))
+
+        create_dataset(CheckPoint, "J_EUV2",   Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "H_r_EUV2", Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "H_Z_EUV2", Float64, (N_r, N_Z))
+
+        create_dataset(CheckPoint, "J_EUV3",   Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "H_r_EUV3", Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "H_Z_EUV3", Float64, (N_r, N_Z))
+
+        # Lyα RT CheckPoint:
+        if Lyα
+            attrs(CheckPoint)["rfirst_Lya"] = true  
+
+            create_dataset(CheckPoint, "J_Lya", Float64,
+                          (N_r, N_Z, N_ν);
+                          chunk = (N_r, N_Z, 1))
+
+            create_dataset(CheckPoint, "H_r_Lya", Float64,
+                          (N_r, N_Z, N_ν);
+                          chunk = (N_r, N_Z, 1))
+
+            create_dataset(CheckPoint, "H_Z_Lya", Float64,
+                          (N_r, N_Z, N_ν);
+                          chunk = (N_r, N_Z, 1))
+        end
+
         ############################# QUANTITIES #################################
 
         # Create a 3D dataset (r, Z, time) for the gas density:
@@ -51,14 +186,14 @@ function CreateHDF5File( FileName::String,
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
-        # Create a 3D dataset (r, Z, time) for the r-direction velocity:
-        create_dataset(file, "rVelocity_History", Float32,
+        # Create a 3D dataset (r, Z, time) for the r-direction momentum density:
+        create_dataset(file, "rMomentum_History", Float32,
                        (N_r, N_Z, Nsaved);
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
-        # Create a 3D dataset (r, Z, time) for the Z-direction velocity:
-        create_dataset(file, "ZVelocity_History", Float32,
+        # Create a 3D dataset (r, Z, time) for the Z-direction momentum density:
+        create_dataset(file, "ZMomentum_History", Float32,
                        (N_r, N_Z, Nsaved);
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
@@ -140,10 +275,42 @@ function CreateHDF5File( FileName::String,
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
+        # Global stellar radiation 'force multiplier' F_rad / (L/c) per saved time:
+        create_dataset(file, "StellarRadForce_L_Over_c_History", Float64,
+                       (Nsaved,),
+                       chunk = (1,))
+
+        # Global stellar radiation 'force multiplier' F_rad / (L/c) *anti-parallel to gravity*
+        # per saved time:
+        create_dataset(file, "StellarRadForce_L_Over_c_antigrav_direction_History", Float64,
+                       (Nsaved,),
+                       chunk = (1,))
+
+        # LyC (photon-weighted) escape fracton from simulation volume:
+        create_dataset(file, "f_esc_LyC_History", Float64,
+                       (Nsaved,),
+                       chunk = (1,))
+
+        # Lyman-Werner photon escape fracton from simulation volume:
+        create_dataset(file, "f_esc_LW_History", Float64,
+                       (Nsaved,),
+                       chunk = (1,))
+
+        if Gravity
+            # Create a 3D dataset (r, Z, time) for the gravitational force per unit volume:
+            create_dataset(file, "f_gravity_r_History", Float32,
+                           (N_r, N_Z, Nsaved);
+                            chunk = (N_r, N_Z, 1),
+                            filters = Filters.Deflate(3))
+
+            create_dataset(file, "f_gravity_Z_History", Float32,
+                           (N_r, N_Z, Nsaved);
+                            chunk = (N_r, N_Z, 1),
+                            filters = Filters.Deflate(3))
+        end
+
         if Lyα
             @assert N_ν > 0 "When Lyα = true, N_ν must be > 0 in CreateHDF5File."
-
-
 
             # Create a 3D dataset (r, Z, time) for the Lyα energy density e_Lyα:
             create_dataset(file, "e_Lya_History", Float32,
@@ -179,6 +346,13 @@ function CreateHDF5File( FileName::String,
                           (Nsaved,),
                           chunk = (1,))
 
+            # Lyα force multiplier, in direction anti-parallel 
+            # to the gravitational field:
+            create_dataset(file, "M_F_History_antigrav_direction", Float64,
+                          (Nsaved,),
+                          chunk = (1,))
+
+            # Lyα luminosity (2 × simulation luminosity if reflective Z BCs are used):
             create_dataset(file, "L_Lya_History", Float64,
                           (Nsaved,),
                           chunk = (1,))
@@ -290,9 +464,12 @@ end
 function SaveRHDTimeStepHDF5( FileName::String, 
                             hydrostate::HydrodynamicsState{Float64},
                              chemstate::ChemistryState{Float64},
+                             gravstate::GravityState{Float64},
                                     RT::StellarRTArrays,
                                   step::Int,
-                                     t::Float64
+                                     t::Float64,
+                                    Δt::Float64,
+                               Gravity::Bool
                                )
 
     h5open(FileName, "r+") do file 
@@ -305,13 +482,13 @@ function SaveRHDTimeStepHDF5( FileName::String,
         dset_ρ                        = file["GasDensity_History"]
         dset_ρ[:, :, step]            = hydrostate.ρ
 
-        # Save r-direction velocities at current time-step:
-        dset_u_r                      = file["rVelocity_History"]
-        dset_u_r[:, :, step]          = hydrostate.u_X
+        # Save r-direction momentum densities at current time-step:
+        dset_ρu_r                     = file["rMomentum_History"]
+        dset_ρu_r[:, :, step]         = hydrostate.ρu_X
 
-        # Save Z-direction velocities at current time-step:
-        dset_u_Z                      = file["ZVelocity_History"]
-        dset_u_Z[:, :, step]          = hydrostate.u_Y
+        # Save Z-direction momentum densities at current time-step:
+        dset_ρu_Z                     = file["ZMomentum_History"]
+        dset_ρu_Z[:, :, step]         = hydrostate.ρu_Y
 
         # Save temperatures at current time-step:
         dset_T                        = file["T_History"]
@@ -363,6 +540,79 @@ function SaveRHDTimeStepHDF5( FileName::String,
 
         dset_f_stellar_Z              = file["f_stellar_Z_History"]
         dset_f_stellar_Z[:, :, step]  = RT.f_stellar_Z
+
+        # Save LyC and LW escape fractions:
+        dset_f_esc_LyC                = file["f_esc_LyC_History"]
+        dset_f_esc_LyC[step]          = RT.f_esc_LyC
+
+        dset_f_esc_LW                 = file["f_esc_LW_History"]
+        dset_f_esc_LW[step]           = RT.f_esc_LW
+
+        if Gravity
+            # Save gravitational forces per unit volume:
+            dset_f_gravity_r              = file["f_gravity_r_History"]
+            dset_f_gravity_r[:, :, step]  = gravstate.f_gravity_r
+
+            dset_f_gravity_Z              = file["f_gravity_Z_History"]
+            dset_f_gravity_Z[:, :, step]  = gravstate.f_gravity_Z
+        end
+
+        ###############################################################
+        #######                                                 #######
+        #######           C H E C K P O I N T  D A T A          #######
+        #######                                                 #######
+        ###############################################################
+
+        CheckPoint = file["Checkpoint"]
+        
+        # Current time & time-step:
+        attrs(CheckPoint)["t_current"] = t
+        attrs(CheckPoint)["step"]      = step
+        attrs(CheckPoint)["dt"]        = Δt  
+
+        # Current RSL:
+        attrs(CheckPoint)["RSL"]       = RT.c̃
+
+        # Current Strang-split orders: 
+        attrs(CheckPoint)["rfirst_Hydro"]      = hydrostate.rfirst_Hydro
+        attrs(CheckPoint)["rfirst_StellarRT"]  = RT.rfirst_StellarRT
+
+        # Hydro CheckPoint:
+        CheckPoint["GasDensity"][:, :] = hydrostate.ρ
+        CheckPoint["rMomentum"][:, :]  = hydrostate.ρu_X
+        CheckPoint["ZMomentum"][:, :]  = hydrostate.ρu_Y
+        CheckPoint["Energy"][:, :]     = hydrostate.E
+        CheckPoint["T"][:, :]          = hydrostate.T
+
+        # Chemistry CheckPoint:
+        CheckPoint["xHII"][:, :]       = chemstate.xHII
+        CheckPoint["xH2"][:, :]        = chemstate.xH2
+        CheckPoint["xHeII"][:, :]      = chemstate.xHeII
+        CheckPoint["xHeIII"][:, :]     = chemstate.xHeIII
+        CheckPoint["xDII"][:, :]       = chemstate.xDII
+        CheckPoint["xHD"][:, :]        = chemstate.xHD
+
+        # Stellar RT CheckPoint:
+        CheckPoint["J_opt"][:, :]      = RT.J_opt
+        CheckPoint["J_FUV"][:, :]      = RT.J_FUV
+        CheckPoint["J_LW"][:, :]       = RT.J_LW
+        CheckPoint["J_EUV1"][:, :]     = RT.J_EUV1
+        CheckPoint["J_EUV2"][:, :]     = RT.J_EUV2
+        CheckPoint["J_EUV3"][:, :]     = RT.J_EUV3 
+
+        CheckPoint["H_r_opt"][:, :]    = RT.H_r_opt
+        CheckPoint["H_r_FUV"][:, :]    = RT.H_r_FUV
+        CheckPoint["H_r_LW"][:, :]     = RT.H_r_LW
+        CheckPoint["H_r_EUV1"][:, :]   = RT.H_r_EUV1
+        CheckPoint["H_r_EUV2"][:, :]   = RT.H_r_EUV2
+        CheckPoint["H_r_EUV3"][:, :]   = RT.H_r_EUV3 
+
+        CheckPoint["H_Z_opt"][:, :]    = RT.H_Z_opt
+        CheckPoint["H_Z_FUV"][:, :]    = RT.H_Z_FUV
+        CheckPoint["H_Z_LW"][:, :]     = RT.H_Z_LW
+        CheckPoint["H_Z_EUV1"][:, :]   = RT.H_Z_EUV1
+        CheckPoint["H_Z_EUV2"][:, :]   = RT.H_Z_EUV2
+        CheckPoint["H_Z_EUV3"][:, :]   = RT.H_Z_EUV3 
 
     end # End of h5open
 
@@ -375,10 +625,13 @@ end
 function SaveRHDTimeStepHDF5( FileName::String, 
                             hydrostate::HydrodynamicsState{Float64},
                              chemstate::ChemistryState{Float64},
+                             gravstate::GravityState{Float64},
                                     RT::StellarRTArrays,
                                    Lya::LyαArrays,
                                   step::Int,
-                                     t::Float64
+                                     t::Float64,
+                                    Δt::Float64,
+                               Gravity::Bool
                                )
 
     h5open(FileName, "r+") do file 
@@ -391,13 +644,13 @@ function SaveRHDTimeStepHDF5( FileName::String,
         dset_ρ                        = file["GasDensity_History"]
         dset_ρ[:, :, step]            = hydrostate.ρ
 
-        # Save r-direction velocities at current time-step:
-        dset_u_r                      = file["rVelocity_History"]
-        dset_u_r[:, :, step]          = hydrostate.u_X
+        # Save r-direction momentum densities at current time-step:
+        dset_ρu_r                     = file["rMomentum_History"]
+        dset_ρu_r[:, :, step]         = hydrostate.ρu_X
 
-        # Save Z-direction velocities at current time-step:
-        dset_u_Z                      = file["ZVelocity_History"]
-        dset_u_Z[:, :, step]          = hydrostate.u_Y
+        # Save Z-direction momentum densities at current time-step:
+        dset_ρu_Z                     = file["ZMomentum_History"]
+        dset_ρu_Z[:, :, step]         = hydrostate.ρu_Y
 
         # Save temperatures at current time-step:
         dset_T                        = file["T_History"]
@@ -449,6 +702,22 @@ function SaveRHDTimeStepHDF5( FileName::String,
 
         dset_f_stellar_Z              = file["f_stellar_Z_History"]
         dset_f_stellar_Z[:, :, step]  = RT.f_stellar_Z
+
+        # Save LyC and LW escape fractions:
+        dset_f_esc_LyC                = file["f_esc_LyC_History"]
+        dset_f_esc_LyC[step]          = RT.f_esc_LyC
+
+        dset_f_esc_LW                 = file["f_esc_LW_History"]
+        dset_f_esc_LW[step]           = RT.f_esc_LW
+
+        if Gravity
+            # Save gravitational forces per unit volume:
+            dset_f_gravity_r              = file["f_gravity_r_History"]
+            dset_f_gravity_r[:, :, step]  = gravstate.f_gravity_r
+
+            dset_f_gravity_Z              = file["f_gravity_Z_History"]
+            dset_f_gravity_Z[:, :, step]  = gravstate.f_gravity_Z
+        end
 
         ###############################################################
         #######                                                 #######
@@ -477,7 +746,10 @@ function SaveRHDTimeStepHDF5( FileName::String,
 
         # Save force multiplier:
         dset_M_F                    = file["M_F_History"]
-        dset_M_F[step]              = Lya.M_F 
+        dset_M_F[step]              = Lya.M_F
+        
+        dset_M_F_antigrav           = file["M_F_History_antigrav_direction"]
+        dset_M_F_antigrav[step]     = Lya.M_F_antigravity
 
         # Save Lyα luminosity:
         dset_L_Lyα                  = file["L_Lya_History"]
@@ -497,6 +769,69 @@ function SaveRHDTimeStepHDF5( FileName::String,
             # Access & save the Lyα spectrum J(νC) at the edge indices: 
             dset_J_edge[edge, :, step] = @view Lya.J_Lyα[i_r, i_Z, :]
         end
+
+        ###############################################################
+        #######                                                 #######
+        #######           C H E C K P O I N T  D A T A          #######
+        #######                                                 #######
+        ###############################################################
+
+        CheckPoint = file["Checkpoint"]
+        
+        # Current time & time-step:
+        attrs(CheckPoint)["t_current"] = t
+        attrs(CheckPoint)["step"]      = step
+        attrs(CheckPoint)["dt"]        = Δt  
+
+        # Current RSL:
+        attrs(CheckPoint)["RSL"]       = RT.c̃
+
+        # Current Strang-split orders: 
+        attrs(CheckPoint)["rfirst_Hydro"]      = hydrostate.rfirst_Hydro
+        attrs(CheckPoint)["rfirst_StellarRT"]  = RT.rfirst_StellarRT
+        attrs(CheckPoint)["rfirst_Lya"]        = Lya.rfirst_Lyα
+
+        # Hydro CheckPoint:
+        CheckPoint["GasDensity"][:, :] = hydrostate.ρ
+        CheckPoint["rMomentum"][:, :]  = hydrostate.ρu_X
+        CheckPoint["ZMomentum"][:, :]  = hydrostate.ρu_Y
+        CheckPoint["Energy"][:, :]     = hydrostate.E
+        CheckPoint["T"][:, :]          = hydrostate.T
+
+        # Chemistry CheckPoint:
+        CheckPoint["xHII"][:, :]       = chemstate.xHII
+        CheckPoint["xH2"][:, :]        = chemstate.xH2
+        CheckPoint["xHeII"][:, :]      = chemstate.xHeII
+        CheckPoint["xHeIII"][:, :]     = chemstate.xHeIII
+        CheckPoint["xDII"][:, :]       = chemstate.xDII
+        CheckPoint["xHD"][:, :]        = chemstate.xHD
+
+        # Stellar RT CheckPoint:
+        CheckPoint["J_opt"][:, :]      = RT.J_opt
+        CheckPoint["J_FUV"][:, :]      = RT.J_FUV
+        CheckPoint["J_LW"][:, :]       = RT.J_LW
+        CheckPoint["J_EUV1"][:, :]     = RT.J_EUV1
+        CheckPoint["J_EUV2"][:, :]     = RT.J_EUV2
+        CheckPoint["J_EUV3"][:, :]     = RT.J_EUV3 
+
+        CheckPoint["H_r_opt"][:, :]    = RT.H_r_opt
+        CheckPoint["H_r_FUV"][:, :]    = RT.H_r_FUV
+        CheckPoint["H_r_LW"][:, :]     = RT.H_r_LW
+        CheckPoint["H_r_EUV1"][:, :]   = RT.H_r_EUV1
+        CheckPoint["H_r_EUV2"][:, :]   = RT.H_r_EUV2
+        CheckPoint["H_r_EUV3"][:, :]   = RT.H_r_EUV3 
+
+        CheckPoint["H_Z_opt"][:, :]    = RT.H_Z_opt
+        CheckPoint["H_Z_FUV"][:, :]    = RT.H_Z_FUV
+        CheckPoint["H_Z_LW"][:, :]     = RT.H_Z_LW
+        CheckPoint["H_Z_EUV1"][:, :]   = RT.H_Z_EUV1
+        CheckPoint["H_Z_EUV2"][:, :]   = RT.H_Z_EUV2
+        CheckPoint["H_Z_EUV3"][:, :]   = RT.H_Z_EUV3 
+
+        # Lyα CheckPoint:
+        CheckPoint["J_Lya"][:, :, :]   = Lya.J_Lyα
+        CheckPoint["H_r_Lya"][:, :, :] = Lya.H_r_Lyα
+        CheckPoint["H_Z_Lya"][:, :, :] = Lya.H_Z_Lyα
 
     end # End of h5open
 

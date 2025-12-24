@@ -8,7 +8,8 @@ using HDF5
 using HDF5: create_dataset, h5open, resize!, attrs, datatype
 
 
-export CreateHDF5File, SaveGridHDF5File, SaveLyαFreqGridHDF5File, SaveRHDTimeStepHDF5
+export CreateHDF5File, SaveGridHDF5File, SaveLyαFreqGridHDF5File, 
+       SaveAnalyticalSolutionHDF5File, SaveTimeStepHDF5
 
 
 function CreateHDF5File( FileName::String, 
@@ -44,6 +45,10 @@ function CreateHDF5File( FileName::String,
         # Cell volumes ΔV: one value per cell.
         create_dataset(file, "CellVolumes", Float64,
                        (N_r, N_Z) )
+
+        # Create array for *analytical* e_Lyα profile (for any comparisons with numerical results):
+        create_dataset(file, "e_Lya_Analytical", Float64,
+                       (N_Z,) )
 
         ############################# QUANTITIES #################################
 
@@ -186,6 +191,27 @@ function SaveLyαFreqGridHDF5File( FileName::String,
 
     return nothing
 end
+
+
+""" Save the Lyα frequency grid setup in the created HDF5 file. """
+function SaveAnalyticalSolutionHDF5File( FileName::String,
+                                             ZCoM::AbstractArray{Float64, 1},
+                                              τcl::Float64,
+                                                T::Float64,
+                                              Rcl::Float64,
+                                            L_Lyα::Float64
+                                        )
+
+    h5open(FileName, "r+") do file
+
+       dset_e_Lyα_Analytic       = file["e_Lya_Analytical"]
+       dset_e_Lyα_Analytic[:]    = eLyα_sphere_uni( ZCoM, L_Lyα, T, τcl, Rcl )
+
+    end # End of h5open
+
+    return nothing
+end
+
 
 
 """ Save simulation data from one time-step into a
