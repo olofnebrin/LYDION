@@ -332,7 +332,7 @@ const a0_HD = - 42.45906; const a1_HD = 21.90083
 const a2_HD = - 10.1954;  const a3_HD = 2.19788
 const a4_HD = - 0.17286
 
-const D00 = - 42.56788; const D01 = 0.92433;   const D02 = 0.54962;   const D03 = - 0.07676;  const D04 = 0.00275
+const D00 = - 42.57688; const D01 = 0.92433;   const D02 = 0.54962;   const D03 = - 0.07676;  const D04 = 0.00275
 const D10 = 21.93385;   const D11 = 0.77952;   const D12 = - 1.06447; const D13 = 0.11864;    const D14 = - 0.00366
 const D20 = - 10.19097; const D21 = - 0.54263; const D22 = 0.62343;   const D23 = - 0.07366;  const D24 = 0.002514
 const D30 = 2.19906;    const D31 = 0.11711;   const D32 = - 0.13768; const D33 = 0.01759;    const D34 = - 0.000666317
@@ -421,6 +421,7 @@ function Λ_CII( T::Float64,
              xCII::Float64
                 )
 
+    # C II number density:
     nCII    = xCII * C_H_ratio * nH * Z_Zsun
 
     # Convenient definitions:
@@ -428,9 +429,6 @@ function Λ_CII( T::Float64,
     T2      = T / 100.0
     T4      = T / 1e4
     logT2   = log(T2)
-
-    # C II number density:
-    nCII    = C_H_ratio * nH * Z_Zsun
 
     # Collisional de-excitation rate coefficients (cm³ s⁻¹) for 
     # H I, H₂(para), H₂(ortho), and He I. See Draine (2011).
@@ -671,7 +669,7 @@ const Tmin_CO    = 5.0     # Ignore CO cooling below this temperature
 """ The CO cooling rate (erg s⁻¹ cm⁻³). Uses the functional 
     form from Hollenbach & McKee (1979) (HM), which in the low-density 
     regime is the same as in  Whitworth & Jaffa (2018). The coefficient 
-    in the low-density regime from HM has been correected to agree 
+    in the low-density regime from HM has been corrected to agree 
     with Whitworth & Jaffa."""
 function Λ_CO( T::Float64, 
               nH::Float64,
@@ -993,6 +991,12 @@ function Λ(    T::Float64,
               ne::Float64,
              nH2::Float64,
              nHD::Float64,
+          Z_Zsun::Float64,
+             xCI::Float64,  # nCI / nC
+            xCII::Float64,  # nCII / nC
+             xCO::Float64,  # nCO / nC 
+             xOI::Float64,  # nOI / nO
+            N_CO::Float64 = 0.0,
                z::Float64 = 0.0,
            CaseB::Bool    = true 
         )
@@ -1009,7 +1013,9 @@ function Λ(    T::Float64,
     
             + Λ_H2(T, nH2, nHI, nHII, nHeI, ne) 
 
-            + Λ_HD(T, nHD, nHI) )
+            + Λ_HD(T, nHD, nHI)
+            
+            + Λ_Z(T, nHI, nH2, nHII, nHeI, ne, Z_Zsun, xCI, xCII, xCO, xOI, N_CO) )
 
     # Correct for the CMB-induced limit following Hopkins et al. (2023):
     TCMB = TCMB0 * (1 + z)

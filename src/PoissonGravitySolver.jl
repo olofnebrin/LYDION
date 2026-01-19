@@ -32,6 +32,7 @@ function CreateGravityStateAndCoefficients( A_r::AbstractArray{Float64, 2},
                                            ZCoM::AbstractArray{Float64},
                                               r::AbstractArray{Float64},
                                               Z::AbstractArray{Float64},
+                                           ℓmax::Int    = 10,
                                             ) 
 
     N_r  = length( rCoM )
@@ -47,9 +48,19 @@ function CreateGravityStateAndCoefficients( A_r::AbstractArray{Float64, 2},
     ∂Φ∂r        = zeros( Float64, N_r, N_Z )
     ∂Φ∂Z        = zeros( Float64, N_r, N_Z )
 
+    # Array for storing non-gas mass density (e.g. star and/or dark matter):
+    ρ_bg        = zeros( Float64, N_r, N_Z )
+
+    # Array for storing total mass density:
+    ρtot        = zeros( Float64, N_r, N_Z )
+
     # Arrays for tracking the gravitational force per unit volume, - ρ ∇Φ:
     f_gravity_r = zeros( Float64, N_r, N_Z )
     f_gravity_Z = zeros( Float64, N_r, N_Z )
+
+    # Vectors for storing Legendre polynomials & multipole moments (for use in BCs)
+    P           = zeros( Float64, ℓmax + 1 )
+    Q           = zeros( Float64, ℓmax + 1 )
 
     # Initialize coefficients for the Poisson equation:
     RPoiss_ijp  = zeros( Float64, N_r, N_Z ) 
@@ -98,7 +109,7 @@ function CreateGravityStateAndCoefficients( A_r::AbstractArray{Float64, 2},
     Δτ_max   = max( r[end]^2, Z[end]^2 ) / 4
     Δτ_min   = min( minimum(diff(r))^2, minimum(diff(Z))^2 ) / 4
 
-    return GravityState(Φ, Φ_half, Φ_old, Φ_snapshot, ∂Φ∂r, ∂Φ∂Z, f_gravity_r, f_gravity_Z), 
+    return GravityState(Φ, Φ_half, Φ_old, Φ_snapshot, ∂Φ∂r, ∂Φ∂Z, ρtot, ρ_bg, f_gravity_r, f_gravity_Z, P, Q, ℓmax), 
            GravityCoeffs(RPoiss_ijp, RPoiss_ij, RPoiss_ijm, ZPoiss_ijp, ZPoiss_ij, ZPoiss_ijm, Δτ_max, Δτ_min)
 end
 
@@ -140,117 +151,193 @@ function InitializeScratchArrays!( N_r::Int,
 end
 
 
-const P_0::Float64 = 1.0
+""" This function computes and stores the Legendre polynomials up 
+    to degree ℓmax, evaluated at x. Useful in the multipole expansion
+    of the BCs. """
+@inline @fastmath function Get_Pℓ!( P::AbstractArray{Float64, 1},
+                                    x::Float64,
+                                 ℓmax::Int )
+    @inbounds begin
+        P[1] = 1.0
+        if ℓmax == 0
+            return nothing 
+        end
 
-@inline @fastmath function Get_Pℓ( x::Float64 )
+        P[2] = x 
+        if ℓmax == 1
+            return nothing 
+        end
 
-    x2  = x  * x 
-    x4  = x2 * x2  
-    x6  = x4 * x2
-    x8  = x6 * x2
-    x10 = x8 * x2
+        # Recurrence to get the other Legendre polynomials:
+        for ℓ in 1:(ℓmax-1)
+            P[ℓ+2] = ( (2 * ℓ + 1) * x * P[ℓ+1]  -  ℓ * P[ℓ] ) / ( ℓ + 1 )
+        end
+    end
 
-    P_2  = 0.5     * ( 3 * x2      -  1 )
-    P_4  = (1/8)   * ( 35 * x4     -  30 * x2     +  3 )
-    P_6  = (1/16)  * ( 231 * x6    -  315 * x4    +  105 * x2   -  5)
-    P_8  = (1/128) * ( 6435 * x8   -  12012 * x6  +  6930 * x4  -  1260 * x2  +  35 )
-    P_10 = (1/256) * ( 46189 * x10 -  109395 * x8 +  90090 * x6 -  30030 * x4 + 3465 * x2  -  63 )
+    return nothing 
+end
 
-    return P_0, P_2, P_4, P_6, P_8, P_10
+
+""" This function computes the multipole moments:
+    
+    Qℓ ≡ ∫dV R^ℓ Pℓ(x) 
+       ≈ ∑_{i,j} ΔV_{i,j} (R_{i,j})^ℓ Pℓ(x_{i,j}),
+       
+    where x = Z / R. """
+function ComputeMultiPoleMoments!( Q::AbstractArray{Float64, 1},
+                                   P::AbstractArray{Float64, 1},
+                                ρtot::AbstractArray{Float64, 2},
+                                rCoM::AbstractArray{Float64, 1},
+                                ZCoM::AbstractArray{Float64, 1},
+                                  ΔV::AbstractArray{Float64, 2},
+                                ℓmax::Int,
+                            BC_Z_bot::Symbol = :Reflect
+                                 )
+
+
+    @inbounds begin
+        # Reset Qℓ:
+        Q .= 0.0
+
+        # Grid size & intervals:
+        N_r, N_Z = size( ρtot )
+        dN_r     = 1:N_r 
+        dN_Z     = 1:N_Z
+
+        if BC_Z_bot == :Reflect
+            # If we have mirror symmetry around Z = 0, we use multipole 
+            # expansion around Z = 0:
+            zcenter = 0.0
+        else
+            # If no symmetry, we expand around the center along the Z-axis:
+            zcenter = 0.5 * ( ZCoM[end] + ZCoM[1] )
+        end
+
+        for j in dN_Z
+
+            zcom = ZCoM[j]
+
+            for i in dN_r 
+
+                rcom = rCoM[i]
+                R    = sqrt( rcom * rcom  +  (zcom - zcenter) * (zcom - zcenter) )
+                x    = ( zcom - zcenter ) / R
+
+                # Compute all Legendre polynomials up to ℓmax:
+                Get_Pℓ!( P, x, ℓmax )
+
+                ρΔV    = ρtot[i,j] * ΔV[i,j]
+                Rpower = 1.0   # We start with R^(ℓ = 0) = 1
+                for ℓ in 0:ℓmax 
+                    Q[ℓ+1] += ρΔV * Rpower * P[ℓ+1]
+
+                    # Update power of R:
+                    Rpower *= R
+                end
+            end
+        end
+
+        if BC_Z_bot == :Reflect
+            # Mirror symmetry around Z = 0: In this case, the moment has to 
+            # be doubled because of the mass below Z = 0
+            for ℓ in 0:ℓmax 
+                Q[ℓ+1] *= 2
+            end
+        end
+        
+    end
+    
+    return nothing 
 end
 
 
 function Set_Φ_BC!( Φ::AbstractArray{Float64, 2},
-                    ρ::AbstractArray{Float64, 2},
-                   ΔV::AbstractArray{Float64, 2},
+                    P::AbstractArray{Float64, 1},
+                    Q::AbstractArray{Float64, 1},
                  rCoM::AbstractArray{Float64, 1},
-                 ZCoM::AbstractArray{Float64, 1}
+                 ZCoM::AbstractArray{Float64, 1},
+                 ℓmax::Int    = 20,
+             BC_Z_bot::Symbol = :Reflect
                     )
 
-    N_r, N_Z = size( ρ )
+    N_r, N_Z = size( Φ )
     dN_r     = 1:N_r 
-    dN_Z     = 1:N_Z 
+    dN_Z     = 1:N_Z
 
-    Q_0::Float64 = 0.0; Q_2::Float64  = 0.0
-    Q_4::Float64 = 0.0; Q_6::Float64  = 0.0
-    Q_8::Float64 = 0.0; Q_10::Float64 = 0.0
+    if BC_Z_bot == :Reflect
+        # If we have mirror symmetry around Z = 0, we use multipole 
+        # expansion around Z = 0:
+        zcenter = 0.0
+    else
+        # If no symmetry, we expand around the center along the Z-axis:
+        zcenter = 0.5 * ( ZCoM[end] + ZCoM[1] )
+    end
+
+    # OUTER r-BOUNDARY i = N_r:
     for j in dN_Z 
+        @inbounds begin
+            R   = sqrt( rCoM[N_r] * rCoM[N_r]  +  (ZCoM[j] - zcenter) * (ZCoM[j] - zcenter) )
+            x   = ( ZCoM[j] - zcenter ) / R 
+
+            Get_Pℓ!( P, x, ℓmax ) 
+            inv_R      = 1 / R 
+            inv_Rpower = inv_R     # 1 / R^(ℓ+1), starting at ℓ = 0
+            ∑PQ_over_R = 0.0
+            for ℓ in 0:ℓmax 
+                ∑PQ_over_R += P[ℓ+1] * Q[ℓ+1] * inv_Rpower
+
+                # Update power of R:
+                inv_Rpower *= inv_R
+            end
+
+            # Put it all together to get the boundary potential:
+            Φ[N_r,j] = - G * ∑PQ_over_R
+        end
+    end
+
+    # OUTER Z-BOUNDARY j = N_Z:
+    for i in dN_r 
+        @inbounds begin
+            R   = sqrt( rCoM[i] * rCoM[i]  +  (ZCoM[N_Z] - zcenter) * (ZCoM[N_Z] - zcenter) )
+            x   = ( ZCoM[N_Z] - zcenter ) / R 
+
+            Get_Pℓ!( P, x, ℓmax ) 
+            inv_R      = 1 / R 
+            inv_Rpower = inv_R     # 1 / R^(ℓ+1), starting at ℓ = 0
+            ∑PQ_over_R = 0.0
+            for ℓ in 0:ℓmax 
+                ∑PQ_over_R += P[ℓ+1] * Q[ℓ+1] * inv_Rpower
+
+                # Update power of R:
+                inv_Rpower *= inv_R
+            end
+
+            # Put it all together to get the boundary potential:
+            Φ[i,N_Z] = - G * ∑PQ_over_R
+        end
+    end
+
+    # LOWER Z-BOUNDARY j = 1 (only relevant if we don't assume mirror symmetry):
+    if BC_Z_bot != :Reflect
         for i in dN_r 
             @inbounds begin
+                R   = sqrt( rCoM[i] * rCoM[i]  +  (ZCoM[1] - zcenter) * (ZCoM[1] - zcenter) )
+                x   = ( ZCoM[1] - zcenter ) / R 
 
-                R   = sqrt( rCoM[i] * rCoM[i]  +  ZCoM[j] * ZCoM[j] )
-                R2  = R  * R 
-                R4  = R2 * R2 
-                R6  = R4 * R2 
-                R8  = R6 * R2
-                R10 = R8 * R2
+                Get_Pℓ!( P, x, ℓmax ) 
+                inv_R      = 1 / R 
+                inv_Rpower = inv_R     # 1 / R^(ℓ+1), starting at ℓ = 0
+                ∑PQ_over_R = 0.0
+                for ℓ in 0:ℓmax 
+                    ∑PQ_over_R += P[ℓ+1] * Q[ℓ+1] * inv_Rpower
 
-                # Legendre polynomials Pℓ(x) with x = ZCoM / R:
-                x    = ZCoM[j] / R 
-                P_0, P_2, P_4, P_6, P_8, P_10 = Get_Pℓ(x)
+                    # Update power of R:
+                    inv_Rpower *= inv_R
+                end
 
-
-                Q_0  += ρ[i,j] * P_0 * ΔV[i,j]
-                Q_2  += ρ[i,j] * R2 * P_2 * ΔV[i,j]
-                Q_4  += ρ[i,j] * R4 * P_4 * ΔV[i,j]
-                Q_6  += ρ[i,j] * R6 * P_6 * ΔV[i,j]
-                Q_8  += ρ[i,j] * R8 * P_8 * ΔV[i,j]
-                Q_10 += ρ[i,j] * R10 * P_10 * ΔV[i,j]
+                # Put it all together to get the boundary potential:
+                Φ[i,1] = - G * ∑PQ_over_R
             end
-        end
-    end
-
-    # Correct by a factor 2 if only the upper Z-plane is simulated,
-    # in order to take into account mass below the Z = 0 plane:
-    Q_0 *= 2; Q_2  *= 2
-    Q_4 *= 2; Q_6  *= 2
-    Q_8 *= 2; Q_10 *= 2
-
-    # Outer r-boundary, i = N_r 
-    @simd for j in dN_Z 
-        @inbounds begin
-            R   = sqrt( rCoM[N_r] * rCoM[N_r]  +  ZCoM[j] * ZCoM[j] )
-            R3  = R  * R * R
-            R5  = R3 * R * R
-            R7  = R5 * R * R
-            R9  = R7 * R * R
-            R11 = R9 * R * R
-
-            # Legendre polynomials Pℓ(x) with x = ZCoM / R:
-            x   = ZCoM[j] / R
-            P_0, P_2, P_4, P_6, P_8, P_10 = Get_Pℓ(x)
-
-            # Multipole expnaded potential at the i = N_r boundary:
-            Φ[N_r,j] = - G * ( P_0  * Q_0  / R
-                             + P_2  * Q_2  / R3 
-                             + P_4  * Q_4  / R5 
-                             + P_6  * Q_6  / R7
-                             + P_8  * Q_8  / R9
-                             + P_10 * Q_10 / R11 )
-        end
-    end
-
-    # Outer Z-boundary, j = N_Z 
-    @simd for i in dN_r 
-        @inbounds begin
-            R   = sqrt( rCoM[i] * rCoM[i]  +  ZCoM[N_Z] * ZCoM[N_Z] )
-            R3  = R  * R * R
-            R5  = R3 * R * R
-            R7  = R5 * R * R
-            R9  = R7 * R * R
-            R11 = R9 * R * R
-
-            # Legendre polynomials Pℓ(x) with x = ZCoM / R:
-            x   = ZCoM[N_Z] / R
-            P_0, P_2, P_4, P_6, P_8, P_10 = Get_Pℓ(x)
-
-            # Multipole expnaded potential at the i = N_r boundary:
-            Φ[i,N_Z] = - G * ( P_0  * Q_0  / R
-                             + P_2  * Q_2  / R3 
-                             + P_4  * Q_4  / R5 
-                             + P_6  * Q_6  / R7
-                             + P_8  * Q_8  / R9
-                             + P_10 * Q_10 / R11 )
         end
     end
 
@@ -266,7 +353,10 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
 @views function Update_Φ_ADI!( Φ::AbstractArray{Float64, 2},
                           Φ_half::AbstractArray{Float64, 2},
                            Φ_old::AbstractArray{Float64, 2},
-                               ρ::AbstractArray{Float64, 2},
+                            ρtot::AbstractArray{Float64, 2},
+                               ρ::AbstractArray{Float64, 2}, # Gass density 
+                              ρd::AbstractArray{Float64, 2}, # Dust density 
+                            ρ_bg::AbstractArray{Float64, 2}, # Background density (e.g. stars, or DM)
                       RPoiss_ijp::AbstractArray{Float64, 2},
                        RPoiss_ij::AbstractArray{Float64, 2},
                       RPoiss_ijm::AbstractArray{Float64, 2},
@@ -278,7 +368,11 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
                           k_iter::Int,
                               ΔV::AbstractArray{Float64, 2}, 
                             rCoM::AbstractArray{Float64, 1},
-                            ZCoM::AbstractArray{Float64, 1}  
+                            ZCoM::AbstractArray{Float64, 1},
+                               Q::AbstractArray{Float64, 1},
+                               P::AbstractArray{Float64, 1},
+                            ℓmax::Int    = 20,
+                        BC_Z_bot::Symbol = :Reflect
                                )
 
     # Grid size:
@@ -289,9 +383,14 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
     dN_r_int   = 2:(N_r-2) # Exclude inner & outer boundary
     dN_Z_int   = 2:(N_Z-2) # Exclude inner & outer boundary
 
+    # Fill total gravitating mass:
+    ρtot      .= ρ  .+  ρd  .+  ρ_bg
+
     # Enforce Dirichlet BC values once before iteration (and keep them fixed)
-    Set_Φ_BC!( Φ, ρ, ΔV, rCoM, ZCoM )
+    ComputeMultiPoleMoments!( Q, P, ρtot, rCoM, ZCoM, ΔV, ℓmax, BC_Z_bot )
+    Set_Φ_BC!( Φ, P, Q, rCoM, ZCoM, ℓmax, BC_Z_bot )
     Φ_half .= Φ 
+    Φ_old  .= Φ
 
     # Initialize the scratch arrays on the very first call 
     # (or if the thread count changed):
@@ -302,6 +401,10 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
 
     # Set up factor for pseudo-time stepping: 
     α_ADI     = (Δτ_min / Δτ_max)^(1/(k_iter-1))
+
+    # For the r-sweep, we consider j-values that do (do not)
+    # incorporate j = 1 if we use (do not use) reflective BCs: 
+    j_range   = (BC_Z_bot == :Reflect) ? dN_Z : 2:(N_Z-1)
 
     # Set up iterations:
     k         = 0       # Initialize iteration count 
@@ -316,7 +419,11 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
         #########                            #########
         ##############################################
 
-        @threads :static for j in dN_Z 
+        if BC_Z_bot != :Reflect
+            Φ_half[:,1] .= Φ[:,1]   # Ensure BC is fixed 
+        end
+
+        @threads :static for j in j_range
 
             tid = Threads.threadid()
             Ar_tot, Br_tot, Cr_tot, Dr_tot, Cprimer_tot, Dprimer_tot, xr = scratch_r_local[tid]
@@ -326,11 +433,11 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
                 # Clamp j-values:
                 jm1 = max(j-1, 1)
 
-                # COEFFICIENTS FOR THE INNER BOUNDARY (i = 1):
+                # COEFFICIENTS FOR THE INNER BOUNDARY (i = 1) - REFLECTIVE BCs:
                 Ar_tot[1]      = 0.0
                 Br_tot[1]      = - ( RPoiss_ij[1,j]  +  Δw  -  RPoiss_ijm[1,j] )
                 Cr_tot[1]      = RPoiss_ijp[1,j]
-                Dr_tot[1]      = ( Four_π_G * ρ[1,j]  -  Φ_old[1,j] * Δw
+                Dr_tot[1]      = ( Four_π_G * ρtot[1,j]  -  Φ_old[1,j] * Δw
                                -  (ZPoiss_ijp[1,j]*Φ_old[1,j+1]  -  ZPoiss_ij[1,j]* Φ_old[1,j]  +  ZPoiss_ijm[1,j]*Φ_old[1,jm1]))
 
                 # INTERIOR COEFFICIENTS:
@@ -341,8 +448,9 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
                 # Upper diagonal:
                 Cr_tot[dN_r_int]  .= RPoiss_ijp[dN_r_int,j]
                 # Right-hand side:
-                Dr_tot[dN_r_int]  .= ( Four_π_G * ρ[dN_r_int,j]  .-  Φ_old[dN_r_int,j] .* Δw
-                                  .-  (ZPoiss_ijp[dN_r_int,j].*Φ_old[dN_r_int,j+1]  .-  ZPoiss_ij[dN_r_int,j].* Φ_old[dN_r_int,j]  .+  ZPoiss_ijm[dN_r_int,j].*Φ_old[dN_r_int,jm1]))
+                Dr_tot[dN_r_int]  .= ( Four_π_G .* ρtot[dN_r_int,j]  .-  Φ_old[dN_r_int,j] .* Δw
+                                  .- (ZPoiss_ijp[dN_r_int,j].*Φ_old[dN_r_int,j+1]  .-  ZPoiss_ij[dN_r_int,j].* Φ_old[dN_r_int,j]  .+  ZPoiss_ijm[dN_r_int,j].*Φ_old[dN_r_int,jm1]))
+
 
                 # NEAR OUTER BOUNDARY (i = N_r - 1), WITH BOUNDARY CONDITION AT i = N_r:
                 Ar_tot[N_r-1]      = RPoiss_ijm[N_r-1,j]
@@ -351,9 +459,8 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
                 # Upper diagonal:
                 Cr_tot[N_r-1]      = 0.0
                 # Right-hand side:
-                Dr_tot[N_r-1]      = ( Four_π_G * ρ[N_r-1,j]  -  Φ_old[N_r-1,j] * Δw  -  RPoiss_ijp[N_r-1,j] * Φ[N_r,j]
+                Dr_tot[N_r-1]      = ( Four_π_G * ρtot[N_r-1,j]  -  Φ_old[N_r-1,j] * Δw  -  RPoiss_ijp[N_r-1,j] * Φ[N_r,j]
                                    -  (ZPoiss_ijp[N_r-1,j]*Φ_old[N_r-1,j+1]  -  ZPoiss_ij[N_r-1,j]* Φ_old[N_r-1,j]  +  ZPoiss_ijm[N_r-1,j]*Φ_old[N_r-1,jm1]))
-
 
                 # Solve tridiagonal system in the r-direction:
                 Φ_half[dN_r,j] .= TridiagonalSolve( Ar_tot, Br_tot, Cr_tot, Dr_tot, Cprimer_tot, Dprimer_tot, xr ) 
@@ -380,11 +487,21 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
                 im1 = max(i-1, 1)
 
                 # COEFFICIENTS FOR THE LOWER BOUNDARY (j = 1):
-                AZ_tot[1]      = 0.0
-                BZ_tot[1]      = - ( ZPoiss_ij[i,1]  +  Δw  -  ZPoiss_ijm[i,1] )
-                CZ_tot[1]      = ZPoiss_ijp[i,1]
-                DZ_tot[1]      = ( Four_π_G * ρ[i,1]  -  Φ_half[i,1] * Δw
-                               -  (RPoiss_ijp[i,1]*Φ_half[i+1,1]  -  RPoiss_ij[i,1]* Φ_half[i,1]  +  RPoiss_ijm[i,1]*Φ_half[im1,1]) )
+                if BC_Z_bot == :Reflect 
+                    # In this case we assume reflective BCs, so Φ[0] = Φ[1]:
+                    AZ_tot[1]      = 0.0
+                    BZ_tot[1]      = - ( ZPoiss_ij[i,1]  +  Δw  -  ZPoiss_ijm[i,1] )
+                    CZ_tot[1]      = ZPoiss_ijp[i,1]
+                    DZ_tot[1]      = ( Four_π_G * ρtot[i,1]  -  Φ_half[i,1] * Δw
+                                   -  (RPoiss_ijp[i,1]*Φ_half[i+1,1]  -  RPoiss_ij[i,1]* Φ_half[i,1]  +  RPoiss_ijm[i,1]*Φ_half[im1,1]) )
+                else
+                    # In this case, Φ should just equal the BC at j = 1, which is easiest 
+                    # implemented as follows:
+                    AZ_tot[1]      = 0.0
+                    BZ_tot[1]      = 1.0
+                    CZ_tot[1]      = 0.0
+                    DZ_tot[1]      = Φ[i,1]
+                end
 
                 # INTERIOR COEFFICIENTS:
                 # Lower diagonal:
@@ -394,7 +511,7 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
                 # Upper diagonal:
                 CZ_tot[dN_Z_int]  .= ZPoiss_ijp[i,dN_Z_int]
                 # Right-hand side:
-                DZ_tot[dN_Z_int]  .= ( Four_π_G * ρ[i,dN_Z_int]  .-  Φ_half[i,dN_Z_int] .* Δw
+                DZ_tot[dN_Z_int]  .= ( Four_π_G .* ρtot[i,dN_Z_int]  .-  Φ_half[i,dN_Z_int] .* Δw
                                   .-  (RPoiss_ijp[i,dN_Z_int].*Φ_half[i+1,dN_Z_int]  .-  RPoiss_ij[i,dN_Z_int].* Φ_half[i,dN_Z_int]  .+  RPoiss_ijm[i,dN_Z_int].*Φ_half[im1,dN_Z_int]))
 
                 # NEAR OUTER BOUNDARY (j = N_Z - 1), WITH BOUNDARY CONDITION AT j = N_Z:
@@ -404,7 +521,7 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
                 # Upper diagonal:
                 CZ_tot[N_Z-1]      = 0.0
                 # Right-hand side:
-                DZ_tot[N_Z-1]      = ( Four_π_G * ρ[i,N_Z-1]  -  Φ_half[i,N_Z-1] * Δw  -  ZPoiss_ijp[i,N_Z-1] * Φ[i,N_Z]
+                DZ_tot[N_Z-1]      = ( Four_π_G * ρtot[i,N_Z-1]  -  Φ_half[i,N_Z-1] * Δw  -  ZPoiss_ijp[i,N_Z-1] * Φ[i,N_Z]
                                    -  (RPoiss_ijp[i,N_Z-1]*Φ_half[i+1,N_Z-1]  -  RPoiss_ij[i,N_Z-1] * Φ_half[i,N_Z-1]  +  RPoiss_ijm[i,N_Z-1]*Φ_half[im1,N_Z-1]))
 
                 # Solve tridiagonal system in the Z-direction:
@@ -434,7 +551,7 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
                         # Compute relative residual ≡ (∇²Φ - 4πGρ)/4πGρ at (i,j):
                         Residual = abs(  RPoiss_ijp[i,j] * Φ[ip1,j]  -  RPoiss_ij[i,j] * Φ[i,j]  +  RPoiss_ijm[i,j] * Φ[im1,j]
                                        + ZPoiss_ijp[i,j] * Φ[i,jp1]  -  ZPoiss_ij[i,j] * Φ[i,j]  +  ZPoiss_ijm[i,j] * Φ[i,jm1]
-                                       - Four_π_G * ρ[i,j]  ) / ( Four_π_G * ρ[i,j] )
+                                       - Four_π_G * ρtot[i,j]  ) / ( Four_π_G * ρtot[i,j] )
 
                         # Compute relative change (Φ - Φ_old) / Φ_old:
                         ΔΦ       = abs( Φ[i,j] - Φ_old[i,j] ) / abs( Φ_old[i,j] )
@@ -474,7 +591,10 @@ function Update_Φ!( Φ::AbstractArray{Float64, 2},
                Φ_half::AbstractArray{Float64, 2},
                 Φ_old::AbstractArray{Float64, 2},
            Φ_snapshot::AbstractArray{Float64, 2},
+                 ρtot::AbstractArray{Float64, 2},
                     ρ::AbstractArray{Float64, 2},
+                   ρd::AbstractArray{Float64, 2},
+                 ρ_bg::AbstractArray{Float64, 2},
            RPoiss_ijp::AbstractArray{Float64, 2},
             RPoiss_ij::AbstractArray{Float64, 2},
            RPoiss_ijm::AbstractArray{Float64, 2},
@@ -485,7 +605,12 @@ function Update_Φ!( Φ::AbstractArray{Float64, 2},
                Δτ_min::Float64,
                    ΔV::AbstractArray{Float64, 2}, 
                  rCoM::AbstractArray{Float64, 1},
-                 ZCoM::AbstractArray{Float64, 1}  
+                 ZCoM::AbstractArray{Float64, 1},
+                    Q::AbstractArray{Float64, 1},
+                    P::AbstractArray{Float64, 1},
+                 ℓmax::Int    = 20,
+             BC_Z_bot::Symbol = :Reflect
+
                     )
 
     N_r, N_Z    = size( ρ )
@@ -503,11 +628,11 @@ function Update_Φ!( Φ::AbstractArray{Float64, 2},
         Φ_old    .= Φ_snapshot
 
         # Do a set of ADI iterations & check for convergence:
-        Converged = Update_Φ_ADI!( Φ, Φ_half, Φ_old, ρ, 
+        Converged = Update_Φ_ADI!( Φ, Φ_half, Φ_old, ρtot, ρ, ρd, ρ_bg,
                                    RPoiss_ijp, RPoiss_ij, RPoiss_ijm,
                                    ZPoiss_ijp, ZPoiss_ij, ZPoiss_ijm,
                                    Δτ_max, Δτ_min, k_iter,
-                                   ΔV, rCoM, ZCoM )
+                                   ΔV, rCoM, ZCoM, Q, P, ℓmax, BC_Z_bot )
 
         if !Converged
             # Update ADI attempt count:
@@ -650,6 +775,8 @@ end
     Poisson equation again. Returns true if we should, false otherwise. """
 function ShouldWeUpdateΦ( Φ::AbstractArray{Float64, 2},
                           ρ::AbstractArray{Float64, 2},
+                         ρd::AbstractArray{Float64, 2},
+                       ρ_bg::AbstractArray{Float64, 2},
                  RPoiss_ijp::AbstractArray{Float64, 2},
                   RPoiss_ij::AbstractArray{Float64, 2},
                  RPoiss_ijm::AbstractArray{Float64, 2},
@@ -673,7 +800,7 @@ function ShouldWeUpdateΦ( Φ::AbstractArray{Float64, 2},
                 jm1  = max(j-1, 1)
 
                 # Compute Φ':
-                Φ_prime  = ( - Four_π_G * ρ[i,j]  
+                Φ_prime  = ( - Four_π_G * ( ρ[i,j] + ρd[i,j] + ρ_bg[i,j] )
                              + RPoiss_ijp[i,j] * Φ[ip1,j]  +  RPoiss_ijm[i,j] * Φ[im1,j]
                              + ZPoiss_ijp[i,j] * Φ[i,jp1]  +  ZPoiss_ijm[i,j] * Φ[i,jm1] ) / ( RPoiss_ij[i,j] + ZPoiss_ij[i,j] )
 

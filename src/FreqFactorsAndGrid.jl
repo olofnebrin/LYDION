@@ -79,8 +79,8 @@ const h_over_kB::Float64   = h    / kB
                     VELOCITY   = D_colon_∇u * inv_c 
 
                     # Get K and C:
-                    Kjp            = PREFACT  * Lyα.Hvoigt[i, j, k+1]
-                    Kj             = PREFACT  * Lyα.Hvoigt[i, j, k]
+                    Kjp            = PREFACT  * Lyα.Hvoigt[i, j, k+1] 
+                    Kj             = PREFACT  * Lyα.Hvoigt[i, j, k]    
                     Kjm            = PREFACT  * Lyα.Hvoigt[i, j, k-1]
                     Cjp            = VELOCITY * Lyα.νC[k]  +  REC_ONOFF * PREFACT * Lyα.Hvoigt[i, j, k+1] * ( RECOIL_0 -  2 / Lyα.νC[k+1] )
                     Cj             = VELOCITY * Lyα.νC[k]  +  REC_ONOFF * PREFACT * Lyα.Hvoigt[i, j, k] * ( RECOIL_0  -  2 / Lyα.νC[k] ) 

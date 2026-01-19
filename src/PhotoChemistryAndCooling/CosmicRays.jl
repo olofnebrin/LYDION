@@ -1,6 +1,5 @@
-module CosmicRays
 
-""" MODULE:         CosmicRays
+""" FILE:            CosmicRays
 
     PURPOSE:        This module contains everything related to cosmic ray ionization and heating.
              
@@ -52,5 +51,3 @@ end
     1.602e-11 * (ζHI * nHI  +  ζH2(ζHI) * nH2  +  ζHeI(ζHI) * nHeI  +  ζCI(ζHI) * nCI)
 end
 
-
-end # End of module 

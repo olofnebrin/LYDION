@@ -9,9 +9,9 @@ from matplotlib.ticker import MultipleLocator  # add this import
 
 
 # ---------------- user inputs ----------------
-filename = "RHDSim_NoLya_512x512_2025-12-24.h5"        # <-- change to your file
-frameskip = 1                 # use >1 to skip frames
-save_mp4 = True               # True to save mp4 instead of interactive show
+filename = "RHDSim_NoLya_200x200_2026-01-19.h5"       
+frameskip = 1                 
+save_mp4 = True               
 outname = "density_T.mp4"
 fps = 20
 # ---------------------------------------------
@@ -27,14 +27,21 @@ pc  = 3.085677581e18
 with h5py.File(filename, "r") as f:
     t          = f["Times"][:]                          # (Nt,)
     rho_hist   = f["GasDensity_History"][:]             # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    rhod_hist  = f["DustDensity_History"][:]            # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     T_hist     = f["T_History"][:]                      # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xH2_hist   = f["xH2_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xHII_hist  = f["xHII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xCI_hist   = f["xCI_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xCII_hist  = f["xCII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xCO_hist   = f["xCO_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xOI_hist   = f["xOI_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xOII_hist  = f["xOII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     r          = f["r"][:]                              # edges, (Nr+1,)
     Z          = f["Z"][:]                              # edges, (Nz+1,)
 
 
-xHI_hist = 1.0 - 2.0 * xH2_hist - xHII_hist
+xHI_hist  = 1.0 - 2.0 * xH2_hist - xHII_hist
+
 
 # shapes (needed by ensure_NtNrNz)
 Nt_raw, a1_rho, a2_rho = rho_hist.shape
@@ -81,7 +88,7 @@ plt.rcParams['ytick.right'] = True
 plt.rcParams['xtick.direction'] = 'in'
 plt.rcParams['ytick.direction'] = 'in'
 
-# --- ensure (Nt, Nr, Nz) ordering ---
+# Ensure (Nt, Nr, Nz) ordering 
 Nr = len(r) - 1
 Nz = len(Z) - 1
 
@@ -94,10 +101,16 @@ def ensure_NtNrNz(arr, a1, a2):
         raise ValueError(f"Unexpected array shape {arr.shape} vs edges Nr={Nr}, Nz={Nz}")
 
 rho_hist   = ensure_NtNrNz(rho_hist,  a1_rho, a2_rho)
+rhod_hist  = ensure_NtNrNz(rhod_hist,   rhod_hist.shape[1],   rhod_hist.shape[2])
 T_hist     = ensure_NtNrNz(T_hist,    T_hist.shape[1],   T_hist.shape[2])
 xH2_hist   = ensure_NtNrNz(xH2_hist,  xH2_hist.shape[1], xH2_hist.shape[2])
 xHII_hist  = ensure_NtNrNz(xHII_hist, xHII_hist.shape[1], xHII_hist.shape[2])
+xCO_hist   = ensure_NtNrNz(xCO_hist, xCO_hist.shape[1], xCO_hist.shape[2])
 Nt, _, _   = rho_hist.shape
+
+xCHx_hist  = 1.0 - xCI_hist - xCII_hist - xCO_hist
+xOHx_hist  = 1.0 - xOI_hist - xOII_hist - 0.5493 * xCO_hist
+DG_hist    = rhod_hist / (rho_hist * 1/162)   # Dust-to-gas mass ratio in Solar units
 
 # convert to number density
 nH_hist = X * rho_hist / mH   # (Nt, Nr, Nz)
@@ -106,11 +119,14 @@ nH_hist = X * rho_hist / mH   # (Nt, Nr, Nz)
 R, ZZ = np.meshgrid(r/pc, Z/pc, indexing='ij')
 
 # display ranges
-vmin_nH, vmax_nH = 10.0, 1e5
+vmin_nH, vmax_nH = 10, 1e5
 norm_nH = LogNorm(vmin=vmin_nH, vmax=vmax_nH)
 
-vmin_T, vmax_T = 10.0, 1e5
+vmin_T, vmax_T = 1, 1e5
 norm_T = LogNorm(vmin=vmin_T, vmax=vmax_T)
+
+vmin_DG, vmax_DG = 0.01, 10
+norm_DG = LogNorm(vmin=vmin_DG, vmax=vmax_DG)
 
 vmin_x, vmax_x = 1e-8, 1.0
 norm_x = LogNorm(vmin=vmin_x, vmax=vmax_x)
@@ -131,35 +147,41 @@ ax3.tick_params(labelbottom=False)
 ax1.set_ylabel("Z (pc)", labelpad=12)
 im_nH = ax1.pcolormesh(R, ZZ, nH_hist[0].T, norm=norm_nH, shading='auto', cmap='viridis')
 cb1 = fig.colorbar(im_nH, ax=ax1, pad=0.02)
+#cb1.set_ticks([10, 1e3, 1e5, 1e7, 1e9])
+#cb1.set_ticks([1e3, 1e5, 1e7, 1e9])
 cb1.set_ticks([10, 1e3, 1e5])
+#cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$', '10$^{7}$', '10$^{9}$'])
+#cb1.set_ticklabels(['10$^{3}$', '10$^{5}$', '10$^{7}$', '10$^{9}$'])
 cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$'])
 panel_label_style = dict(ha='right', va='top', color='black',
                          path_effects=[pe.withStroke(linewidth=3, foreground='white')])
 ax1.text(0.9, 0.2, "n$_{H}$ (cm$^{-3}$)", transform=ax1.transAxes, **panel_label_style)
 
-#ax1.set_xlim(r[0]/pc, r[-1]/pc)
-#ax1.set_ylim(Z[0]/pc, Z[-1]/pc)
-ax1.set_xlim(r[0]/pc, 3)
-ax1.set_ylim(Z[0]/pc, 3)
+ax1.set_xlim(r[0]/pc, r[-1]/pc)
+ax1.set_ylim(Z[0]/pc, Z[-1]/pc)
+#ax1.set_xlim(r[0]/pc, 0.001)
+#ax1.set_ylim(Z[0]/pc, 0.001)
 
 # --- temperature ---
 ax2.set_xlabel("r (pc)", labelpad=12)
 ax2.set_ylabel("Z (pc)", labelpad=12)
 im_T = ax2.pcolormesh(R, ZZ, T_hist[0].T, norm=norm_T, shading='auto', cmap='coolwarm')
 cb2 = fig.colorbar(im_T, ax=ax2, pad=0.02)
-cb2.set_ticks([10, 100, 1e3, 1e4, 1e5])
-cb2.set_ticklabels(['10', '10$^{2}$', '10$^{3}$', '10$^{4}$', '10$^{5}$'])
+cb2.set_ticks([1, 10, 100, 1e3, 1e4, 1e5])
+cb2.set_ticklabels(['1', '10', '10$^{2}$', '10$^{3}$', '10$^{4}$', '10$^{5}$'])
 ax2.text(0.9, 0.9, "T (K)", transform=ax2.transAxes, **panel_label_style)
 
-# --- xH2 ---
+# --- Dust-to-gas ratio ---
 ax3.tick_params(labelleft=False)
-im_xH2 = ax3.pcolormesh(R, ZZ, np.clip(xH2_hist[0].T, vmin_x, vmax_x),
-                        norm=norm_x, shading='auto', cmap='gist_heat')
+im_xH2 = ax3.pcolormesh(R, ZZ, np.clip(DG_hist[0].T, vmin_DG, vmax_DG),
+                        norm=norm_DG, shading='auto', cmap='gist_heat')
 
 cb3 = fig.colorbar(im_xH2, ax=ax3, pad=0.02)
-cb3.set_ticks([1e-8, 1e-6, 1e-4, 0.01, 1])
-cb3.set_ticklabels(['10$^{-8}$', '10$^{-6}$', '10$^{-4}$', '0.01', '1'])
-ax3.text(0.9, 0.9, "x$_{H_2}$", transform=ax3.transAxes, **panel_label_style)
+cb3.set_ticks([0.01, 0.1, 1, 10])
+#cb3.set_ticks([1e-8, 1e-6, 1e-4, 0.01, 1])
+cb3.set_ticklabels(['0.01', '0.1', '1', '10'])
+#cb3.set_ticklabels(['10$^{-8}$', '10$^{-6}$', '10$^{-4}$', '0.01', '1'])
+ax3.text(0.9, 0.9, "D/D$_{\odot}$", transform=ax3.transAxes, **panel_label_style)
 
 # --- xHII ---
 ax4.set_xlabel("r (pc)", labelpad=12)
@@ -184,7 +206,7 @@ def init():
     k0 = frames[0]
     im_nH.set_array(nH_hist[k0].T.ravel())
     im_T.set_array(T_hist[k0].T.ravel())
-    im_xH2.set_array(np.clip(xH2_hist[k0].T, vmin_x, vmax_x).ravel())
+    im_xH2.set_array(np.clip(DG_hist[k0].T, vmin_DG, vmax_DG).ravel())
     im_xHII.set_array(np.clip(xHII_hist[k0].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k0]/kyr:.2f} kyr")
     return im_nH, im_T, im_xH2, im_xHII, txt
@@ -192,7 +214,7 @@ def init():
 def update(k):
     im_nH.set_array(nH_hist[k].T.ravel())
     im_T.set_array(T_hist[k].T.ravel())
-    im_xH2.set_array(np.clip(xH2_hist[k].T, vmin_x, vmax_x).ravel())
+    im_xH2.set_array(np.clip(DG_hist[k].T, vmin_DG, vmax_DG).ravel())
     im_xHII.set_array(np.clip(xHII_hist[k].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k]/kyr:.2f} kyr")
     return im_nH, im_T, im_xH2, im_xHII, txt

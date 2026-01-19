@@ -8,8 +8,8 @@ import matplotlib.patheffects as pe
 from matplotlib.ticker import MultipleLocator  # if you want it later
 
 # ---------------- user inputs ----------------
-filename  = "RHDSim_Lya_2025-12-23.h5"
-#filename  = "RHDSim_128x128_withLya.h5"    
+#filename  = "RHDSim_Lya_64x64_2025-12-25.h5"
+filename  = "RHDSim_Lya_32x32_2026-01-10.h5"    
 frameskip = 1                  # use >1 to skip frames
 save_mp4  = True               # True to save mp4 instead of interactive show
 outname   = "density_T_withLyaSpec.mp4"

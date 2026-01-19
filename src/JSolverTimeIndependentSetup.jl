@@ -138,9 +138,6 @@ function JSolver_UniformCloud_New(nHcl::Float64 = 7380.0, T0::Float64 = 5e4,
                 xHI  = 1 - xHII 
             end 
 
-            #xHII = max( 1.0 / (1 + (R/Rs)^10), 1e-8 )
-            #xHI  = 1 - xHII
-
             if R < Rcl 
                 nH = nHcl 
             else

@@ -21,7 +21,7 @@ export LyαArrays, GenerateLyαArrays, H, Htophat, b, a, σ0,
        eLyα_sphere_point, eLyα_sphere_uni,
        D_colon_∇u_Cartesian, Compute_f_esc_Cylindrical, Compute_f_esc_Lyα_Cylindrical,
        GetHydrogenDensities, GetHeliumDensities, GetElectronDensity,
-       GetElectronDensityFromFracs, MinMod
+       GetElectronDensityFromFracs, MinMod, MonCen, PrintLYDIONLogo
 
 
 ###############################################################
@@ -30,44 +30,6 @@ export LyαArrays, GenerateLyαArrays, H, Htophat, b, a, σ0,
 #######                                                 #######
 ###############################################################
 
-####### PHYSICAL CONSTANTS ################
-const c::Float64          = 2.99792458e10         # Speed of light (cm/s)
-const h::Float64          = 6.626069573e-27       # Planck's constant (erg s)
-const G::Float64          = 6.6743e-8             # The gravitational constant (dyn cm² g⁻²)
-const kB::Float64         = 1.380648813e-16       # Boltzmann constant (erg/K)
-const mH::Float64         = 1.6735327e-24         # Mass of hydrogen atom (g)
-const mH2::Float64        = 2 * mH                # Mass of H₂ molecule (g)
-const me::Float64         = 9.109382917e-28       # Mass of electron (g)
-const mHe::Float64        = 4 * mH                # Mass of helium atom (g)
-const mC::Float64         = 12 * mH               # Mass of carbon atom (g)
-const mCO::Float64        = (12 + 16) * mH        # Mass of CO molecule (g)
-const e::Float64          = 4.80320451e-10        # Electron charge (esu)
-const σSB::Float64        = 5.670374419e-5        # Stefan-Boltzmann constant (cgs units)
-const νLyα::Float64       = 2.466068e15           # Lyα frequency at line center (Hz)
-const νLyC::Float64       = 3.289842e15           # LyC limit frequency (Hz)
-const ELyα::Float64       = h * νLyα              # Lyα photon energy (erg)
-const ELyC::Float64       = h * νLyC              # LyC limit photon energy (i.e. Rydberg) (erg)
-const ALyα::Float64       = 6.265e8               # Einstein-A coefficient for Lyα (s⁻¹)
-const A_2γ::Float64       = 8.2206                # Einstein-A coefficient for two-photon decay (s⁻¹) 
-const A_2p2s::Float64     = 8.78e-7               # Einstein-A coefficient for 2p → 2s transition (s⁻¹)
-const A_2s2p::Float64     = 1.597e-9              # Einstein-A coefficient for 2s → 2p transition (s⁻¹)
-const f_lu_Lyα::Float64   = 0.41641               # Oscillator strength for Lyα
-const σT::Float64         = 6.6524587321e-25      # Thomson scattering cross-section (cm²)
-
-####### PARAMETERS ########################
-const Y::Float64          = 0.247                 # Helium mass fraction 
-const X::Float64          = 1 - Y                 # Hydrogen mass fraction
-const Dsun::Float64       = 1 / 162               # Solar dust-to-gas ratio
-const TCMB0::Float64      = 2.726                 # CMB temperature at redshift z = 0
-const D_H_ratio::Float64  = 2.53e-5               # Deuterium-to-hydrogen abundance nD/nH  (Cooke et al. 2018)
-const C_H_ratio::Float64  = 2.95e-4               # Carbon-to-hydrogen abundance nC/nH     (Asplund et al. 2009)
-const N_H_ratio::Float64  = 7.41e-5               # Nitrogen-to-hydrogen abundance nN/nH   (Asplund et al. 2009)
-const O_H_ratio::Float64  = 5.37e-4               # Oxygen-to-hydrogen abundance nC/nH     (Asplund et al. 2009)
-const Ne_H_ratio::Float64 = 9.33e-5               # Neon-to-hydrogen abundance nNe/nH      (Asplund et al. 2009)
-const Mg_H_ratio::Float64 = 4.37e-5               # Magnesium-to-hydrogen abundance nMg/nH (Asplund et al. 2009)
-const Si_H_ratio::Float64 = 3.55e-5               # Silicon-to-hydrogen abundance nSi/nH   (Asplund et al. 2009)
-const S_H_ratio::Float64  = 1.45e-5               # Sulfur-to-hydrogen abundance nSi/nH    (Asplund et al. 2009)
-const Fe_H_ratio::Float64 = 3.47e-5               # Iron-to-hydrogen abundance nSi/nH      (Asplund et al. 2009)
 
 ####### CONVENIENT UNIT CONVERSIONS #######
 const Lsun::Float64       = 3.839e33              # Solar luminsoity (erg/s)
@@ -88,20 +50,92 @@ const μm::Float64         = 1e-4                  # 1 micron (cm)
 const F_Habing::Float64   = 1.6e-3                # Habing flux (erg cm⁻² s⁻¹) - see Tielens (2005)
                                                   # (equivaletly, u_Habing = F_Habing/c = 5.3 × 10⁻¹³ erg cm⁻³)
 
+####### PHYSICAL CONSTANTS ################
+const c::Float64          = 2.99792458e10         # Speed of light (cm/s)
+const h::Float64          = 6.626069573e-27       # Planck's constant (erg s)
+const G::Float64          = 6.6743e-8             # The gravitational constant (dyn cm² g⁻²)
+const kB::Float64         = 1.380648813e-16       # Boltzmann constant (erg/K)
+const mH::Float64         = 1.6735327e-24         # Mass of hydrogen atom (g)
+const mH2::Float64        = 2 * mH                # Mass of H₂ molecule (g)
+const me::Float64         = 9.109382917e-28       # Mass of electron (g)
+const mHe::Float64        = 4 * mH                # Mass of helium atom (g)
+const mC::Float64         = 12 * mH               # Mass of carbon atom (g)
+const mCO::Float64        = (12 + 16) * mH        # Mass of CO molecule (g)
+const e::Float64          = 4.80320451e-10        # Electron charge (esu)
+const q_e::Float64        = - e                   # Charge of electron (esu)
+const q_HII::Float64      = - e                   # Charge of proton (esu)
+const q_HeII::Float64     = - e                   # Charge of He II (esu)
+const q_HeIII::Float64    = - 2 * e               # Charge of He III (esu)
+const σSB::Float64        = 5.670374419e-5        # Stefan-Boltzmann constant (cgs units)
+const νLyα::Float64       = 2.466068e15           # Lyα frequency at line center (Hz)
+const νLyC::Float64       = 3.289842e15           # LyC limit frequency (Hz)
+const ELyα::Float64       = h * νLyα              # Lyα photon energy (erg)
+const ELyC::Float64       = h * νLyC              # LyC limit photon energy (i.e. Rydberg) (erg)
+const inv_ELyα::Float64   = 1 / ELyα              # Inverse of ELyα, convenient 
+const ALyα::Float64       = 6.265e8               # Einstein-A coefficient for Lyα (s⁻¹)
+const A_2γ::Float64       = 8.2206                # Einstein-A coefficient for two-photon decay (s⁻¹) 
+const A_2p2s::Float64     = 8.78e-7               # Einstein-A coefficient for 2p → 2s transition (s⁻¹)
+const A_2s2p::Float64     = 1.597e-9              # Einstein-A coefficient for 2s → 2p transition (s⁻¹)
+const f_lu_Lyα::Float64   = 0.41641               # Oscillator strength for Lyα
+const σT::Float64         = 6.6524587321e-25      # Thomson scattering cross-section (cm²)
+
+####### PARAMETERS ########################
+const Y::Float64          = 0.247                 # Helium mass fraction 
+const X::Float64          = 1 - Y                 # Hydrogen mass fraction
+const DGsun::Float64      = 1 / 162               # Solar dust-to-gas ratio
+const TCMB0::Float64      = 2.726                 # CMB temperature at redshift z = 0
+const D_H_ratio::Float64  = 2.53e-5               # Deuterium-to-hydrogen abundance nD/nH  (Cooke et al. 2018)
+const C_H_ratio::Float64  = 2.95e-4               # Carbon-to-hydrogen abundance nC/nH     (Asplund et al. 2009)
+const N_H_ratio::Float64  = 7.41e-5               # Nitrogen-to-hydrogen abundance nN/nH   (Asplund et al. 2009)
+const O_H_ratio::Float64  = 5.37e-4               # Oxygen-to-hydrogen abundance nC/nH     (Asplund et al. 2009)
+const Ne_H_ratio::Float64 = 9.33e-5               # Neon-to-hydrogen abundance nNe/nH      (Asplund et al. 2009)
+const Mg_H_ratio::Float64 = 4.37e-5               # Magnesium-to-hydrogen abundance nMg/nH (Asplund et al. 2009)
+const Si_H_ratio::Float64 = 3.55e-5               # Silicon-to-hydrogen abundance nSi/nH   (Asplund et al. 2009)
+const S_H_ratio::Float64  = 1.45e-5               # Sulfur-to-hydrogen abundance nSi/nH    (Asplund et al. 2009)
+const Fe_H_ratio::Float64 = 3.47e-5               # Iron-to-hydrogen abundance nSi/nH      (Asplund et al. 2009)
+
 ####### CONVENIENT CONSTANTS ##############
+const OneThird::Float64      = 1 / 3
 const Four_π::Float64        = 4 * π 
+const inv_Four_π::Float64    = 1 / Four_π
 const Two_π::Float64         = 2 * π
 const Sqrt_π::Float64        = sqrt(π) 
 const Sqrt_2::Float64        = sqrt(2)
 const Four_π_over_c::Float64 = Four_π / c    
-const inv_c::Float64         = 1 / c          
+const inv_c::Float64         = 1 / c   
+const X_over_mH::Float64     = X / mH    
+const Y_over_mHe::Float64    = Y / mHe   
+
+
+####### BAND ENERGIES ####################
+
+# Photon band energies:
+
+const E_opt::Float64      = 3.67  * eV       # 1-5.8 eV band (optical)
+const E_FUV::Float64      = 8.45  * eV       # 5.8-11.2 eV band (FUV)
+const E_LW::Float64       = 12.26 * eV       # 11.2-13.6 eV band (Lyman-Werner)
+const E_EUV1::Float64     = 18.01 * eV       # 13.6-24.6 eV band (H I ionizing)
+const E_EUV2::Float64     = 29.89 * eV       # 24.6-54.4 eV band (He I ionizing)
+const E_EUV3::Float64     = 56.85 * eV       # 54.4-∞ eV band (He II ionizing) 
+
+# Inverse energies enter a lot of expressions, so pre-compute:
+const inv_E_opt::Float64  = 1 / E_opt
+const inv_E_FUV::Float64  = 1 / E_FUV
+const inv_E_LW::Float64   = 1 / E_LW
+const inv_E_EUV1::Float64 = 1 / E_EUV1
+const inv_E_EUV2::Float64 = 1 / E_EUV2
+const inv_E_EUV3::Float64 = 1 / E_EUV3
 
 # Export constants:
-export c, h, G, kB, mH, mH2, me, mHe, mC, mCO, e, σSB, νLyα, νLyC, ELyα, ELyC, ALyα, A_2γ, A_2p2s,
-       A_2s2p, f_lu_Lyα, σT, X, Y, Dsun, TCMB0, D_H_ratio, C_H_ratio, N_H_ratio, O_H_ratio,
+export c, h, G, kB, mH, mH2, me, mHe, mC, mCO, e, q_e, q_HII, q_HeII, q_HeIII,
+       σSB, νLyα, νLyC, ELyα, ELyC, inv_ELyα, 
+       ALyα, A_2γ, A_2p2s, A_2s2p, f_lu_Lyα, σT, X, Y, DGsun, TCMB0, D_H_ratio, C_H_ratio, N_H_ratio, O_H_ratio,
        Ne_H_ratio, Mg_H_ratio, Si_H_ratio, S_H_ratio, Fe_H_ratio,
        Lsun, Msun, AU, pc, Mpc, Gpc, kms, day, yr, Myr, Gyr, eV, Ang, nm, μm, F_Habing,
-       Four_π, Two_π, Sqrt_π, Sqrt_2, Four_π_over_c, inv_c
+       OneThird, Four_π, inv_Four_π, Two_π, Sqrt_π, Sqrt_2, Four_π_over_c, inv_c, X_over_mH, Y_over_mHe,
+       E_opt, E_FUV, E_LW, E_EUV1, E_EUV2, E_EUV3,
+       inv_E_opt, inv_E_FUV, inv_E_LW, inv_E_EUV1, inv_E_EUV2, inv_E_EUV3
+
 
 
 ###############################################################
@@ -571,7 +605,7 @@ end
 end
 
 
-""" This function just resets Δρu (for Lyα or stellar RT bands),
+""" This function just resets Δρu (for Lyα or stellar/IR RT bands),
     i.e. sets it to zero. Just a convenient function. """
 @inline function Reset_Δρu!( Δρu_r::AbstractArray{Float64, 2},
                              Δρu_Z::AbstractArray{Float64, 2}
@@ -920,10 +954,6 @@ end
 #######                                                 #######
 ###############################################################
 
-
-
-const X_over_mH::Float64 = X / mH
-
 """ This function computes the H I, H II, and H₂ number densities,
     given the fractional abundances of H II and H₂, and the gas density ρ. """
 @inline @fastmath function GetHydrogenDensities( xHII::Float64, 
@@ -939,8 +969,6 @@ const X_over_mH::Float64 = X / mH
     return nHI, nHII, nH2
 end
 
-
-const Y_over_mHe::Float64 = Y / mHe
 
 """ This function computes the He I, He II, and He III number densities,
     given the fractional abundances of He II and He III, and the gas density ρ. """
@@ -993,6 +1021,40 @@ end
                          B::Float64 
                         )
     0.5 * (sign(A) + sign(B)) * min( abs(A), abs(B) )
+end
+
+
+""" MonCen slope limiter. Less diffusive than MinMod, albeit 
+    slightly less robust (but still very good). """
+@inline function MonCen( A::Float64, 
+                         B::Float64
+                         )
+    MinMod( 0.5 * ( A + B ), MinMod( 2.0 * A, 2.0 * B ) )
+end
+
+
+
+""" Prints LYDION logo. """
+function PrintLYDIONLogo( )
+    # Define some ANSI codes:
+    b   = "\x1b[1;36m"         # Cyan blue 
+    r   = "\x1b[1;31m"         # Red 
+    g   = "\x1b[38;2;0;102;0m" # Green 
+    db  = "\x1b[38;2;0;0;255m" # Blue
+    p   = "\x1b[1;35m"         # Purple 
+
+    LYDION_logo = """
+
+    $(b)ooooo            ooooo  oooo      $(r)ooooooooo        ooooo        $(p)ooooooo        oooo   oooo 
+    $(b)888               888  88         $(r)888    88o       888       $(p)o888   888o       8888o  88  
+    $(b)888                 888           $(r)888    888       888       $(p)888     888       88 888o88  
+    $(b)888      o          888           $(r)888    888       888       $(p)888o   o888       88   8888  
+   $(b)o888ooooo88         o888o         $(r)o888ooo88        o888o        $(p)88ooo88        o88o    88
+
+    """
+
+    println(LYDION_logo)
+    println("")
 end
 
 

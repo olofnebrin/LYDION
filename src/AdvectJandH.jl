@@ -12,7 +12,7 @@
 
 """
 
-using .ConstantsAndFunctions  # For MinMod  
+using .ConstantsAndFunctions  # For slope limiters 
 using Base.Threads            # For CPU acceleration
 
 # Export functions:
@@ -69,7 +69,7 @@ end
 
 
 const τ_diff_floor::Float64 = 1.0
-const ψ_fluxlimiter::Float64 = 1.1   # Flux limiter in the highly optically thick regime
+const ψ_fluxlimiter::Float64 = 1.0   # Flux limiter in the highly optically thick regime
 
 """ Computes the HLL fluxes for J, H_r, and H_Z. Uses 
     a correction factor ϵ for the asymptotic diffusion limit for J,
@@ -103,11 +103,12 @@ const ψ_fluxlimiter::Float64 = 1.1   # Flux limiter in the highly optically thi
     f_L          = sqrt( Hr_L * Hr_L  +  HZ_L * HZ_L ) / max( J_L, Jeps )
     f_R          = sqrt( Hr_R * Hr_R  +  HZ_R * HZ_R ) / max( J_R, Jeps )
     f_interface  = 0.5 * ( f_L + f_R )
-    oneminusf    = max( 1 - f_interface, 0.0 )
+    #oneminusf    = max( 1 - f_interface, 0.0 )
+    oneminusf    = 1.0
 
     # Effective cell optical depth & correction factor for diffusion limit:
     τ_cell       = τ_L + τ_R 
-    ϵ            = min( 1, 1 / ( oneminusf * τ_cell ) )
+    ϵ            = min( 1, 1 / τ_cell )
     oneminusϵ    = max( 1 - ϵ, 0.0 )
 
     # Interface flux for J:

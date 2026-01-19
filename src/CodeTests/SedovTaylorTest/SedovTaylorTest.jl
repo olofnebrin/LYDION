@@ -3,14 +3,16 @@ module SedovTaylorTest
 
 __precompile__()
 
-include("../../ConstantsAndFunctions.jl")
-include("../../SpatialGrid.jl")
-include("../../Hydrodynamics.jl")
-include("../SaveHDF5Data_HydroTests.jl")
+include( "../../Structs.jl" )
+include( "../../ConstantsAndFunctions.jl" )
+using .Structs
 using .ConstantsAndFunctions
-using .SpatialGrid
-using .Hydrodynamics
-using .SaveHDF5Data_HydroTests
+
+include( "../../WENO3.jl" )
+include( "../../SpatialGrid.jl" )
+include( "../../Hydrodynamics.jl" )
+include( "../SaveHDF5Data_HydroTests.jl" )
+
 using  Base.Threads              # For CPU acceleration
 using  ProgressMeter             # To show time step progress
 using  Dates, Printf
@@ -27,16 +29,11 @@ function UpdateSedovTest!( Δt_Hydro::Float64,
                              rfirst::Bool    = true
                           )
 
-    # Main geometry arrays:
-    ΔV          = geometry.ΔV
+    # Geometry arrays:
     inv_ΔV      = geometry.inv_ΔV
     A_r         = geometry.A_r
     A_Z         = geometry.A_Z
     inv_r_cell  = geometry.inv_r_cell
-    r           = geometry.r 
-    rCoM        = geometry.rCoM
-    Z           = geometry.Z
-    ZCoM        = geometry.ZCoM
 
     # Weights for converting between cell center & cell-average values of 
     # conservatives & primitives:
@@ -53,50 +50,10 @@ function UpdateSedovTest!( Δt_Hydro::Float64,
     w_plus_j_p1 = geometry.w_plus_j_p1;  w_minus_j_p1 = geometry.w_minus_j_p1
 
     # Hydro state arrays (cell-averaged):
-    ρ_new       = hydrostate.ρ_new;    ρu_r_new    = hydrostate.ρu_X_new 
-    ρu_Z_new    = hydrostate.ρu_Y_new; E_new       = hydrostate.E_new 
     ρ           = hydrostate.ρ;        ρu_r        = hydrostate.ρu_X 
     ρu_Z        = hydrostate.ρu_Y;     E           = hydrostate.E
-    ρ0          = hydrostate.ρ0;       ρu_r0       = hydrostate.ρu_X0 
-    ρu_Z0       = hydrostate.ρu_Y0;    E0          = hydrostate.E0
     u_r         = hydrostate.u_X;      u_Z         = hydrostate.u_Y 
-    P           = hydrostate.P;        e           = hydrostate.e 
-    T           = hydrostate.T;        γad         = hydrostate.γad 
-
-    # Cell center variables:
-    ρc          = hydrostate.ρc;       ρu_rc       = hydrostate.ρu_Xc
-    ρu_Zc       = hydrostate.ρu_Yc;    Ec          = hydrostate.Ec
-    u_rc        = hydrostate.u_Xc;     u_Zc        = hydrostate.u_Yc 
-    Pc          = hydrostate.Pc
-
-    # Hydro state arrays for the RK time integration:
-    ρ_stage     = hydrostate.ρ_stage;        ρu_r_stage   = hydrostate.ρu_X_stage 
-    ρu_Z_stage  = hydrostate.ρu_Y_stage;     E_stage      = hydrostate.E_stage
-
-    # r-direction interface hydro state & fluxes:
-    ρ_L_r    = hydrostate.ρ_L_X;    ρ_R_r    = hydrostate.ρ_R_X
-    u_r_L_r  = hydrostate.u_X_L_X;  u_r_R_r  = hydrostate.u_X_R_X 
-    u_Z_L_r  = hydrostate.u_Y_L_X;  u_Z_R_r  = hydrostate.u_Y_R_X 
-    P_L_r    = hydrostate.P_L_X;    P_R_r    = hydrostate.P_R_X 
-    Fρ_r     = hydrostate.F_ρ_X;    Fρur_r   = hydrostate.F_ρu_X_X
-    Fρuz_r   = hydrostate.F_ρu_Y_X; FE_r     = hydrostate.F_E_X
-
-    # Z-direction interface hydro state & fluxes:
-    ρ_L_Z    = hydrostate.ρ_L_Y;    ρ_R_Z    = hydrostate.ρ_R_Y
-    u_Z_L_Z  = hydrostate.u_Y_L_Y;  u_Z_R_Z  = hydrostate.u_Y_R_Y
-    u_r_L_Z  = hydrostate.u_X_L_Y;  u_r_R_Z  = hydrostate.u_X_R_Y 
-    P_L_Z    = hydrostate.P_L_Y;    P_R_Z    = hydrostate.P_R_Y 
-    Fρ_Z     = hydrostate.F_ρ_Y;    Fρur_Z   = hydrostate.F_ρu_X_Y 
-    Fρuz_Z   = hydrostate.F_ρu_Y_Y; FE_Z     = hydrostate.F_E_Y
-
-    # Ghost-padded arrays:
-    ρg_old   = hydrostate.ρg_old;   u_rg_old = hydrostate.u_Xg_old
-    u_Zg_old = hydrostate.u_Yg_old; Pg_old   = hydrostate.Pg_old 
-    rg       = ghostgrid.Xg;        rCoMg    = ghostgrid.XCoMg 
-    Zg       = ghostgrid.Yg;        ZCoMg    = ghostgrid.YCoMg
-
-    # Shock indicator:
-    Shock    = hydrostate.Shock
+    P           = hydrostate.P;        γad         = hydrostate.γad 
 
     # Grid size & intervals:
     N_r, N_Z    = size( ρ )
@@ -110,33 +67,14 @@ function UpdateSedovTest!( Δt_Hydro::Float64,
     ###############################################################
 
     # Update hydro variables by advection:
-    UpdateHydro!( ρ_new,  ρu_r_new, ρu_Z_new, E_new,
-                  ρ,      ρu_r,     ρu_Z,     E,
-                  ρ0,     ρu_r0,    ρu_Z0,    E0,
-                  γad,    u_r,      u_Z,
-                  inv_ΔV, A_r,      A_Z,      Δt_Hydro,
+    UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, inv_ΔV, A_r, A_Z, 
 
-                  ρ_stage,  ρu_r_stage, ρu_Z_stage, E_stage,
+                 w_i_m1_r, w_i_0_r, w_i_p1_r, w_j_m1_Z, w_j_0_Z, w_j_p1_Z, 
+                 q_i_m1_r, q_i_0_r, q_i_p1_r, q_j_m1_Z, q_j_0_Z, q_j_p1_Z,  
 
-                  ρc,     ρu_rc,    ρu_Zc,    Ec,
-                  u_rc,   u_Zc,     Pc,
+              w_plus_i_p1, w_minus_i_p1,  w_plus_j_p1, w_minus_j_p1,
 
-                  w_i_m1_r, w_i_0_r, w_i_p1_r, w_j_m1_Z, w_j_0_Z, w_j_p1_Z, 
-                  q_i_m1_r, q_i_0_r, q_i_p1_r, q_j_m1_Z, q_j_0_Z, q_j_p1_Z,  
-
-                  w_plus_i_p1, w_minus_i_p1,   
-                  w_plus_j_p1, w_minus_j_p1, 
-
-                  ρ_L_r, ρ_R_r, u_r_L_r, u_r_R_r, u_Z_L_r, u_Z_R_r, P_L_r, P_R_r,
-                  Fρ_r, Fρur_r, Fρuz_r, FE_r,
-                  ρ_L_Z, ρ_R_Z, u_Z_L_Z, u_Z_R_Z, u_r_L_Z, u_r_R_Z, P_L_Z, P_R_Z,
-                  Fρ_Z, Fρur_Z, Fρuz_Z, FE_Z,
-                  P, ρg_old, u_rg_old, u_Zg_old, 
-                  Pg_old, 
-                  rg, rCoMg, Zg,  ZCoMg, 
-
-                  Val(:Cylindrical), inv_r_cell, rfirst,
-                  Shock )  
+                 Val(:Cylindrical), inv_r_cell )  
 
     # Update primitives to reflect latest conservatives,
     # so that we can set the CFL time-step for the scalar advection:
@@ -204,8 +142,11 @@ function SetupSedovTaylorTest( ρ₀::Float64,
         print("\r\033[KInitialising hydro arrays..."); flush(stdout)
     end 
 
+    # We have no passive scalars:
+    N_Scalars = 0
+
     # Set up hydro state + ghost grid arrays:
-    hydrostate, ghostgrid = GenerateHydroArrays( r, rCoM, Z, ZCoM, γ,
+    hydrostate, ghostgrid = GenerateHydroArrays( r, rCoM, Z, ZCoM, γ, N_Scalars,
                                                  :Reflect, :Reflect,
                                                  :Reflect, :Reflect )
 

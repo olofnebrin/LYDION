@@ -18,7 +18,7 @@ fps       = 20
 edge_indices = [0]            # e.g. [0, 5, 10]
 
 # Left panel mode:
-left_panel_mode = "axis"       # "map" or "axis"
+left_panel_mode = "map"       # "map" or "axis"
 
 # ν-window settings for the spectrum panel
 use_nu_window       = True

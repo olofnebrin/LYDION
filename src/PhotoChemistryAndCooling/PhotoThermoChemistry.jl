@@ -16,22 +16,23 @@ include(joinpath(@__DIR__, "..", "LymanAlphaDestruction.jl"))
 include("./GasChemistryRates.jl")
 include("./UpdateChemistry.jl")
 include("./GasCoolingRates.jl")
+include("./GasChemicalHeating.jl")
 include("./StellarEmissionAbsorption.jl")  # For band opacities & stellar luminosities 
+include("./CosmicRays.jl")
 
 
 const CFL_RT::Float64                  = 0.4   # CFL factor that determines the advection time-step for stellar & Lyα RT (Default: 0.5. NOTE: Must be < 1)
-const DEBUG_PhotoThermoChemistry::Bool = true  # Allow safety checks for physical values etc. Cheap & good for tracking bugs.
+const DEBUG_PhotoThermoChemistry::Bool = false  # Allow safety checks for physical values etc. Cheap & good for tracking bugs.
 
 
 # Export constants and functions: 
 export CFL_RT, UpdateRTandThermoChemistry!, StellarRTArrays, 
-       GenerateStellarRTArrays, FindRSL_StellarRT, FindRSL_LyαRT,
-       Compute_fesc_LyC_and_LW_Cylindrical!
+       GenerateStellarRTArrays, FindRSL_StellarRT, FindRSL_LyαRT
 
 
 
 const ϵ_RSL::Float64 = 5.0        # RSL is ≥ ϵ_RSL × max(|u|, c_s) (Default: 5.0)
-const c̃_min::Float64 = 100 * kms   # Lower bound on RSL, regardless of gas conditions (Default: 100 km/s)
+const c̃_min::Float64 = 100 * kms  # Lower bound on RSL, regardless of gas conditions (Default: 100 km/s)
 
 """ This function determines a reduced speed of light c̃ for 
     stellar RT, such that it is comfortably larger than all gas 
@@ -39,6 +40,8 @@ const c̃_min::Float64 = 100 * kms   # Lower bound on RSL, regardless of gas con
 function FindRSL_StellarRT( c̃::Float64,                   # Old reduced speed of light
                           u_r::AbstractArray{Float64, 2}, # r-direction gas velocity 
                           u_Z::AbstractArray{Float64, 2}, # Z-direction gas velocity 
+                         ud_r::AbstractArray{Float64, 2}, # r-direction dust velocity 
+                         ud_Z::AbstractArray{Float64, 2}, # Z-direction dust velocity 
                             P::AbstractArray{Float64, 2}, # Gas pressure 
                             ρ::AbstractArray{Float64, 2}, # Gas density
                           γad::AbstractArray{Float64, 2}  # Gas adiabatic index 
@@ -56,8 +59,9 @@ function FindRSL_StellarRT( c̃::Float64,                   # Old reduced speed 
             # Gas sound speed:
             c_s = sqrt( γad[i,j] * P[i,j] / ρ[i,j] )
 
-            # Compute minimum RSL for accuracy in this cell to be ~ ϵ_RSL × gas velocity:
-            c̃_min_cell  = ϵ_RSL * max( abs(u_r[i,j]), abs(u_Z[i,j]), c_s )
+            # Compute minimum RSL for accuracy in this cell to be ~ ϵ_RSL × gas/dust velocity:
+            c̃_min_cell  = ϵ_RSL * max( abs(u_r[i,j]),  abs(u_Z[i,j]), c_s,
+                                       abs(ud_r[i,j]), abs(ud_Z[i,j]) )
 
             # Update the largest RSL we've found:
             local_max_c̃ = max( local_max_c̃, c̃_min_cell )
@@ -79,8 +83,86 @@ function FindRSL_StellarRT( c̃::Float64,                   # Old reduced speed 
 end
 
 
-const X_over_mH::Float64 = X / mH
+""" This function estimates the Lyα RSL needed for sufficiently accurate RHD 
+    simulations. """
+function FindRSL_LyαRT_TODO( c̃_Lyα::Float64,                   # Old reduced speed of light
+                          u_r::AbstractArray{Float64, 2}, # r-direction gas velocity 
+                          u_Z::AbstractArray{Float64, 2}, # Z-direction gas velocity 
+                            P::AbstractArray{Float64, 2}, # Gas pressure 
+                            ρ::AbstractArray{Float64, 2}, # Gas density
+                            T::AbstractArray{Float64, 2}, # Gas temperature 
+                         xHII::AbstractArray{Float64, 2}, # H II abundance fraction 
+                          xH2::AbstractArray{Float64, 2}, # H₂ abundance fraction
+                          γad::AbstractArray{Float64, 2}, # Gas adiabatic index
+                            r::AbstractArray{Float64, 2}, # Cell interface r-values 
+                            Z::AbstractArray{Float64, 2}  # Cell interface Z-values    
+                       )
 
+    N_r, N_Z = size(ρ)
+    dN_r     = 1:N_r
+    dN_Z     = 1:N_Z
+
+    # Find new RSL:
+    c̃_new    = 0.0    # Initialize value for the new RSL 
+    for j in dN_Z 
+        local_max_c̃  =  c̃_new   # Local variable for tracking largest c̃ 
+
+        # Cell width in Z-direction:
+        ΔZ = Z[j+1] - Z[j]
+        @inbounds for i in dN_r 
+            # Cell width in r-direction:
+            Δr    = r[i+1] - r[i]
+
+            # Gas sound speed:
+            c_s   = sqrt( γad[i,j] * P[i,j] / ρ[i,j] )
+
+            # H I number density:
+            xHI   = max( 1 - xHII[i,j] - 2 * xH2[i,j], 0.0 )
+            nHI   = xHI * X_over_mH * ρ[i,j]
+
+            # Lyα opacity at line center for the cell:
+            α     = nHI * σ0(T[i,j])
+
+            # Lyα cell optical depth estimate:
+            ΔX    = max( Δr, ΔZ )
+            τcell = α * ΔX
+
+            # Continuum absorption cell optical depth:
+            τcabs = κd_abs_Lyα * ρd[i,j] * ΔX
+
+            # Get aτ:
+            aτ    = a(T[i,j]) * τcell
+            aτ_13 = aτ^OneThird
+
+            # Get reduction factor from Lyα absorption/destruction:
+            fabs  = 1 / ( 1  +  aτ_13 * τcabs  +  0.6 * pd[i,j] * τcell )
+
+            # Compute minimum RSL for accuracy in this cell to be ~ ϵ_RSL × (t_trap/t_light) × gas velocity:
+            c̃_min_cell  = ϵ_RSL * max( 1, (aτ^OneThird) * fabs ) * max( abs(u_r[i,j]), abs(u_Z[i,j]), c_s )
+
+            # Update the largest RSL we've found:
+            local_max_c̃ = max( local_max_c̃, c̃_min_cell )
+        end
+
+        c̃_new = max( c̃_new, local_max_c̃ )
+    end
+
+    # Clamp the new RSL:
+    c̃_Lyα_new = min( max( c̃_new, c̃_min ), c )
+
+    # To avoid rapid changes in c̃ if the newly calculated RSL is small, 
+    # we further limit the maximum reduction to 25 % from the last time-step:
+    if c̃_Lyα_new < c̃_Lyα
+        c̃_Lyα_new = max( c̃_Lyα_new, 0.75 * c̃_Lyα )
+    end
+
+    return c̃_Lyα_new 
+end
+
+
+
+""" This function estimates the Lyα RSL needed for sufficiently accurate RHD 
+    simulations. """
 function FindRSL_LyαRT( c̃_Lyα::Float64,                   # Old reduced speed of light
                           u_r::AbstractArray{Float64, 2}, # r-direction gas velocity 
                           u_Z::AbstractArray{Float64, 2}, # Z-direction gas velocity 
@@ -90,45 +172,54 @@ function FindRSL_LyαRT( c̃_Lyα::Float64,                   # Old reduced spee
                          xHII::AbstractArray{Float64, 2}, # H II abundance fraction 
                           xH2::AbstractArray{Float64, 2}, # H₂ abundance fraction
                           γad::AbstractArray{Float64, 2}, # Gas adiabatic index
-                            r::AbstractArray{Float64, 1},
-                            Z::AbstractArray{Float64, 1}
-                           )
-    
-    N_r, N_Z  = size( ρ )
-    dN_r      = 1:N_r
-    dN_Z      = 1:N_Z
+                            r::AbstractArray{Float64, 2}, # Cell interface r-values 
+                            Z::AbstractArray{Float64, 2}  # Cell interface Z-values    
+                       )
 
-    c̃_Lyα_new = 0.0   # Initialize value for the new RSL 
+    N_r, N_Z = size(ρ)
+    dN_r     = 1:N_r
+    dN_Z     = 1:N_Z
+
+    # Find new RSL:
+    c̃_new    = 0.0    # Initialize value for the new RSL 
     for j in dN_Z 
-        local_max_c̃  =  c̃_Lyα_new   # Local variable for tracking largest c̃
+        local_max_c̃  =  c̃_new   # Local variable for tracking largest c̃ 
 
-        # Zell width along Z-axis:
+        # Cell width in Z-direction:
         ΔZ = Z[j+1] - Z[j]
-
         @inbounds for i in dN_r 
-            # Cell width along r-axis:
-            Δr  = r[i+1] - r[i]
+            # Cell width in r-direction:
+            Δr    = r[i+1] - r[i]
+
             # Gas sound speed:
-            c_s = sqrt( γad[i,j] * P[i,j] / ρ[i,j] )
+            c_s   = sqrt( γad[i,j] * P[i,j] / ρ[i,j] )
+
             # H I number density:
-            xHI = max( 1 - xHII[i,j] - 2 * xH2[i,j], 0.0 )
-            nHI = xHI * X_over_mH * ρ[i,j]
-            
-            # Estimate of a × max(τ_cell):
-            aτ_cell     = a(T[i,j]) * nHI * σ0(T[i,j]) * max( Δr, ΔZ )
+            xHI   = max( 1 - xHII[i,j] - 2 * xH2[i,j], 0.0 )
+            nHI   = xHI * X_over_mH * ρ[i,j]
+
+            # Lyα opacity at line center for the cell:
+            α     = nHI * σ0(T[i,j])
+
+            # Lyα cell optical depth estimate:
+            ΔX    = max( Δr, ΔZ )
+            τcell = α * ΔX
+
+            # Get aτ:
+            aτ    = a(T[i,j]) * τcell
 
             # Compute minimum RSL for accuracy in this cell to be ~ ϵ_RSL × (t_trap/t_light) × gas velocity:
-            c̃_min_cell  = ϵ_RSL * ( 1 + aτ_cell^(1/3) ) * max( abs(u_r[i,j]), abs(u_Z[i,j]), c_s )
+            c̃_min_cell  = ϵ_RSL * max( 1, (aτ^OneThird) ) * max( abs(u_r[i,j]), abs(u_Z[i,j]), c_s )
 
             # Update the largest RSL we've found:
             local_max_c̃ = max( local_max_c̃, c̃_min_cell )
         end
 
-        c̃_Lyα_new = max( c̃_Lyα_new, local_max_c̃ )
+        c̃_new = max( c̃_new, local_max_c̃ )
     end
 
-    # Set the new RSL:
-    c̃_Lyα_new = min( max( c̃_Lyα_new, c̃_min ), c )
+    # Clamp the new RSL:
+    c̃_Lyα_new = min( max( c̃_new, c̃_min ), c )
 
     # To avoid rapid changes in c̃ if the newly calculated RSL is small, 
     # we further limit the maximum reduction to 25 % from the last time-step:
@@ -141,7 +232,8 @@ end
 
 
 """ The total gas heating rate (erg cm⁻³ s⁻ꜝ) from 
-    absorption of ionizing and other photons. """
+    absorption of ionizing and other photons,
+    from photoelectric heating, and from H₂ chemical heating. """
 function HeatingRate_total( J_opt::Float64, 
                             J_FUV::Float64, 
                              J_LW::Float64,
@@ -149,12 +241,17 @@ function HeatingRate_total( J_opt::Float64,
                            J_EUV2::Float64,
                            J_EUV3::Float64,
                             T_old::Float64,
+                           Td_old::Float64, # Dust temperature 
                            ne_old::Float64,
+                           nH_old::Float64, # nHI_old + nHII_old + 2 × nH2_old (but pre-compute for efficiency)
                           nHI_old::Float64,
                           nH2_old::Float64,
+                         nHII_old::Float64,
                          nHeI_old::Float64,
                         nHeII_old::Float64,
                     SelfShielding::Float64,
+                               DG::Float64 = 0.0,
+                              Γpd::Float64 = 0.0, # H⁻ photodetachment rate 
                             e_Lyα::Float64 = 0.0
                              )
 
@@ -162,7 +259,9 @@ function HeatingRate_total( J_opt::Float64,
     +  HeatingRate_LW( SelfShielding * J_LW, nH2_old, nHI_old, T_old )
     +  HeatingRate_EUV1( J_EUV1, nHI_old, nH2_old ) 
     +  HeatingRate_EUV2( J_EUV2, nHI_old, nH2_old, nHeI_old ) 
-    +  HeatingRate_EUV3( J_EUV3, nHI_old, nH2_old, nHeI_old, nHeII_old )  )
+    +  HeatingRate_EUV3( J_EUV3, nHI_old, nH2_old, nHeI_old, nHeII_old )
+    +  HeatingRate_PhotoElectric( J_FUV, J_LW, DG, nH_old, ne_old, T_old, e_Lyα )
+    +  HeatingRate_H2chemical( T_old, Td_old, nH_old, nHI_old, nH2_old, nHII_old, ne_old, DG, Γpd )  )
 
 end
 
@@ -259,45 +358,69 @@ const N_H2_HDcrit = 2.34e19; const c_H2_HD = 5.2e-3; const p_H2_HD = 0.238
 end
 
 
-""" This function updates the LyC and Lyman-Werner escape fraction from the 
-    simulation volume (assumed cylindrical coordinates) in RHD simulations. """
-@inline function Compute_fesc_LyC_and_LW_Cylindrical!(  RT::StellarRTArrays,
-                                                       A_r::AbstractArray{Float64, 2}, # r-direction interface areas 
-                                                       A_Z::AbstractArray{Float64, 2}, # Z-direction interface areas 
-                                                  BC_Z_bot::Symbol = :Outflow          # Assumed BCs at the lower-Z boundary 
-                                                     )
+""" This function computes the emissivity in the EUV1, EUV2, and EUV3 
+    bands from recombinations to the ground state, which is useful in 
+    case the OTS approximation is not used.
+    
+    NOTE: We must use the same band-average photon energy in the recombination 
+          emissivities to get consistent ionization rates from recombinations. """
+@inline function EUVRecombinationEmissivity( T::Float64, 
+                                            ne::Float64, 
+                                          nHII::Float64, 
+                                         nHeII::Float64, 
+                                        nHeIII::Float64 )
 
-    # Lyman-Werner escape fraction: 
-    RT.f_esc_LW   = Compute_f_esc_Cylindrical( RT.H_r_LW, RT.H_Z_LW, A_r, A_Z, RT.Lum_LW, BC_Z_bot )
-
-    # Compute LyC photon number-weighted escape fraction:
-    f_esc_EUV1    = Compute_f_esc_Cylindrical( RT.H_r_EUV1, RT.H_Z_EUV1, A_r, A_Z, RT.Lum_EUV1, BC_Z_bot )
-    f_esc_EUV2    = Compute_f_esc_Cylindrical( RT.H_r_EUV2, RT.H_Z_EUV2, A_r, A_Z, RT.Lum_EUV2, BC_Z_bot )
-    f_esc_EUV3    = Compute_f_esc_Cylindrical( RT.H_r_EUV3, RT.H_Z_EUV3, A_r, A_Z, RT.Lum_EUV3, BC_Z_bot )
-
-    if RT.dN_dt_LyC > 0.0
-        RT.f_esc_LyC  = ( RT.dN_dt_EUV1 * f_esc_EUV1  +  RT.dN_dt_EUV2 * f_esc_EUV2  +  RT.dN_dt_EUV3 * f_esc_EUV3 ) / RT.dN_dt_LyC
-    else
-        RT.f_esc_LyC  = 0.0
+    if ne == 0.0
+        # In neutral gas, we have no recombinations, so exit early:
+        return 0.0, 0.0, 0.0
     end
 
-    return nothing 
+    # EUV1 emissivity (erg s⁻¹ cm⁻³ sr⁻¹) from recombinations to H I ground state:
+    js_EUV1 = krecHII_1(T)   * ne * nHII   * E_EUV1 * inv_Four_π
+
+    # EUV2 emissivity (erg s⁻¹ cm⁻³ sr⁻¹) from recombinations to He I ground state:
+    js_EUV2 = krecHeII_1(T)  * ne * nHeII  * E_EUV2 * inv_Four_π
+
+    # EUV3 emissivity (erg s⁻¹ cm⁻³ sr⁻¹) from recombinations to He II ground state:
+    js_EUV3 = krecHeIII_1(T) * ne * nHeIII * E_EUV3 * inv_Four_π
+
+    return js_EUV1, js_EUV2, js_EUV3
 end
 
 
-const tol_Abs::Float64 = 0.05 
+const tol_Abs::Float64  = 0.1 # Reject an absorption update if the relative change in J or H is > tol_Abs
+const Td_floor::Float64 = 0.1 # Dust temperature (Td) floor below which we don't care about changes in Td
 
+""" This function updates the intensities J and first moment H from gas + dust absorption/scattering,
+    and compute the corresponding change in the gas momentum from radiation pressure. """
 function AbsorptionStep( Δt::Float64,
                           c̃::Float64,
+                          ρ::Float64,          # Gas density 
+                         nH::Float64,          # Total hydrogen density (pre-computed outside, even though it's just a simple sum)
                         nHI::Float64,          # H I number density 
                         nH2::Float64,          # H₂ number density   
                        nHeI::Float64,          # He I number density 
                       nHeII::Float64,          # He II number density   
+                         ne::Float64,          # Electron number density (for Thomson scattering)
+                         ρd::Float64,          # Dust density 
+                       Dust::DustState,        # Dust struct, for opacities 
+                      T_old::Float64,          # Old gas temperature 
+                     Td_old::Float64,          # Old dust temperature 
+                       TCMB::Float64,          # CMB temperature 
 
                   J_opt_old::Float64 = 0.0,
                    dJ_optdt::Float64 = 0.0,
+                H_r_opt_old::Float64 = 0.0,
+                H_Z_opt_old::Float64 = 0.0,
+                  dHr_optdt::Float64 = 0.0,
+                  dHZ_optdt::Float64 = 0.0,
+
                   J_FUV_old::Float64 = 0.0,
                    dJ_FUVdt::Float64 = 0.0,
+                H_r_FUV_old::Float64 = 0.0,
+                H_Z_FUV_old::Float64 = 0.0,
+                  dHr_FUVdt::Float64 = 0.0,
+                  dHZ_FUVdt::Float64 = 0.0,
 
                    J_LW_old::Float64 = 0.0,
                     dJ_LWdt::Float64 = 0.0,
@@ -325,38 +448,89 @@ function AbsorptionStep( Δt::Float64,
                H_r_EUV3_old::Float64 = 0.0,
                H_Z_EUV3_old::Float64 = 0.0,
                  dHr_EUV3dt::Float64 = 0.0,
-                 dHZ_EUV3dt::Float64 = 0.0
+                 dHZ_EUV3dt::Float64 = 0.0,
+
+                   J_IR_old::Float64 = 0.0,
+                 H_r_IR_old::Float64 = 0.0,
+                 H_Z_IR_old::Float64 = 0.0,
+
                         )
 
-    inv_c̃      = 1 / c̃   # Convenient constant 
+    inv_c̃           = 1 / c̃                         # Convenient constant 
+    ρd              = (ρd > 1.1 * ρd_floor) * ρd    
 
-    # Initialize gas momentum change from stellar radiation pressure:
-    Δρu_r_rad  = 0.0
-    Δρu_Z_rad  = 0.0
+    # Initialize diagnostic gas + dust momentum change from stellar radiation pressure:
+    Δρu_r_rad       = 0.0
+    Δρu_Z_rad       = 0.0
 
-    # ------- Get opacities (cm⁻¹) in all bands ----------------------------------------------
-    αc_opt     =   0.0                                        
-    αc_FUV     =   0.0                                         
-    αc_LW      =   nHI  * σHI_LW  +  nH2 * σH2_LW    
+    # Initialize diagnostic gas + dust momentum change from IR radiation pressure:
+    Δρu_r_rad_IR    = 0.0
+    Δρu_Z_rad_IR    = 0.0
 
-    αc_EUV1    = ( nHI * σHI_EUV1  +  nH2 * σH2_EUV1  )
+    # Initialize momentum to be deposited into gas:
+    Δρu_r_rad_gas   = 0.0
+    Δρu_Z_rad_gas   = 0.0
 
-    αc_EUV2    =   nHI * σHI_EUV2  +  nH2 * σH2_EUV2  +  nHeI * σHeI_EUV2  
+    # Initialize momentum to be deposited into dust:
+    Δρu_r_rad_dust  = 0.0
+    Δρu_Z_rad_dust  = 0.0
 
-    αc_EUV3    = ( nHI * σHI_EUV3  +  nH2 * σH2_EUV3  +  nHeI * σHeI_EUV3 
-                 + nHeII * σHeII_EUV3  )    
-                    
     #######################################################################
     #######                                                         #######
     #######                       O P T I C A L                     #######
     #######                                                         #######
     #######################################################################
         
-    J_opt         = max( AbsorptionUpdateJorH( J_opt_old, Δt, dJ_optdt, αc_opt, c̃ ),
-                         0.0 )
+    # Optical opacities:
+    α_gas_abs_opt  =   0.0                                      # Optical gas absorption opacity 
+    α_gas_F_opt    =   α_gas_abs_opt  +  ne  * σT               # Optical flux opacity (adds Thomson scattering)  
+    α_abs_opt      =   α_gas_abs_opt  +  Dust.κd_abs_opt * ρd   # Absorption opacity (for J_opt)
+    α_F_opt_dust   =   Dust.κd_F_opt  * ρd                      # Dust flux opacity  (for H_opt)
+    α_F_opt        =   α_gas_F_opt    +  α_F_opt_dust           # Total flux opacity (for H_opt)
 
-    H_r_opt       = 0.0
-    H_Z_opt       = 0.0
+    # Absorption update for optical band:
+    J_opt          = max( AbsorptionUpdateJorH( J_opt_old, Δt, dJ_optdt, α_abs_opt, c̃ ), 0.0 )
+    H_r_opt        = AbsorptionUpdateJorH( H_r_opt_old, Δt, dHr_optdt, α_F_opt, c̃ )
+    H_Z_opt        = AbsorptionUpdateJorH( H_Z_opt_old, Δt, dHZ_optdt, α_F_opt, c̃ )
+
+    # Compute relative changes in optical J, H_r, and H_Z:
+    ΔJ_opt         = abs( J_opt   - J_opt_old )   / max( J_opt_old,        J_floor )
+    ΔH_r_opt       = abs( H_r_opt - H_r_opt_old ) / max( abs(H_r_opt_old), H_floor )
+    ΔH_Z_opt       = abs( H_Z_opt - H_Z_opt_old ) / max( abs(H_Z_opt_old), H_floor )
+
+    Δopt = max( ΔJ_opt, ΔH_r_opt, ΔH_Z_opt )
+    if Δopt > tol_Abs  
+        # Change in optical was too large. Reject step: 
+        REDO = true 
+        return REDO, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               Inf64, 0.0, 0.0
+    end
+
+    # Change in total gas + dust momentum:
+    Δρu_r_rad_opt   = Four_π_over_c * ( inv_c̃ * (H_r_opt_old - H_r_opt)  +  inv_c̃ * Δt * dHr_optdt )
+    Δρu_Z_rad_opt   = Four_π_over_c * ( inv_c̃ * (H_Z_opt_old - H_Z_opt)  +  inv_c̃ * Δt * dHZ_optdt )
+
+    # Add total radiation pressure momentum contribution:
+    Δρu_r_rad      += Δρu_r_rad_opt
+    Δρu_Z_rad      += Δρu_Z_rad_opt
+
+    # Add the fractional contributions to gas vs. dust:
+    if α_F_opt > 0.0
+        frac_dust         =  α_F_opt_dust / α_F_opt
+        OneMinusfrac_dust =  max( 1 - frac_dust, 0.0 )
+    else
+        frac_dust         =  0.0
+        OneMinusfrac_dust =  0.0
+    end 
+
+    Δρu_r_rad_dust += frac_dust         * Δρu_r_rad_opt 
+    Δρu_Z_rad_dust += frac_dust         * Δρu_Z_rad_opt 
+    Δρu_r_rad_gas  += OneMinusfrac_dust * Δρu_r_rad_opt 
+    Δρu_Z_rad_gas  += OneMinusfrac_dust * Δρu_Z_rad_opt
 
     #######################################################################
     #######                                                         #######
@@ -364,11 +538,56 @@ function AbsorptionStep( Δt::Float64,
     #######                                                         #######
     #######################################################################
 
-    J_FUV         = max( AbsorptionUpdateJorH( J_FUV_old, Δt, dJ_FUVdt, αc_FUV, c̃ ),
-                         0.0 )
+    # FUV opacities:
+    α_gas_abs_FUV  =   0.0                                      # FUV gas absorption opacity 
+    α_gas_F_FUV    =   α_gas_abs_FUV  +  ne  * σT               # FUV flux opacity (adds Thomson scattering)  
+    α_abs_FUV      =   α_gas_abs_FUV  +  Dust.κd_abs_FUV * ρd   # Absorption opacity (for J_FUV)
+    α_F_FUV_dust   =   Dust.κd_F_FUV  * ρd                      # Dust flux opacity  (for H_FUV)
+    α_F_FUV        =   α_gas_F_FUV    +  α_F_FUV_dust           # Total flux opacity (for H_FUV)
 
-    H_r_FUV       = 0.0
-    H_Z_FUV       = 0.0
+    # Absorption update for FUV band:
+    J_FUV          = max( AbsorptionUpdateJorH( J_FUV_old, Δt, dJ_FUVdt, α_abs_FUV, c̃ ), 0.0 )
+    H_r_FUV        = AbsorptionUpdateJorH( H_r_FUV_old, Δt, dHr_FUVdt, α_F_FUV, c̃ )
+    H_Z_FUV        = AbsorptionUpdateJorH( H_Z_FUV_old, Δt, dHZ_FUVdt, α_F_FUV, c̃ )
+
+    # Compute relative changes in FUV J, H_r, and H_Z:
+    ΔJ_FUV         = abs( J_FUV   - J_FUV_old )   / max( J_FUV_old,        J_floor )
+    ΔH_r_FUV       = abs( H_r_FUV - H_r_FUV_old ) / max( abs(H_r_FUV_old), H_floor )
+    ΔH_Z_FUV       = abs( H_Z_FUV - H_Z_FUV_old ) / max( abs(H_Z_FUV_old), H_floor )
+
+    ΔFUV = max( ΔJ_FUV, ΔH_r_FUV, ΔH_Z_FUV )
+    if ΔFUV > tol_Abs  
+        # Change in FUV was too large. Reject step: 
+        REDO = true 
+        return REDO, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               Inf64, 0.0, 0.0
+    end
+
+    # Change in total gas + dust momentum:
+    Δρu_r_rad_FUV   = Four_π_over_c * ( inv_c̃ * (H_r_FUV_old - H_r_FUV)  +  inv_c̃ * Δt * dHr_FUVdt )
+    Δρu_Z_rad_FUV   = Four_π_over_c * ( inv_c̃ * (H_Z_FUV_old - H_Z_FUV)  +  inv_c̃ * Δt * dHZ_FUVdt )
+
+    # Add total radiation pressure momentum contribution:
+    Δρu_r_rad += Δρu_r_rad_FUV
+    Δρu_Z_rad += Δρu_Z_rad_FUV
+
+    # Add the fractional contributions to gas vs. dust:
+    if α_F_FUV > 0.0
+        frac_dust         =  α_F_FUV_dust / α_F_FUV
+        OneMinusfrac_dust =  max( 1 - frac_dust, 0.0 )
+    else
+        frac_dust          = 0.0
+        OneMinusfrac_dust =  0.0
+    end
+    
+    Δρu_r_rad_dust += frac_dust         * Δρu_r_rad_FUV 
+    Δρu_Z_rad_dust += frac_dust         * Δρu_Z_rad_FUV 
+    Δρu_r_rad_gas  += OneMinusfrac_dust * Δρu_r_rad_FUV 
+    Δρu_Z_rad_gas  += OneMinusfrac_dust * Δρu_Z_rad_FUV 
 
     #######################################################################
     #######                                                         #######
@@ -376,37 +595,56 @@ function AbsorptionStep( Δt::Float64,
     #######                                                         #######
     #######################################################################
 
-    J_LW        = max( AbsorptionUpdateJorH( J_LW_old, Δt, dJ_LWdt, αc_LW, c̃ ), 0.0 )
-    H_r_LW      = AbsorptionUpdateJorH( H_r_LW_old, Δt, dHr_LWdt, αc_LW, c̃ )
-    H_Z_LW      = AbsorptionUpdateJorH( H_Z_LW_old, Δt, dHZ_LWdt, αc_LW, c̃ )
+    # Lyman-Werner opacities:
+    α_gas_abs_LW  =   nHI * σHI_LW  +  nH2 * σH2_LW          # LW gas absorption opacity 
+    α_gas_F_LW    =   α_gas_abs_LW  +  ne  * σT              # LW flux opacity (adds Thomson scattering)  
+    α_abs_LW      =   α_gas_abs_LW  +  Dust.κd_abs_LW * ρd   # Absorption opacity (for J_LW)
+    α_F_LW_dust   =   Dust.κd_F_LW  * ρd                     # Dust flux opacity  (for H_LW)
+    α_F_LW        =   α_gas_F_LW    +  α_F_LW_dust           # Total flux opacity (for H_LW)
 
-    # Re-normalize so that H < J:
-    #H_LW_mag    = sqrt( H_r_LW * H_r_LW  +  H_Z_LW * H_Z_LW )
-    #if H_LW_mag > J_LW
-    #    f_LW   = H_LW_mag / J_LW
-    #    H_r_LW = H_r_LW   / f_LW
-    #    H_Z_LW = H_Z_LW   / f_LW 
-    #end
+    # Absorption update for LW band:
+    J_LW          = max( AbsorptionUpdateJorH( J_LW_old, Δt, dJ_LWdt, α_abs_LW, c̃ ), 0.0 )
+    H_r_LW        = AbsorptionUpdateJorH( H_r_LW_old, Δt, dHr_LWdt, α_F_LW, c̃ )
+    H_Z_LW        = AbsorptionUpdateJorH( H_Z_LW_old, Δt, dHZ_LWdt, α_F_LW, c̃ )
 
     # Compute relative changes in LW J, H_r, and H_Z:
-    ΔJ_LW       = abs( J_LW   - J_LW_old )   / max( J_LW_old,        J_floor )
-    ΔH_r_LW     = abs( H_r_LW - H_r_LW_old ) / max( abs(H_r_LW_old), H_floor )
-    ΔH_Z_LW     = abs( H_Z_LW - H_Z_LW_old ) / max( abs(H_Z_LW_old), H_floor )
+    ΔJ_LW         = abs( J_LW   - J_LW_old )   / max( J_LW_old,        J_floor )
+    ΔH_r_LW       = abs( H_r_LW - H_r_LW_old ) / max( abs(H_r_LW_old), H_floor )
+    ΔH_Z_LW       = abs( H_Z_LW - H_Z_LW_old ) / max( abs(H_Z_LW_old), H_floor )
 
     ΔLW = max( ΔJ_LW, ΔH_r_LW, ΔH_Z_LW )
     if ΔLW > tol_Abs  
         # Change in LW was too large. Reject step: 
         REDO = true 
-        return REDO, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 
-               0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-               0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-               0.0, 0.0,
-               Inf64
+        return REDO, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               Inf64, 0.0, 0.0
     end
 
-    # Add radiation pressure momentum contribution:
-    Δρu_r_rad += Four_π_over_c * ( inv_c̃ * (H_r_LW_old - H_r_LW)  +  inv_c̃ * Δt * dHr_LWdt )
-    Δρu_Z_rad += Four_π_over_c * ( inv_c̃ * (H_Z_LW_old - H_Z_LW)  +  inv_c̃ * Δt * dHZ_LWdt )
+    # Change in total gas + dust momentum:
+    Δρu_r_rad_LW = Four_π_over_c * ( inv_c̃ * (H_r_LW_old - H_r_LW)  +  inv_c̃ * Δt * dHr_LWdt )
+    Δρu_Z_rad_LW = Four_π_over_c * ( inv_c̃ * (H_Z_LW_old - H_Z_LW)  +  inv_c̃ * Δt * dHZ_LWdt )
+
+    # Add total radiation pressure momentum contribution:
+    Δρu_r_rad   += Δρu_r_rad_LW
+    Δρu_Z_rad   += Δρu_Z_rad_LW
+
+    # Add the fractional contributions to gas vs. dust:
+    if α_F_LW > 0.0
+        frac_dust         =  α_F_LW_dust / α_F_LW
+        OneMinusfrac_dust =  max( 1 - frac_dust, 0.0 )
+    else
+        frac_dust         =  0.0
+        OneMinusfrac_dust =  0.0
+    end
+    
+    Δρu_r_rad_dust += frac_dust         * Δρu_r_rad_LW 
+    Δρu_Z_rad_dust += frac_dust         * Δρu_Z_rad_LW 
+    Δρu_r_rad_gas  += OneMinusfrac_dust * Δρu_r_rad_LW 
+    Δρu_Z_rad_gas  += OneMinusfrac_dust * Δρu_Z_rad_LW 
 
     #######################################################################
     #######                                                         #######
@@ -414,17 +652,17 @@ function AbsorptionStep( Δt::Float64,
     #######                                                         #######
     #######################################################################
 
-    J_EUV1        = max( AbsorptionUpdateJorH( J_EUV1_old, Δt, dJ_EUV1dt, αc_EUV1, c̃ ), 0.0 )
-    H_r_EUV1      = AbsorptionUpdateJorH( H_r_EUV1_old, Δt, dHr_EUV1dt, αc_EUV1, c̃ )
-    H_Z_EUV1      = AbsorptionUpdateJorH( H_Z_EUV1_old, Δt, dHZ_EUV1dt, αc_EUV1, c̃ )
+    # EUV1 opacities:
+    α_gas_abs_EUV1  =   nHI * σHI_EUV1    +  nH2 * σH2_EUV1                  # EUV1 gas absorption opacity 
+    α_gas_F_EUV1    =   nHI * σHI_EUV1_F  +  nH2 * σH2_EUV1_F  +  ne  * σT   # EUV1 gas flux opacity (adds Thomson scattering)
+    α_abs_EUV1      =   α_gas_abs_EUV1    +  Dust.κd_abs_EUV1 * ρd           # Absorption opacity (for J_EUV1)
+    α_F_EUV1_dust   =   Dust.κd_F_EUV1 * ρd                                  # Dust flux opacity  (for H_EUV1)
+    α_F_EUV1        =   α_gas_F_EUV1      +  α_F_EUV1_dust                   # Total flux opacity (for H_EUV1)
 
-    # Re-normalize so that H < J:
-    #H_EUV1_mag    = sqrt( H_r_EUV1 * H_r_EUV1  +  H_Z_EUV1 * H_Z_EUV1 )
-    #if H_EUV1_mag > J_EUV1
-    #    f_EUV1   = H_EUV1_mag / J_EUV1
-    #    H_r_EUV1 = H_r_EUV1   / f_EUV1
-    #    H_Z_EUV1 = H_Z_EUV1   / f_EUV1 
-    #end
+    # Absorption update for EUV1 band:
+    J_EUV1        = max( AbsorptionUpdateJorH( J_EUV1_old, Δt, dJ_EUV1dt, α_abs_EUV1, c̃ ), 0.0 )
+    H_r_EUV1      = AbsorptionUpdateJorH( H_r_EUV1_old, Δt, dHr_EUV1dt, α_F_EUV1, c̃ )
+    H_Z_EUV1      = AbsorptionUpdateJorH( H_Z_EUV1_old, Δt, dHZ_EUV1dt, α_F_EUV1, c̃ )
 
     # Compute relative changes in EUV1 J, H_r, and H_Z:
     ΔJ_EUV1       = abs( J_EUV1   - J_EUV1_old )   / max( J_EUV1_old,        J_floor )
@@ -435,16 +673,35 @@ function AbsorptionStep( Δt::Float64,
     if ΔEUV1 > tol_Abs  
         # Change in EUV1 was too large. Reject step: 
         REDO = true 
-        return REDO, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 
-               0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-               0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-               0.0, 0.0,
-               Inf64
+        return REDO, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               Inf64, 0.0, 0.0
     end
 
-    # Add radiation pressure momentum contribution:
-    Δρu_r_rad += Four_π_over_c * ( inv_c̃ * (H_r_EUV1_old - H_r_EUV1)  +  inv_c̃ * Δt * dHr_EUV1dt )
-    Δρu_Z_rad += Four_π_over_c * ( inv_c̃ * (H_Z_EUV1_old - H_Z_EUV1)  +  inv_c̃ * Δt * dHZ_EUV1dt )
+    # Change in total gas + dust momentum:
+    Δρu_r_rad_EUV1 = Four_π_over_c * ( inv_c̃ * (H_r_EUV1_old - H_r_EUV1)  +  inv_c̃ * Δt * dHr_EUV1dt )
+    Δρu_Z_rad_EUV1 = Four_π_over_c * ( inv_c̃ * (H_Z_EUV1_old - H_Z_EUV1)  +  inv_c̃ * Δt * dHZ_EUV1dt )
+
+    # Add total radiation pressure momentum contribution:
+    Δρu_r_rad     += Δρu_r_rad_EUV1
+    Δρu_Z_rad     += Δρu_Z_rad_EUV1
+
+    # Add the fractional contributions to gas vs. dust:
+    if α_F_EUV1 > 0.0
+        frac_dust         =  α_F_EUV1_dust / α_F_EUV1
+        OneMinusfrac_dust =  max( 1 - frac_dust, 0.0 )
+    else
+        frac_dust         = 0.0
+        OneMinusfrac_dust =  0.0
+    end
+    
+    Δρu_r_rad_dust += frac_dust         * Δρu_r_rad_EUV1 
+    Δρu_Z_rad_dust += frac_dust         * Δρu_Z_rad_EUV1 
+    Δρu_r_rad_gas  += OneMinusfrac_dust * Δρu_r_rad_EUV1 
+    Δρu_Z_rad_gas  += OneMinusfrac_dust * Δρu_Z_rad_EUV1 
 
     #######################################################################
     #######                                                         #######
@@ -452,17 +709,19 @@ function AbsorptionStep( Δt::Float64,
     #######                                                         #######
     #######################################################################
 
-    J_EUV2        = max( AbsorptionUpdateJorH( J_EUV2_old, Δt, dJ_EUV2dt, αc_EUV2, c̃ ), 0.0 )
-    H_r_EUV2      = AbsorptionUpdateJorH( H_r_EUV2_old, Δt, dHr_EUV2dt, αc_EUV2, c̃ )
-    H_Z_EUV2      = AbsorptionUpdateJorH( H_Z_EUV2_old, Δt, dHZ_EUV2dt, αc_EUV2, c̃ )
+    # EUV2 opacities:
+    α_gas_abs_EUV2  =   ( nHI * σHI_EUV2  +  nH2 * σH2_EUV2  
+                        + nHeI * σHeI_EUV2 )                        # EUV2 gas absorption opacity 
+    α_gas_F_EUV2    =   ( nHI * σHI_EUV2_F  +  nH2 * σH2_EUV2_F  
+                        + nHeI * σHeI_EUV2_F )  +  ne * σT          # EUV2 gas flux opacity (adds Thomson scattering)
+    α_abs_EUV2      =   α_gas_abs_EUV2  +  Dust.κd_abs_EUV2 * ρd    # Absorption opacity (for J_EUV2)
+    α_F_EUV2_dust   =   Dust.κd_F_EUV2 * ρd                         # Dust flux opacity  (for H_EUV2)
+    α_F_EUV2        =   α_gas_F_EUV2    +    α_F_EUV2_dust          # Total flux opacity (for H_EUV2)
 
-    # Re-normalize so that H < J:
-    #H_EUV2_mag    = sqrt( H_r_EUV2 * H_r_EUV2  +  H_Z_EUV2 * H_Z_EUV2 )
-    #if H_EUV2_mag > J_EUV2
-    #    f_EUV2   = H_EUV2_mag / J_EUV2
-    #    H_r_EUV2 = H_r_EUV2   / f_EUV2
-    #    H_Z_EUV2 = H_Z_EUV2   / f_EUV2 
-    #end
+    # Absorption update for EUV2 band:
+    J_EUV2        = max( AbsorptionUpdateJorH( J_EUV2_old, Δt, dJ_EUV2dt, α_abs_EUV2, c̃ ), 0.0 )
+    H_r_EUV2      = AbsorptionUpdateJorH( H_r_EUV2_old, Δt, dHr_EUV2dt, α_F_EUV2, c̃ )
+    H_Z_EUV2      = AbsorptionUpdateJorH( H_Z_EUV2_old, Δt, dHZ_EUV2dt, α_F_EUV2, c̃ )
 
     # Compute relative changes in EUV2 J, H_r, and H_Z:
     ΔJ_EUV2       = abs( J_EUV2   - J_EUV2_old )   / max( J_EUV2_old,        J_floor )
@@ -473,16 +732,35 @@ function AbsorptionStep( Δt::Float64,
     if ΔEUV2 > tol_Abs 
         # Change in EUV2 was too large. Reject step: 
         REDO = true 
-        return REDO, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 
-               0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-               0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-               0.0, 0.0,
-               Inf64
+        return REDO, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               Inf64, 0.0, 0.0
     end
 
-    # Add radiation pressure momentum contribution:
-    Δρu_r_rad += Four_π_over_c * ( inv_c̃ * (H_r_EUV2_old - H_r_EUV2)  +  inv_c̃ * Δt * dHr_EUV2dt )
-    Δρu_Z_rad += Four_π_over_c * ( inv_c̃ * (H_Z_EUV2_old - H_Z_EUV2)  +  inv_c̃ * Δt * dHZ_EUV2dt )
+    # Change in total gas + dust momentum:
+    Δρu_r_rad_EUV2 = Four_π_over_c * ( inv_c̃ * (H_r_EUV2_old - H_r_EUV2)  +  inv_c̃ * Δt * dHr_EUV2dt )
+    Δρu_Z_rad_EUV2 = Four_π_over_c * ( inv_c̃ * (H_Z_EUV2_old - H_Z_EUV2)  +  inv_c̃ * Δt * dHZ_EUV2dt )
+
+    # Add total radiation pressure momentum contribution:
+    Δρu_r_rad     += Δρu_r_rad_EUV2
+    Δρu_Z_rad     += Δρu_Z_rad_EUV2
+
+    # Add the fractional contributions to gas vs. dust:
+    if α_F_EUV2 > 0.0
+        frac_dust         =  α_F_EUV2_dust / α_F_EUV2
+        OneMinusfrac_dust =  max( 1 - frac_dust, 0.0 )
+    else
+        frac_dust         = 0.0
+        OneMinusfrac_dust =  0.0
+    end
+    
+    Δρu_r_rad_dust += frac_dust         * Δρu_r_rad_EUV2 
+    Δρu_Z_rad_dust += frac_dust         * Δρu_Z_rad_EUV2
+    Δρu_r_rad_gas  += OneMinusfrac_dust * Δρu_r_rad_EUV2 
+    Δρu_Z_rad_gas  += OneMinusfrac_dust * Δρu_Z_rad_EUV2 
 
     #######################################################################
     #######                                                         #######
@@ -490,54 +768,155 @@ function AbsorptionStep( Δt::Float64,
     #######                                                         #######
     #######################################################################
 
-    J_EUV3        = max( AbsorptionUpdateJorH( J_EUV3_old, Δt, dJ_EUV3dt, αc_EUV3, c̃ ), 0.0 )
-    H_r_EUV3      = AbsorptionUpdateJorH( H_r_EUV3_old, Δt, dHr_EUV3dt, αc_EUV3, c̃ )
-    H_Z_EUV3      = AbsorptionUpdateJorH( H_Z_EUV3_old, Δt, dHZ_EUV3dt, αc_EUV3, c̃ )
+    # EUV3 opacities:
+    α_gas_abs_EUV3   = ( nHI * σHI_EUV3  +  nH2 * σH2_EUV3  +  nHeI * σHeI_EUV3 
+                       + nHeII * σHeII_EUV3  )                       # EUV3 gas absorption opacity 
 
-    # Re-normalize so that H < J:
-    #H_EUV3_mag    = sqrt( H_r_EUV3 * H_r_EUV3  +  H_Z_EUV3 * H_Z_EUV3 )
-    #if H_EUV3_mag > J_EUV3
-    #    f_EUV3   = H_EUV3_mag / J_EUV3
-    #    H_r_EUV3 = H_r_EUV3 / f_EUV3
-    #    H_Z_EUV3 = H_Z_EUV3 / f_EUV3 
-    #end
+    α_gas_F_EUV3     =   ( nHI * σHI_EUV3_F  +  nH2 * σH2_EUV3_F  +  nHeI * σHeI_EUV3_F
+                       + nHeII * σHeII_EUV3_F  )  +  ne * σT         # EUV3 gas flux opacity (adds Thomson scattering)
+
+    α_abs_EUV3       =   α_gas_abs_EUV3  +  Dust.κd_abs_EUV3 * ρd    # Absorption opacity (for J_EUV3)
+    α_F_EUV3_dust    =   Dust.κd_F_EUV3 * ρd                         # Dust flux opacity  (for H_EUV3)
+    α_F_EUV3         =   α_gas_F_EUV3    +    α_F_EUV3_dust          # Total flux opacity (for H_EUV3)
+
+    # Absorption update for EUV3 band:
+    J_EUV3           = max( AbsorptionUpdateJorH( J_EUV3_old, Δt, dJ_EUV3dt, α_abs_EUV3, c̃ ), 0.0 )
+    H_r_EUV3         = AbsorptionUpdateJorH( H_r_EUV3_old, Δt, dHr_EUV3dt, α_F_EUV3, c̃ )
+    H_Z_EUV3         = AbsorptionUpdateJorH( H_Z_EUV3_old, Δt, dHZ_EUV3dt, α_F_EUV3, c̃ )
 
     # Compute relative changes in EUV2 J, H_r, and H_Z:
-    ΔJ_EUV3       = abs( J_EUV3   - J_EUV3_old )   / max( J_EUV3_old,        J_floor )
-    ΔH_r_EUV3     = abs( H_r_EUV3 - H_r_EUV3_old ) / max( abs(H_r_EUV3_old), H_floor )
-    ΔH_Z_EUV3     = abs( H_Z_EUV3 - H_Z_EUV3_old ) / max( abs(H_Z_EUV3_old), H_floor )
+    ΔJ_EUV3          = abs( J_EUV3   - J_EUV3_old )   / max( J_EUV3_old,        J_floor )
+    ΔH_r_EUV3        = abs( H_r_EUV3 - H_r_EUV3_old ) / max( abs(H_r_EUV3_old), H_floor )
+    ΔH_Z_EUV3        = abs( H_Z_EUV3 - H_Z_EUV3_old ) / max( abs(H_Z_EUV3_old), H_floor )
 
     ΔEUV3 = max( ΔJ_EUV3, ΔH_r_EUV3, ΔH_Z_EUV3 )
     if ΔEUV3 > tol_Abs 
         # Change in EUV3 was too large. Reject step:
         REDO = true 
-        return REDO, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 
-               0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 
-               0.0, 0.0,
-               Inf64
+        return REDO, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               Inf64, 0.0, 0.0
     end
 
-    # Add radiation pressure momentum contribution:
-    Δρu_r_rad += Four_π_over_c * ( inv_c̃ * (H_r_EUV3_old - H_r_EUV3)  +  inv_c̃ * Δt * dHr_EUV3dt )
-    Δρu_Z_rad += Four_π_over_c * ( inv_c̃ * (H_Z_EUV3_old - H_Z_EUV3)  +  inv_c̃ * Δt * dHZ_EUV3dt )
+    # Change in total gas + dust momentum:
+    Δρu_r_rad_EUV3 = Four_π_over_c * ( inv_c̃ * (H_r_EUV3_old - H_r_EUV3)  +  inv_c̃ * Δt * dHr_EUV3dt )
+    Δρu_Z_rad_EUV3 = Four_π_over_c * ( inv_c̃ * (H_Z_EUV3_old - H_Z_EUV3)  +  inv_c̃ * Δt * dHZ_EUV3dt )
 
+    # Add total radiation pressure momentum contribution:
+    Δρu_r_rad     += Δρu_r_rad_EUV3
+    Δρu_Z_rad     += Δρu_Z_rad_EUV3
+
+    # Add the fractional contributions to gas vs. dust:
+    if α_F_EUV3 > 0.0
+        frac_dust         =  α_F_EUV3_dust / α_F_EUV3
+        OneMinusfrac_dust =  max( 1 - frac_dust, 0.0 )
+    else
+        frac_dust         =  0.0
+        OneMinusfrac_dust =  0.0
+    end
+    
+    Δρu_r_rad_dust += frac_dust         * Δρu_r_rad_EUV3 
+    Δρu_Z_rad_dust += frac_dust         * Δρu_Z_rad_EUV3 
+    Δρu_r_rad_gas  += OneMinusfrac_dust * Δρu_r_rad_EUV3 
+    Δρu_Z_rad_gas  += OneMinusfrac_dust * Δρu_Z_rad_EUV3 
+
+    #######################################################################
+    #######                                                         #######
+    #######                        L Y M A N - α                    #######
+    #######                                                         #######
+    #######################################################################
+
+    # TODO
+    e_Lyα = 0.0
+
+    #######################################################################
+    #######                                                         #######
+    #######                      I N F R A R E D                    #######
+    #######                                                         #######
+    #######################################################################
+    
+    # Compute Σ_{B} κ_{B,abs} J_{B} over all non-IR bands:
+    κabsB_JB  =  ( Dust.κd_abs_opt * J_opt    +  Dust.κd_abs_FUV * J_FUV 
+                 + Dust.κd_abs_LW  * J_LW     +  Dust.κd_abs_EUV1 * J_EUV1  
+                 + Dust.κd_abs_EUV2 * J_EUV2  +  Dust.κd_abs_EUV3 * J_EUV3 )
+
+    # IR emissivity & corresponding rate of change in J_IR:
+    DG        =  ρd / ρ  
+    js_IR     =  ρd * κabsB_JB  +  Λdg(T_old, Td_old, DG, nH) * inv_Four_π
+    dJ_IRdt   =  js_IR * c̃
+
+    # Update J_IR:
+    J_IR      =  max( AbsorptionUpdateJorH( J_IR_old, Δt, dJ_IRdt, 0.0, c̃ ), 0.0 )
+
+    # Update dust temperature, using the new J_IR and J_{B ≠ IR} bands:
+    Td_new    = ComputeTd( J_IR, J_opt, J_FUV, J_LW, J_EUV1, 
+                           J_EUV2, J_EUV3, Dust, TCMB, T_old, nH, ρ, e_Lyα )
+
+    # Get IR flux opacity (at the new dust temperature):
+    α_F_IR_dust =  ρd * κR(Dust, Td_new)       # Dust flux opacity  (for H_IR)
+    α_F_IR      =  α_F_IR_dust  +  ne * σT     # Total flux opacity (for H_IR)
+
+    # Update H_IR:
+    H_r_IR    = AbsorptionUpdateJorH( H_r_IR_old, Δt, 0.0, α_F_IR, c̃ )
+    H_Z_IR    = AbsorptionUpdateJorH( H_Z_IR_old, Δt, 0.0, α_F_IR, c̃ )
+
+    # Compute relative changes in IR J, H_r, and H_Z. Also compute relative change in Td:
+    ΔJ_IR     = abs( J_IR   - J_IR_old )   / max( J_IR_old,        J_floor )
+    ΔH_r_IR   = abs( H_r_IR - H_r_IR_old ) / max( abs(H_r_IR_old), H_floor )
+    ΔH_Z_IR   = abs( H_Z_IR - H_Z_IR_old ) / max( abs(H_Z_IR_old), H_floor )
+    ΔTd       = abs( Td_new - Td_old )     / max( abs(Td_old),     Td_floor )
+
+    ΔIR = max( ΔJ_IR, ΔH_r_IR, ΔH_Z_IR, ΔTd )
+    if ΔIR > tol_Abs 
+        # Change in IR or dust temperature was too large. Reject step:
+        REDO = true 
+        return REDO, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0,
+               Inf64, 0.0, 0.0
+    end
+
+    # Add IR radiation pressure momentum contribution:
+    Δρu_r_rad_IR += Four_π_over_c * ( inv_c̃ * (H_r_IR_old - H_r_IR) )
+    Δρu_Z_rad_IR += Four_π_over_c * ( inv_c̃ * (H_Z_IR_old - H_Z_IR) )
+
+    # Add the fractional contributions to gas vs. dust:
+    if α_F_IR > 0.0
+        frac_dust         =  α_F_IR_dust / α_F_IR
+        OneMinusfrac_dust =  max( 1 - frac_dust, 0.0 )
+    else
+        frac_dust         =  0.0
+        OneMinusfrac_dust =  0.0
+    end
+    
+    Δρu_r_rad_dust += frac_dust         * Δρu_r_rad_IR
+    Δρu_Z_rad_dust += frac_dust         * Δρu_Z_rad_IR
+    Δρu_r_rad_gas  += OneMinusfrac_dust * Δρu_r_rad_IR
+    Δρu_Z_rad_gas  += OneMinusfrac_dust * Δρu_Z_rad_IR
+
+    # --------------------------------------------------------------------------
 
     # Get maximum change among all bands (for later determination of next sub-cycle time-step):
-    ΔStellarRT  = max( ΔLW, ΔEUV1, ΔEUV2, ΔEUV3 )
+    ΔRT  = max( Δopt, ΔFUV, ΔLW, ΔEUV1, ΔEUV2, ΔEUV3, ΔIR )
 
     # In case the changes in J and H were small enough, we accept the update and return 
     # all computed values: 
     REDO = false
-    return REDO, J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, 
-           H_r_opt, H_r_FUV, H_r_LW, H_r_EUV1, H_r_EUV2, H_r_EUV3,
-           H_Z_opt, H_Z_FUV, H_Z_LW, H_Z_EUV1, H_Z_EUV2, H_Z_EUV3,
-           Δρu_r_rad, Δρu_Z_rad,
-           ΔStellarRT
+    return REDO, J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, J_IR,
+           H_r_opt, H_r_FUV, H_r_LW, H_r_EUV1, H_r_EUV2, H_r_EUV3, H_r_IR,
+           H_Z_opt, H_Z_FUV, H_Z_LW, H_Z_EUV1, H_Z_EUV2, H_Z_EUV3, H_Z_IR,
+           Δρu_r_rad, Δρu_Z_rad,  Δρu_r_rad_IR, Δρu_Z_rad_IR,             # These are mainly diagnostics 
+           Δρu_r_rad_gas, Δρu_Z_rad_gas,  Δρu_r_rad_dust, Δρu_Z_rad_dust, # These are the momenta to be dumped into gas vs. dust 
+           ΔRT, js_IR, Td_new
 end
 
 
-const tol_HeatCool::Float64       = 0.05 
+const tol_HeatCool::Float64       = 0.1
 const Quantity_threshold::Float64 = 1e-5
 const ϵ_ΔT::Float64               = 1e-3       # Use step-size ϵ_ΔT * T_old to estimate ∂Λ/∂T at T = T_old
 const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider for heating/cooling
@@ -554,8 +933,10 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
     good approximation to a fully implicit BDF1 update. """
 @inline function HeatingCoolingStep( Δt::Float64, 
                                   e_old::Float64,
+                                     Td::Float64,
                                     γad::Float64,
                                       n::Float64,
+                                     nH::Float64,
                                     nHI::Float64,
                                     nH2::Float64,
                                    nHII::Float64,
@@ -564,6 +945,13 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
                                  nHeIII::Float64,
                                     nHD::Float64,
                                      ne::Float64,
+                              Zgas_Zsun::Float64,
+                                     DG::Float64,
+                                    xCI::Float64, 
+                                   xCII::Float64, 
+                                    xCO::Float64, 
+                                    xOI::Float64, 
+                                   N_CO::Float64,
                                   J_opt::Float64,
                                   J_FUV::Float64,
                                    J_LW::Float64,
@@ -572,7 +960,9 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
                                  J_EUV3::Float64,
                           SelfShielding::Float64,
                                       z::Float64 = 0.0,
-                                  CaseB::Bool    = true
+                                    Γpd::Float64 = 0.0,
+                                    OTS::Bool    = true,
+                                e_floor::Float64 = 0.0
                                     )
 
     Conv_e_T =  ( γad - 1 ) / (n * kB)   # Conversion factor for e → T 
@@ -581,12 +971,13 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
     # Get heating rate (from photoelectric heating, Compton heating off the (non-CMB) radiation field,
     # photo-ionizations/dissociations, UV pumping, and cosmic ray heating):
     HeatingRate = HeatingRate_total( J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
-                                     T_old, ne, nHI, nH2, nHeI, nHeII, 
-                                     SelfShielding ) 
+                                     T_old, Td, ne, nH, nHI, nH2, nHII, nHeI, nHeII, 
+                                     SelfShielding, DG, Γpd ) 
 
-    # Compute the cooling rate at e_old:
+    # Compute the cooling rate at e_old (inluding dust-gas collisions):
     CoolingRate = Λ( T_old, nHI, nHII, nHeI, nHeII, nHeIII, ne,
-                     nH2, nHD, z, CaseB )
+                     nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
+                     z, OTS ) + Λdg( T_old, Td, DG, nH )
 
     # Tolerance cooling/heating time-scale for accuracy purposes:
     Δt_e = min( tol_HeatCool * e_old / abs( HeatingRate - CoolingRate ), Δt_e_max )
@@ -606,16 +997,20 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
     inv_12ΔT = 1 / ( 12 * ΔT )     # Used twice below for the central difference derivatives 
 
     CoolingRate_p2 = Λ( T_p2, nHI, nHII, nHeI, nHeII, nHeIII, ne,
-                        nH2, nHD, z, CaseB )
+                        nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
+                        z, OTS ) + Λdg( T_p2, Td, DG, nH )
 
     CoolingRate_p1 = Λ( T_p1, nHI, nHII, nHeI, nHeII, nHeIII, ne,
-                        nH2, nHD, z, CaseB )
+                        nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
+                        z, OTS ) + Λdg( T_p1, Td, DG, nH )
 
     CoolingRate_m1 = Λ( T_m1, nHI, nHII, nHeI, nHeII, nHeIII, ne,
-                        nH2, nHD, z, CaseB )
+                        nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
+                        z, OTS ) + Λdg( T_m1, Td, DG, nH )
 
     CoolingRate_m2 = Λ( T_m2, nHI, nHII, nHeI, nHeII, nHeIII, ne,
-                        nH2, nHD, z, CaseB )
+                        nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
+                        z, OTS ) + Λdg( T_m2, Td, DG, nH )
 
     # Put it all together to get ∂Λ/∂e:
     ∂CoolingRate∂T = ( - CoolingRate_p2  +  8 * CoolingRate_p1  -  8 * CoolingRate_m1  
@@ -625,20 +1020,20 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
 
     # Next, compute ∂Γ/∂e using a 4th-order central difference approximation: 
     HeatingRate_p2 = HeatingRate_total( J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
-                                        T_p2, ne, nHI, nH2, nHeI, nHeII, 
-                                        SelfShielding )
+                                        T_p2, Td, ne, nH, nHI, nH2, nHII, nHeI, nHeII, 
+                                        SelfShielding, DG, Γpd )
 
     HeatingRate_p1 = HeatingRate_total( J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
-                                        T_p1, ne, nHI, nH2, nHeI, nHeII, 
-                                        SelfShielding )
+                                        T_p1, Td, ne, nH, nHI, nH2, nHII, nHeI, nHeII, 
+                                        SelfShielding, DG, Γpd )
 
     HeatingRate_m1 = HeatingRate_total( J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
-                                        T_m1, ne, nHI, nH2, nHeI, nHeII, 
-                                        SelfShielding )
+                                        T_m1, Td, ne, nH, nHI, nH2, nHII, nHeI, nHeII, 
+                                        SelfShielding, DG, Γpd )
 
     HeatingRate_m2 = HeatingRate_total( J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
-                                        T_m2, ne, nHI, nH2, nHeI, nHeII, 
-                                        SelfShielding )
+                                        T_m2, Td, ne, nH, nHI, nH2, nHII, nHeI, nHeII, 
+                                        SelfShielding, DG, Γpd )
 
     # Put it all together to get ∂Γ/∂e:
     ∂HeatingRate∂T = ( - HeatingRate_p2  +  8 * HeatingRate_p1  -  8 * HeatingRate_m1  
@@ -646,8 +1041,11 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
 
     ∂HeatingRate∂e = ∂HeatingRate∂T * Conv_e_T  # Convert from ∂/∂T to ∂/∂e
 
+    # Get ∂F/∂e, where F = HeatingRate - CoolingRate:
+    ∂F∂e  = ∂HeatingRate∂e - ∂CoolingRate∂e
+
     # Linearized backward-Euler update of e:
-    e_new = e_old  +  ( HeatingRate - CoolingRate ) * Δt / ( 1  +  ∂CoolingRate∂e * Δt )
+    e_new = e_old  +  ( HeatingRate - CoolingRate ) * Δt / ( 1  -  ∂F∂e * Δt )
 
     # ------- STABILITY & ACCURACY CHECK FOR TEMPERATURE UPDATE -------------------
 
@@ -662,15 +1060,20 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
     # our linearized solution actually approximates a fully implicit BDF1 solution.
 
     # The would-be new temperature:
-    T_new            = ( γad - 1 ) * e_new  / ( n * kB )     
+    T_new            = ( γad - 1 ) * e_new  / ( n * kB )   
+    
+    # Heating rate at would-be new temperature:
+    HeatingRate_new  = HeatingRate_total( J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
+                                          T_new, Td, ne, nH, nHI, nH2, nHII, nHeI, nHeII, 
+                                          SelfShielding, DG, Γpd )
         
     # Cooling rate at would-be new temperature:
     CoolingRate_new  = Λ( T_new, nHI, nHII, nHeI, nHeII, nHeIII, ne,
-                          nH2, nHD, z, CaseB )
+                          nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
+                          z, OTS ) + Λdg( T_new, Td, DG, nH )
 
     # Relative residual checking |(e_old + (Γ - Λ(e_new)*Δtsub) - e_new)| / |e_new - e_old| :
-    e_floor          = n * kB * T_floor / (γad - 1)   # e corresponding to temperature floor
-    Res_e            = abs( e_old  +  ( HeatingRate  -  CoolingRate_new ) * Δt  -  e_new ) / max( abs( e_new - e_old ), e_floor ) 
+    Res_e            = abs( e_old  +  ( HeatingRate_new  -  CoolingRate_new ) * Δt  -  e_new ) / max( abs( e_new - e_old ), e_floor ) 
 
     if Δe > tol_HeatCool || e_new ≤ 0.0 || !isfinite(e_new) || Res_e > tol_HeatCool
         # In this case, the update is deemed inaccurate or unstable, so we reject it:
@@ -684,26 +1087,28 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
 end
 
 
-const T_floor::Float64          = 1.0             # Enforced temperature floor in the thermochemistry sub-cycling
-const T_ceiling::Float64        = 1e9             # Enforced temperature ceiling in the thermochemistry sub-cycling
-const ΔL_max::Float64           = 1e3 * pc        # Enforced maximum value of column density length in the estimate of N_H2, N_HD 
-const tol_Chem::Float64         = 0.1             # Maximum relative change tolerance per sub-cycle time-step for the chemistry
-const tol_enlargestep::Float64  = 0.5 * tol_Chem  # Recommend a 2 × larger sub-cycle time-step if relative changes were < tol_enlargestep
-const J_floor::Float64          = 1e-10           # Maximum stellar J below which we don't care about the 10% rule 
-const H_floor::Float64          = 1e-10           # Maximum stellar H below which we don't care about the 10% rule 
-const xmin::Float64             = 1e-8            # Minimum abundance fraction below which we don't care about the 10% rule
-const max_iter::Int             = 100             # Maximum number of adaptive refinements of sub-cycle time-step 
+const T_floor::Float64             = 1.0             # Enforced temperature floor in the thermochemistry sub-cycling
+const T_ceiling::Float64           = 1e9             # Enforced temperature ceiling in the thermochemistry sub-cycling
+const ΔL_max::Float64              = 1e3 * pc        # Enforced maximum value of column density length in the estimate of N_H2, N_HD 
+const tol_Chem::Float64            = 0.1             # Maximum relative change tolerance per sub-cycle time-step for the chemistry
+const tol_enlargestep::Float64     = 0.5 * tol_Chem  # Recommend a 2 × larger sub-cycle time-step if relative changes were < tol_enlargestep
+const J_floor::Float64             = 1e-10           # Maximum stellar J below which we don't care about the 10% rule 
+const H_floor::Float64             = 1e-10           # Maximum stellar H below which we don't care about the 10% rule 
+const xmin::Float64                = 1e-10           # Minimum abundance fraction below which we don't care about the 10% rule for primordial species 
+const max_iter::Int                = 100             # Maximum number of adaptive refinements of sub-cycle time-step 
+const kB_T_floor::Float64          = kB * T_floor    # Convenient constant 
+const kB_T_ceil::Float64           = kB * T_ceiling  # Convenient constant 
+const uth_DustGas::Float64         = 0.01 * kms      # Minimum change in gas & dust velocity below which we don't care about the 10% rule 
+const tol_DustGasCoupling::Float64 = 1e-4            # Maximum relative change tolerance per sub-cycle time-step for the dust-gas coupling 
 
 """ This functions does a single sub-cycle time-step update of
-    photon (J and H) absorption, temperature, and chemical abundances.
-    Strang-spliting and the 10% rule is used to reduce splitting errors 
-    from treating these processes independently:
-    
-    1. Photon absorption update over half-step (0.5 Δtsub)
-    2. Heating/cooling update over half-step (0.5 Δtsub)
-    3. Chemistry update over full step (Δtsub)
-    4. Heating/cooling update over half-step (0.5 Δtsub)
-    5. Photon absorption update over half-step (0.5 Δtsub) """
+    photon (J and H) absorption, temperature (or rather e),
+    and chemical abundances, in that order.
+
+    The 10% rule is used to reduce splitting errors 
+    and retain accuracy. In other words, if J or H, e, or chemistry 
+    change by more than 10%, the update is rejected, and a smaller sub-step 
+    is tried. """
 function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j)
                                            Δr::Float64, ΔZ::Float64, # Cell width (for column density estimate)
                                    Δtsubguess::Float64,              # First guess of sub-cycle time-step
@@ -717,11 +1122,32 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
                                      xDII_old::Float64,              # D II fraction from previous sub-step 
                                     xHeII_old::Float64,              # He II fraction from previous sub-step 
                                    xHeIII_old::Float64,              # He III fraction from previous sub-step 
+                                      xCI_old::Float64,
+                                     xCII_old::Float64,
+                                      xCO_old::Float64,
+                                      xOI_old::Float64,
+                                     xOII_old::Float64,
+                                    Zgas_Zsun::Float64,
+                                       ρd_old::Float64,              # Dust density  
+                                   ρdud_r_old::Float64,              # Dust r-momentum 
+                                   ρdud_Z_old::Float64,              # Dust Z-momentum 
+                                     ρu_r_old::Float64,              # Gas r-momentum 
+                                     ρu_Z_old::Float64,              # Gas Z-momentum 
+                                         Dust::DustState,
 
                                     J_opt_old::Float64 = 0.0,
                                      dJ_optdt::Float64 = 0.0,
+                                  H_r_opt_old::Float64 = 0.0,
+                                  H_Z_opt_old::Float64 = 0.0,
+                                    dHr_optdt::Float64 = 0.0,
+                                    dHZ_optdt::Float64 = 0.0,
+
                                     J_FUV_old::Float64 = 0.0,
                                      dJ_FUVdt::Float64 = 0.0,
+                                  H_r_FUV_old::Float64 = 0.0,
+                                  H_Z_FUV_old::Float64 = 0.0,
+                                    dHr_FUVdt::Float64 = 0.0,
+                                    dHZ_FUVdt::Float64 = 0.0,
 
                                      J_LW_old::Float64 = 0.0,
                                       dJ_LWdt::Float64 = 0.0,
@@ -751,8 +1177,12 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
                                    dHr_EUV3dt::Float64 = 0.0,
                                    dHZ_EUV3dt::Float64 = 0.0,
 
+                                     J_IR_old::Float64 = 0.0,
+                                   H_r_IR_old::Float64 = 0.0,
+                                  H_Z_IR_old::Float64 = 0.0,
+
                                             z::Float64 = 0.0,
-                                        CaseB::Bool    = true,
+                                          OTS::Bool    = true,  # On-the-spot approximation
                                CoolingHeating::Bool    = true
                                       )
 
@@ -760,6 +1190,19 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
     if DEBUG_PhotoThermoChemistry
         @assert isfinite(ρ) && ρ > 0.0 "ρ = $(ρ) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
         @assert isfinite(e_old)        "e_old = $(e_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(∇ρ) && ∇ρ ≥ 0 "∇ρ = $(∇ρ) in cell (i,j)=($(icell),$(jcell))"
+
+        @assert isfinite(J_opt_old) && J_opt_old ≥ 0.0 "J_opt_old = $(J_opt_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(H_r_opt_old)                  "H_r_opt_old = $(H_r_opt_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(H_Z_opt_old)                  "H_Z_opt_old = $(H_Z_opt_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+
+        @assert isfinite(J_FUV_old) && J_FUV_old ≥ 0.0 "J_FUV_old = $(J_FUV_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(H_r_FUV_old)                  "H_r_FUV_old = $(H_r_FUV_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(H_Z_FUV_old)                  "H_Z_FUV_old = $(H_Z_FUV_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+
+        @assert isfinite(J_LW_old) && J_LW_old ≥ 0.0 "J_LW_old = $(J_LW_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(H_r_LW_old)                 "H_r_LW_old = $(H_r_LW_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(H_Z_LW_old)                 "H_Z_LW_old = $(H_Z_LW_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
 
         @assert isfinite(J_EUV1_old) && J_EUV1_old ≥ 0.0 "J_EUV1_old = $(J_EUV1_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
         @assert isfinite(H_r_EUV1_old)                   "H_r_EUV1_old = $(H_r_EUV1_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
@@ -773,22 +1216,44 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         @assert isfinite(H_r_EUV3_old)                   "H_r_EUV3_old = $(H_r_EUV3_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
         @assert isfinite(H_Z_EUV3_old)                   "H_Z_EUV3_old = $(H_Z_EUV3_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
 
-        @assert isfinite(xH2_old)            "xH2_old = $(xH2_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xHII_old)           "xHII_old = $(xHII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xHD_old)            "xHD_old = $(xHD_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xDII_old)           "xDII_old = $(xDII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xHeII_old)          "xHeII_old = $(xHeII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xHeIII_old)         "xHeIII_old = $(xHeIII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert xHII_old + 2 * xH2_old ≤ 1.0 "xHII_old + 2 * xH2_old = $(xHII_old + 2 * xH2_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert xDII_old + xHD_old ≤ 1.0     "xDII_old + xHD_old = $(xDII_old + xHD_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert xHeII_old + xHeIII_old ≤ 1.0 "xHeII_old + xHeIII_old = $(xHeII_old + xHeIII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xH2_old)                      "xH2_old = $(xH2_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xHII_old)                     "xHII_old = $(xHII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xHD_old)                      "xHD_old = $(xHD_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xDII_old)                     "xDII_old = $(xDII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xHeII_old)                    "xHeII_old = $(xHeII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xHeIII_old)                   "xHeIII_old = $(xHeIII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xCI_old)                      "xCI_old = $(xCI_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xCII_old)                     "xCII_old = $(xCII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xCO_old)                      "xCO_old = $(xCO_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xOI_old)                      "xOI_old = $(xOI_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xOII_old)                     "xOII_old = $(xOII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert xHII_old + 2 * xH2_old ≤ 1.0           "xHII_old + 2 * xH2_old = $(xHII_old + 2 * xH2_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert xDII_old + xHD_old ≤ 1.0               "xDII_old + xHD_old = $(xDII_old + xHD_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert xHeII_old + xHeIII_old ≤ 1.0           "xHeII_old + xHeIII_old = $(xHeII_old + xHeIII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert xCI_old + xCII_old + xCO_old ≤ 1.0     "xCI_old + xCII_old + xCO_old = $(xCI_old + xCII_old + xCO_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert xOI_old + xOII_old ≤ 1.0               "xOI_old + xOII_old = $(xOI_old + xOII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
     end
 
+    # --------- Get gas phase metal density -----------------------------------------------------
+    #ρZ_old            =   Zgas_old * ρ
+
+    # --------- Get dust & gas velocities -------------------------------------------------------
+    inv_ρ             =   1 / ρ
+    inv_ρd            =   1 / max( ρd_old, ρd_floor ) 
+    ud_r_old          =   ( ρd_old > ρd_floor ) ? ρdud_r_old * inv_ρd : 0.0
+    ud_Z_old          =   ( ρd_old > ρd_floor ) ? ρdud_Z_old * inv_ρd : 0.0
+    u_r_old           =   ρu_r_old   * inv_ρ
+    u_Z_old           =   ρu_Z_old   * inv_ρ
+
+    # --------- Dust-to-gas ratio ---------------------------------------------------------------
+    DG                =   ρd_old * inv_ρ
 
     # --------- Get relevant number densities & abundance fractions  ----------------------------
-    nH_old            =   X * ρ / mH
+    nH_old            =   X_over_mH * ρ
     nD_old            =   D_H_ratio * nH_old
-    nHe_old           =   Y * ρ / mHe
+    nHe_old           =   Y_over_mHe * ρ
+    nC_old            =   Zgas_Zsun * C_H_ratio * nH_old
+    nO_old            =   Zgas_Zsun * O_H_ratio * nH_old
     xHI_old           =   max( 1 - xHII_old - 2 * xH2_old, 0.0 )
     xDI_old           =   max( 1 - xDII_old  - xHD_old,    0.0 )
     xHeI_old          =   max( 1 - xHeII_old - xHeIII_old, 0.0 )
@@ -800,44 +1265,96 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
     nHeI_old          =   xHeI_old   * nHe_old
     nHeII_old         =   xHeII_old  * nHe_old
     nHeIII_old        =   xHeIII_old * nHe_old
-    ne_old            =   nHII_old  +  nHeII_old  +  2 * nHeIII_old
+    nCI_old           =   xCI_old    * nC_old
+    nCII_old          =   xCII_old   * nC_old
+    nOI_old           =   xOI_old    * nO_old
+    nOII_old          =   xOII_old   * nO_old
+    nCO_old           =   xCO_old    * nC_old
+    nCHx_old          =   max( (1 - xCI_old  - xCII_old - xCO_old), 0.0 ) * nC_old 
+    CO_over_O         =   (nO_old > 0.0) ? (nCO_old / nO_old) : 0.0                # Be careful to avoid division by zero
+    nOHx_old          =   max( 1 - xOI_old - xOII_old - CO_over_O, 0.0 ) * nO_old
+    ne_old            =   GetElectronDensity( nHII_old, nHeII_old, nHeIII_old ) 
     n                 =   nH_old  +  nHe_old  +  ne_old 
                                
-    # --------- Get old temperature, and enforce temperature floor ----------------------------
+    # --------- Get adiabatic index for old state ---------------------------------------------
     γad               =   Getγad( xHII_old, xH2_old, xHeII_old, xHeIII_old )
-    e_old             =   max( e_old,  n * kB * T_floor / (γad - 1) )
+
+    # --------- Convenient constants (avoid re-computing) -------------------------------------
+    mH_inv_kBρ        =   mH / ( kB * ρ )
+    inv_xH2_old       =   1  / max( xH2_old,  xmin )             # Used in 10% rule check 
+    inv_xHII_old      =   1  / max( xHII_old, xmin )             # Used in 10% rule check 
+    inv_xCO_old       =   1  / max( xCO_old,  xmin )             # Used in 10% rule check 
+    inv_xCII_old      =   1  / max( xCII_old, xmin )             # Used in 10% rule check 
+    inv_xOI_old       =   1  / max( xOI_old,  xmin )             # Used in 10% rule check 
+    inv_xOII_old      =   1  / max( xOII_old, xmin )             # Used in 10% rule check 
+    inv_ne_old        =   1  / max( ne_old,   xmin * nH_old )    # Used in 10% rule check
+    inv_γ_minus_1     =   1  / ( γad - 1 )
+    e_floor           =   n * kB_T_floor * inv_γ_minus_1         # Used in limiting updated e
+    e_ceiling         =   n * kB_T_ceil  * inv_γ_minus_1         # Used in limiting updated e
+
+    # --------- Clamp e_old and get T_old -----------------------------------------------------
+    e_old             =   min( max( e_old,  e_floor ), e_ceiling )
     T_old             =   ( γad - 1 ) * e_old  / ( n * kB )
 
-    # ------------------------------------------------------------------------------------
+    # --------- Get dust temperature ------------------------------------------------------------
+    TCMB              =   TCMB0 * (1 + z)
+    Td                =   ComputeTd( J_IR_old, J_opt_old, J_FUV_old, J_LW_old, J_EUV1_old, 
+                                     J_EUV2_old, J_EUV3_old, Dust, TCMB, T_old, nH_old, ρ  )
+
+    # --------- Recombination photons (if OTS is not used) ------------------------------------
+    if !OTS 
+        js_rec_EUV1, js_rec_EUV2, js_rec_EUV3 = EUVRecombinationEmissivity( T_old, ne_old, nHII_old, nHeII_old, nHeIII_old )
+
+        # Add emissivities to calculation of dJ/dt in the EUV1, EUV2, EUV3 bands:
+        dJ_EUV1dt += js_rec_EUV1 * c̃
+        dJ_EUV2dt += js_rec_EUV2 * c̃
+        dJ_EUV3dt += js_rec_EUV3 * c̃
+    end
+
+    # -----------------------------------------------------------------------------------------
 
     # Sobolev-type column length estimate ~ cell width + density variation scale (following 
     # e.g. Hopkins+ 2023, for FIRE-3). We limit ΔL to ≤ ΔL_max to avoid infinities if ∇ρ ~ 0:
-    ΔL   = min( min( Δr, ΔZ )  +  ρ / abs(∇ρ),  ΔL_max )
+    ΔL   = min( min( Δr, ΔZ )  +  ρ  / abs(∇ρ),  ΔL_max )
 
-    # Estimated H₂, HD column densities:
+    # Estimated H₂, HD, and CO column densities:
     N_H2 = nH2_old * ΔL 
     N_HD = nHD_old * ΔL 
+    N_CO = nCO_old * ΔL 
 
     # Get self-shielding factors:
-    SelfShielding       = S_H2( N_H2, T_old ) 
-    SelfShielding_HD    = S_HD( N_HD, T_old )
-    SelfShielding_H2_HD = S_H2_HD( N_H2 )
+    SelfShielding            = S_H2( N_H2, T_old ) 
+    SelfShielding_HD         = S_HD( N_HD, T_old )
+    SelfShielding_H2_HD      = S_H2_HD( N_H2 )
     
-    Δtsub               = Δtsubguess # Initialize first guess of sub-cycle time-step
-    iter::Int           = 0          # Initialize iteration count
-    ΔxH2_rel            = 0.0        # Initialize ΔxH2_rel, for printing in case convergence fails 
-    ΔxHII_rel           = 0.0        # Initialize ΔxHII_rel, for printing in case convergence fails 
-    Δne_rel             = 0.0        # Initialize Δne_rel, for printing in case convergence fails 
-    Δe                  = 0.0        # Initialize Δe, for printing in case convergence fails 
-    ΔStellarRT          = 0.0        # Initialize ΔStellarRT, for printing in case convergence fails 
-    REDO_ABSORPTION     = false
-    REDO_HEATINGCOOLING = false
+    Δtsub                    = Δtsubguess # Initialize first guess of sub-cycle time-step
+    iter::Int                = 0          # Initialize iteration count
+    ΔxH2_rel                 = 0.0        # Initialize ΔxH2_rel, for printing in case convergence fails 
+    ΔxHII_rel                = 0.0        # Initialize ΔxHII_rel, for printing in case convergence fails 
+    Δne_rel                  = 0.0        # Initialize Δne_rel, for printing in case convergence fails 
+    Δe                       = 0.0        # Initialize Δe, for printing in case convergence fails 
+    ConvergedDustGasCoupling = false      # Initialize ΔDustGasCoupling, for printing in case convergence fails
+    ConvergedCarbonOxygen    = true       # Initialize check for carbon & oxygen chemistry 
+    ΔStellarRT               = 0.0        # Initialize ΔStellarRT, for printing in case convergence fails 
+    REDO_ABSORPTION          = false
+    REDO_HEATINGCOOLING      = false
     while iter < max_iter 
-        iter       += 1
-        Δtsub_half  = 0.5 * Δtsub
+        iter            += 1
+        Δtsub_half       = 0.5 * Δtsub
 
-        Δρu_r_trial = 0.0  # Initialize the computed change in r-direction gas momentum 
-        Δρu_Z_trial = 0.0  # Initialize the computed change in Z-direction gas momentum 
+        # Diagnostics for radiation pressure:
+        Δρu_r_trial      = 0.0  # Initialize the diagnostic: change in r-direction gas momentum from stellar radiation pressure 
+        Δρu_Z_trial      = 0.0  # Initialize the diagnostic: change in Z-direction gas momentum from stellar radiation pressure 
+
+        Δρu_r_IR_trial   = 0.0  # Initialize the diagnostic: change in r-direction gas momentum from IR radiation pressure 
+        Δρu_Z_IR_trial   = 0.0  # Initialize the diagnostic: change in Z-direction gas momentum from IR radiation pressure 
+
+        # Radiation pressure to be dumped into gas & dust:
+        Δρu_r_gas_trial  = 0.0
+        Δρu_Z_gas_trial  = 0.0
+
+        Δρu_r_dust_trial = 0.0
+        Δρu_Z_dust_trial = 0.0
 
         #######################################################################
         #######                                                         #######
@@ -845,20 +1362,23 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         #######                                                         #######
         #######################################################################
 
-        # First we update J and H for all stellar bands, over a 
-        # half-substep Δtsub / 2.
+        # First we update J and H for all stellar bands, and the dust temperature,
+        # over a step Δtsub:
         
-        REDO_ABSORPTION, J_opt_trial, J_FUV_trial, J_LW_trial, J_EUV1_trial, J_EUV2_trial, J_EUV3_trial, 
-        H_r_opt_trial, H_r_FUV_trial, H_r_LW_trial, H_r_EUV1_trial, H_r_EUV2_trial, H_r_EUV3_trial,
-        H_Z_opt_trial, H_Z_FUV_trial, H_Z_LW_trial, H_Z_EUV1_trial, H_Z_EUV2_trial, H_Z_EUV3_trial,
-        Δρu_r_trial_1, Δρu_Z_trial_1,
-        ΔStellarRT_1 = AbsorptionStep( Δtsub_half, c̃, nHI_old, nH2_old, nHeI_old, nHeII_old,
-                                       J_opt_old, dJ_optdt, 
-                                       J_FUV_old, dJ_FUVdt, 
-                                       J_LW_old, dJ_LWdt, H_r_LW_old, H_Z_LW_old, dHr_LWdt, dHZ_LWdt,
-                                       J_EUV1_old, dJ_EUV1dt, H_r_EUV1_old, H_Z_EUV1_old, dHr_EUV1dt, dHZ_EUV1dt,
-                                       J_EUV2_old, dJ_EUV2dt, H_r_EUV2_old, H_Z_EUV2_old, dHr_EUV2dt, dHZ_EUV2dt,
-                                       J_EUV3_old, dJ_EUV3dt, H_r_EUV3_old, H_Z_EUV3_old, dHr_EUV3dt, dHZ_EUV3dt )
+        REDO_ABSORPTION, J_opt_trial, J_FUV_trial, J_LW_trial, J_EUV1_trial, J_EUV2_trial, J_EUV3_trial, J_IR_trial,
+        H_r_opt_trial, H_r_FUV_trial, H_r_LW_trial, H_r_EUV1_trial, H_r_EUV2_trial, H_r_EUV3_trial, H_r_IR_trial,
+        H_Z_opt_trial, H_Z_FUV_trial, H_Z_LW_trial, H_Z_EUV1_trial, H_Z_EUV2_trial, H_Z_EUV3_trial, H_Z_IR_trial,
+        Δρu_r_trial_Abs, Δρu_Z_trial_Abs,  Δρu_r_IR_trial_Abs, Δρu_Z_IR_trial_Abs,
+        Δρu_r_rad_gas_trial_Abs, Δρu_Z_rad_gas_trial_Abs,  Δρu_r_rad_dust_trial_Abs, Δρu_Z_rad_dust_trial_Abs,
+        ΔStellarRT, js_IR, Td_new = AbsorptionStep( Δtsub, c̃, ρ, nH_old, nHI_old, nH2_old, nHeI_old, nHeII_old, ne_old,
+                                                    ρd_old, Dust, T_old, Td, TCMB,
+                                                    J_opt_old,  dJ_optdt,   H_r_opt_old,  H_Z_opt_old,  dHr_optdt,  dHZ_optdt,
+                                                    J_FUV_old,  dJ_FUVdt,   H_r_FUV_old,  H_Z_FUV_old,  dHr_FUVdt,  dHZ_FUVdt,
+                                                    J_LW_old,   dJ_LWdt,    H_r_LW_old,   H_Z_LW_old,   dHr_LWdt,   dHZ_LWdt,
+                                                    J_EUV1_old, dJ_EUV1dt,  H_r_EUV1_old, H_Z_EUV1_old, dHr_EUV1dt, dHZ_EUV1dt,
+                                                    J_EUV2_old, dJ_EUV2dt,  H_r_EUV2_old, H_Z_EUV2_old, dHr_EUV2dt, dHZ_EUV2dt,
+                                                    J_EUV3_old, dJ_EUV3dt,  H_r_EUV3_old, H_Z_EUV3_old, dHr_EUV3dt, dHZ_EUV3dt,
+                                                    J_IR_old,   H_r_IR_old, H_Z_IR_old )
 
         if REDO_ABSORPTION
             # Change in J or H were too large, so reject update and try a smaller sub-cycle time-step: 
@@ -868,60 +1388,35 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
             # If changes in J and H were small enough, we accept the trial updated J and H:
             J_opt  = J_opt_trial;  J_FUV  = J_FUV_trial;  J_LW   = J_LW_trial
             J_EUV1 = J_EUV1_trial; J_EUV2 = J_EUV2_trial; J_EUV3 = J_EUV3_trial 
+            J_IR   = J_IR_trial
 
             H_r_opt  = H_r_opt_trial;  H_r_FUV  = H_r_FUV_trial;  H_r_LW   = H_r_LW_trial
             H_r_EUV1 = H_r_EUV1_trial; H_r_EUV2 = H_r_EUV2_trial; H_r_EUV3 = H_r_EUV3_trial
+            H_r_IR   = H_r_IR_trial
             
             H_Z_opt  = H_Z_opt_trial;  H_Z_FUV  = H_Z_FUV_trial;  H_Z_LW   = H_Z_LW_trial
             H_Z_EUV1 = H_Z_EUV1_trial; H_Z_EUV2 = H_Z_EUV2_trial; H_Z_EUV3 = H_Z_EUV3_trial
+            H_Z_IR   = H_Z_IR_trial
 
-            # Also add rad. pressure momentum change:
-            Δρu_r_trial += Δρu_r_trial_1
-            Δρu_Z_trial += Δρu_Z_trial_1
+            # Also add stellar rad. pressure momentum change (diagnostic):
+            Δρu_r_trial      += Δρu_r_trial_Abs
+            Δρu_Z_trial      += Δρu_Z_trial_Abs
+
+            # And IR rad. pressure momentum change (diagnostic):
+            Δρu_r_IR_trial   += Δρu_r_IR_trial_Abs
+            Δρu_Z_IR_trial   += Δρu_Z_IR_trial_Abs
+
+            # Radiation pressure momentum to be dumped into gas:
+            Δρu_r_gas_trial  += Δρu_r_rad_gas_trial_Abs
+            Δρu_Z_gas_trial  += Δρu_Z_rad_gas_trial_Abs
+
+            # Radiation pressure momentum to be dumped into dust:
+            Δρu_r_dust_trial += Δρu_r_rad_dust_trial_Abs
+            Δρu_Z_dust_trial += Δρu_Z_rad_dust_trial_Abs
         end
 
-        #######################################################################
-        #######                                                         #######
-        #######      S T E P  2  :  H E A T I N G / C O O L I N G       #######
-        #######                                                         #######
-        #######################################################################
-
-        # Next we do an update of e from heating and cooling, over a 
-        # half-substep Δtsub / 2.
-
-        REDO_HEATINGCOOLING, e_new, 
-        Δe_1, Δt_e = HeatingCoolingStep( Δtsub_half, e_old, γad, 
-                                         n, nHI_old, nH2_old, nHII_old, nHeI_old, nHeII_old,
-                                         nHeIII_old, nHD_old, ne_old, 
-                                         J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, 
-                                         SelfShielding, z, CaseB )
-
-        if REDO_HEATINGCOOLING
-            # Change in e was too large or unphysical, so retry with 
-            # smaller sub-cycle time-step:
-            Δtsub = min( Δtsub_half,  
-                         Δt_e )
-            continue 
-        end 
-
-        e_floor = n * kB * T_floor / (γad - 1)   # e corresponding to temperature floor
-        if CoolingHeating 
-            e_new = min( max( e_new, e_floor ),
-                         n * kB * T_ceiling / (γad - 1) )
-        else
-            # For some tests (e.g. R-type ionization front) we ignore heating/cooling:
-            e_new = e_old
-        end
-
-        ##################################################################
-        #######                                                    #######
-        #######         S T E P  3  :  C H E M I S T R Y           #######
-        #######                                                    #######
-        ##################################################################
-
-        # Next, update the chemistry over a full sub-step Δtsub.
-
-        # Get photo-ionization/dissociation rates (s⁻¹):
+        # Get photo-ionization/dissociation rates (s⁻¹), for use in chemistry 
+        # and heating below:
         Γ_LW        =  PhotoDissRate_H2( SelfShielding * J_LW )
         Γpd         =  PhotoDetachRate_Hminus( J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3 )
         Γ_LW_HD     =  PhotoDissRate_HD( SelfShielding_HD * SelfShielding_H2_HD * J_LW )
@@ -930,50 +1425,100 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         ΓionDI      =  ΓionHI
         ΓionHeI     =  IonRate_HeI( J_EUV2, J_EUV3 ) 
         ΓionHeII    =  IonRate_HeII( J_EUV3 )
+        ΓionCI      =  IonRate_CI( J_LW, J_EUV1, J_EUV2, J_EUV3 )
+        ΓionOI      =  IonRate_OI( J_EUV1, J_EUV2, J_EUV3 )
+        ΓdissCHx    =  PhotoDissRate_CHₓ( J_opt, J_FUV, J_LW )
+        ΓdissOHx    =  PhotoDissRate_OHₓ( J_FUV, J_LW )
+        ΓdissCO     =  PhotoDissRate_CO( J_LW )
 
-        # Get the normalized temperature T / [μ(γ-1)]:
-        Tnorm = e_new * mH / ( kB * ρ )
+        #######################################################################
+        #######                                                         #######
+        #######     S T E P  2  :  D U S T - G A S  C O U P L I N G     #######
+        #######                                                         #######
+        #######################################################################
 
-        # Update chemistry:
-        ( xH2_new, xHI_new, xHII_new, xHD_new, xDI_new, xDII_new,
-          xHeI_new, xHeII_new, xHeIII_new, ne_new ) =
-          UpdateChemistrySubStep( Δtsub, Tnorm, ρ, xH2_old, xHII_old, xHD_old, xDII_old, xHeII_old, xHeIII_old, 
-                                  ΓionHI, ΓionH2, ΓionDI, ΓionHeI, ΓionHeII, Γ_LW, Γpd, Γ_LW_HD, 
-                                  z, CaseB ) 
+        # Next we update the gas & dust momenta from radiation pressure + drag, 
+        # over a substep Δtsub.
 
-        # Compute would-be (symmetric) relative change in H I, H II, and
-        # e⁻ fractions/number densities:
-        ΔxH2_rel  = abs( xH2_new - xH2_old )   / max( 0.5 * (xH2_old + xH2_new),   xmin )
-        ΔxHII_rel = abs( xHII_new - xHII_old ) / max( 0.5 * (xHII_old + xHII_new), xmin )
-        Δne_rel   = abs( ne_new - ne_old )     / max( 0.5 * (ne_old + ne_new),     xmin * nH_old )
+        # Get grain charges:
+        Zgr_sil = FindGrainCharge( T_old, nHII_old, nHeII_old, nHeIII_old, ne_old,
+                                   J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, false ) 
 
-        # Get the maximum relative change among them:
-        Δx_rel    = maximum( (ΔxH2_rel, ΔxHII_rel, Δne_rel) )
+        Zgr_C   = FindGrainCharge( T_old, nHII_old, nHeII_old, nHeIII_old, ne_old,
+                                   J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, true )
 
-        if Δx_rel > tol_Chem
-            # Change in H I, H II, and/or e⁻ 
-            # fraction was too high, reduce Δtsub & retry:
+        # Initialize updated dust & gas velocities (for tracking convergence):
+        ud_r_new                 = ud_r_old
+        u_r_new                  = u_r_old
+        ud_Z_new                 = ud_Z_old
+        u_Z_new                  = u_Z_old
+        # Initialize updated dust & gas momenta:
+        ρdud_r_new               = ρdud_r_old
+        ρdud_Z_new               = ρdud_Z_old
+        ρu_r_new                 = ρu_r_old
+        ρu_Z_new                 = ρu_Z_old
+        # Initialize iteration count & convergence check:
+        iter_DustGasCoupling     = 0
+
+        while ConvergedDustGasCoupling == false && iter_DustGasCoupling < 10
+            # Compute drag coefficient:
+            Kdrag   = ComputeDragCoefficientK( Zgr_sil, Zgr_C, ρd_old, T_old, nHI_old, nH2_old, 
+                                               nHII_old, nHeI_old, nHeII_old, nHeIII_old, ne_old, 
+                                               ud_r_new, u_r_new, ud_Z_new, u_Z_new )
+            #Kdrag = 1e8 * mH / (1e-6*yr)
+
+            # Get candidate update:
+            ρu_r_new, ρu_Z_new, 
+            ρdud_r_new, ρdud_Z_new,
+            u_r_candidate, u_Z_candidate, 
+            ud_r_candidate, ud_Z_candidate = UpdateGasDustMomenta( Δtsub, ρ, ρd_old,
+                                                                   Δρu_r_gas_trial, Δρu_r_dust_trial,
+                                                                   Δρu_Z_gas_trial, Δρu_Z_dust_trial,
+                                                                   ρu_r_old, ρu_Z_old, 
+                                                                   ρdud_r_old, ρdud_Z_old,
+                                                                   Kdrag )
+
+            # Check that the updated velocities have converged: 
+            Δud_r = abs( ud_r_candidate - ud_r_new ) / max( abs(ud_r_new), uth_DustGas )
+            Δud_Z = abs( ud_Z_candidate - ud_Z_new ) / max( abs(ud_Z_new), uth_DustGas )
+            Δu_r  = abs( u_r_candidate - u_r_new )   / max( abs(u_r_new),  uth_DustGas )
+            Δu_Z  = abs( u_Z_candidate - u_Z_new )   / max( abs(u_Z_new),  uth_DustGas )
+
+            if max(Δud_r, Δud_Z, Δu_r, Δu_Z) < tol_DustGasCoupling
+                ConvergedDustGasCoupling = true 
+            end
+
+            # Update the 'new' values of the velocities for the next convergence check: 
+            ud_r_new = ud_r_candidate
+            ud_Z_new = ud_Z_candidate
+            u_r_new  = u_r_candidate
+            u_Z_new  = u_Z_candidate
+
+            # Update iteration count:
+            iter_DustGasCoupling += 1
+        end
+
+        if ConvergedDustGasCoupling == false 
+            # Change in velocities were too large, reduce Δtsub & retry:
             Δtsub = Δtsub_half
             continue    
         end
 
-        # Get updated relevant number densities & abundance fractions:
-        xHI_new     =  max( 1 - xHII_new - 2 * xH2_new, 0.0 )
-        xDI_new     =  max( 1 - xDII_new  - xHD_new,    0.0 )
-        xHeI_new    =  max( 1 - xHeII_new - xHeIII_new, 0.0 )
-    
-        nHI_new     =  xHI_new    * nH_old
-        nHII_new    =  xHII_new   * nH_old 
-        nH2_new     =  xH2_new    * nH_old
-        nHD_new     =  xHD_new    * nD_old    # Enters the cooling rate
-        nHeI_new    =  xHeI_new   * nHe_old
-        nHeII_new   =  xHeII_new  * nHe_old
-        nHeIII_new  =  xHeIII_new * nHe_old
-        ne_new      =  nHII_new  +  nHeII_new  +  2 * nHeIII_new
+        ###################################################################################
+        #######                                                                     #######
+        #######     S T E P  3  :  D U S T  G R O W T H / D E S T R U C T I O N     #######
+        #######                                                                     #######
+        ###################################################################################
 
-        # Get updated adiabatic index and gas number density:
-        n           =  nH_old  +  nHe_old  +  ne_new          # Only ne will change 
-        γad         =  Getγad( xHII_new, xH2_new, xHeII_new, xHeIII_new )
+        # Next, update the dust & metal density, from considering dust growth (by accretion)
+        # and destruction (by sublimation + sputtering). TODO
+
+        #ρd_new, ρZ_new = DustGrowthDestruction_Update( ρd_old, ρZ_old, nH_old, 
+        #                                               T_old, Td_new, Zgr_C )
+
+        #DG_new        = ρd_new / ρ
+        #Zgas_Zsun_new = ρZ_new / ρ
+
 
         #######################################################################
         #######                                                         #######
@@ -981,15 +1526,16 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         #######                                                         #######
         #######################################################################
 
-        # Next we do another update of e from heating and cooling, over a 
-        # half-substep Δtsub / 2. Using the latest chemical abundances. 
+        # Next we do an update of e from heating and cooling, over a 
+        # substep Δtsub.
 
         REDO_HEATINGCOOLING, e_new, 
-        Δe_2, Δt_e = HeatingCoolingStep( Δtsub_half, e_new, γad, 
-                                         n, nHI_new, nH2_new, nHII_new, nHeI_new, nHeII_new,
-                                         nHeIII_new, nHD_new, ne_new, 
-                                         J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, 
-                                         SelfShielding, z, CaseB )
+        Δe, Δt_e = HeatingCoolingStep( Δtsub, e_old, Td_new, γad, 
+                                       n, nH_old, nHI_old, nH2_old, nHII_old, nHeI_old, nHeII_old,
+                                       nHeIII_old, nHD_old, ne_old,  Zgas_Zsun, DG,
+                                       xCI_old, xCII_old, xCO_old, xOI_old, N_CO,
+                                       J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, 
+                                       SelfShielding, z, Γpd, OTS, e_floor )
 
         if REDO_HEATINGCOOLING
             # Change in e was too large or unphysical, so retry with 
@@ -999,79 +1545,76 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
             continue 
         end 
 
-        e_floor = n * kB * T_floor / (γad - 1)  # e corresponding to temperature floor
         if CoolingHeating 
             e_new = min( max( e_new, e_floor ),
-                         n * kB * T_ceiling / (γad - 1) )
+                         e_ceiling )
         else
             # For some tests (e.g. R-type ionization front) we ignore heating/cooling:
             e_new = e_old
         end
 
-        #######################################################################
-        #######                                                         #######
-        #######            S T E P  5  :  A B S O R P T I O N           #######
-        #######                                                         #######
-        #######################################################################
 
-        # Finally, we update J and H for all stellar bands again, over a 
-        # half-substep Δtsub / 2. Using the latest chemical abundances. 
+        ###################################################################################
+        #######                                                                     #######
+        #######                    S T E P  5  :  C H E M I S T R Y                 #######
+        #######                                                                     #######
+        ###################################################################################
 
-        REDO_ABSORPTION, J_opt_trial, J_FUV_trial, J_LW_trial, J_EUV1_trial, J_EUV2_trial, J_EUV3_trial, 
-        H_r_opt_trial, H_r_FUV_trial, H_r_LW_trial, H_r_EUV1_trial, H_r_EUV2_trial, H_r_EUV3_trial,
-        H_Z_opt_trial, H_Z_FUV_trial, H_Z_LW_trial, H_Z_EUV1_trial, H_Z_EUV2_trial, H_Z_EUV3_trial,
-        Δρu_r_trial_2, Δρu_Z_trial_2,
-        ΔStellarRT_2 = AbsorptionStep( Δtsub_half, c̃, nHI_new, nH2_new, nHeI_new, nHeII_new,
-                                       J_opt, dJ_optdt, 
-                                       J_FUV, dJ_FUVdt, 
-                                       J_LW, dJ_LWdt, H_r_LW, H_Z_LW, dHr_LWdt, dHZ_LWdt,
-                                       J_EUV1, dJ_EUV1dt, H_r_EUV1, H_Z_EUV1, dHr_EUV1dt, dHZ_EUV1dt,
-                                       J_EUV2, dJ_EUV2dt, H_r_EUV2, H_Z_EUV2, dHr_EUV2dt, dHZ_EUV2dt,
-                                       J_EUV3, dJ_EUV3dt, H_r_EUV3, H_Z_EUV3, dHr_EUV3dt, dHZ_EUV3dt )
+        # Finally, we update the chemistry over a sub-step Δtsub.
 
-        if REDO_ABSORPTION
-            # Changes in J or H were too large, so reject update and try a smaller sub-cycle time-step: 
+        # Get the normalized temperature Tnorm = T / [μ(γ-1)] = e × mH / (kB × ρ):
+        Tnorm =  e_new * mH_inv_kBρ 
+
+        # Update chemistry:
+        ( xH2_new, xHI_new, xHII_new, xHD_new, xDI_new, xDII_new,
+          xHeI_new, xHeII_new, xHeIII_new,
+          xOI_new, xOII_new, xCI_new, xCII_new, xCO_new, ConvergedCarbonOxygen,
+          ne_new, Δne ) =
+          UpdateChemistrySubStep( Δtsub, Tnorm, Td_new, ρ, DG, xH2_old, xHII_old, xHD_old, xDII_old, xHeII_old, xHeIII_old,
+                                  xOI_old, xOII_old, xCI_old, xCII_old, xCO_old, Zgas_Zsun,
+                                  ΓionHI, ΓionH2, ΓionDI, ΓionHeI, ΓionHeII, Γ_LW, Γpd, Γ_LW_HD, 
+                                  ΓionOI, ΓionCI, ΓdissCO, ΓdissOHx, ΓdissCHx,
+                                  z, OTS ) 
+
+        # Compute would-be relative change in H₂, H II, and
+        # e⁻ fractions/number densities (NOTE: Δne is already taking abs into account, hence Δne > 0):
+        ΔxH2_rel    = abs( xH2_new   - xH2_old )  * inv_xH2_old
+        ΔxHII_rel   = abs( xHII_new  - xHII_old ) * inv_xHII_old
+        ΔxCO_rel    = abs( xCO_new   - xCO_old )  * inv_xCO_old 
+        ΔxCII_rel   = abs( xCII_new  - xCII_old ) * inv_xCII_old 
+        ΔxOI_rel    = abs( xOI_new   - xOI_old )  * inv_xOI_old
+        ΔxOII_rel   = abs( xOII_new  - xOII_old ) * inv_xOII_old 
+        Δne_rel     = Δne * inv_ne_old
+
+        # Get the maximum relative change among them:
+        Δx_rel      = maximum( ( ΔxH2_rel, ΔxHII_rel, ΔxCO_rel, ΔxCII_rel, ΔxOI_rel, ΔxOII_rel, Δne_rel ) )
+
+        if Δx_rel > tol_Chem || ConvergedCarbonOxygen == false 
+            # Change in H₂, H II, e⁻, CO, C II, O I, and/or O II 
+            # fraction was too high, reduce Δtsub & retry:
             Δtsub = Δtsub_half
-            continue 
-        else
-            # If changes in J and H were small enough, we accept the trial updated J and H:
-            J_opt  = J_opt_trial;  J_FUV  = J_FUV_trial;  J_LW   = J_LW_trial
-            J_EUV1 = J_EUV1_trial; J_EUV2 = J_EUV2_trial; J_EUV3 = J_EUV3_trial 
-
-            H_r_opt  = H_r_opt_trial;  H_r_FUV  = H_r_FUV_trial;  H_r_LW   = H_r_LW_trial
-            H_r_EUV1 = H_r_EUV1_trial; H_r_EUV2 = H_r_EUV2_trial; H_r_EUV3 = H_r_EUV3_trial
-            
-            H_Z_opt  = H_Z_opt_trial;  H_Z_FUV  = H_Z_FUV_trial;  H_Z_LW   = H_Z_LW_trial
-            H_Z_EUV1 = H_Z_EUV1_trial; H_Z_EUV2 = H_Z_EUV2_trial; H_Z_EUV3 = H_Z_EUV3_trial
-
-            # Also add rad. pressure momentum change:
-            Δρu_r_trial += Δρu_r_trial_2
-            Δρu_Z_trial += Δρu_Z_trial_2
+            continue    
         end
-
-
 
         # Recommended next sub-cycle time-step based on the relative change 
         # in quantities:
-        Δe         = Δe_1 + Δe_2
-        ΔStellarRT = ΔStellarRT_1 + ΔStellarRT_2
-        if ( Δx_rel < tol_enlargestep  &&  Δe < tol_enlargestep  &&  ΔStellarRT < tol_enlargestep )
+        if ( Δx_rel < tol_enlargestep  &&  Δe < tol_enlargestep  
+             &&  ΔStellarRT < tol_enlargestep )
             Δtsub_new = 2 * min( Δtsub, Δt_e )
         else
             Δtsub_new = Δtsub
         end
 
-        # Get flux opacities (for use in the M1 transport, to get the asymptotic diffusion limit)
-        αc_F_EUV1  = nHI_new * σHI_EUV1  +  nH2_new * σH2_EUV1 
-        αc_F_EUV2  = nHI_new * σHI_EUV2  +  nH2_new * σH2_EUV2  +  nHeI_new * σHeI_EUV2  
-        αc_F_EUV3  = nHI_new * σHI_EUV3  +  nH2_new * σH2_EUV3  +  nHeI_new * σHeI_EUV3  +  nHeII_new * σHeII_EUV3 
-        
         # Return every updated quantity, the time-step taken, & recommended next sub-cycle time-step:
-        return Δtsub, Δtsub_new, e_new, xH2_new, xHII_new, xHD_new, xDII_new, xHeII_new, xHeIII_new, 
-               J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, 
-               H_r_LW, H_Z_LW,  H_r_EUV1, H_Z_EUV1,  H_r_EUV2, H_Z_EUV2,  H_r_EUV3, H_Z_EUV3,
-               αc_F_EUV1, αc_F_EUV2, αc_F_EUV3, 
-               Δρu_r_trial, Δρu_Z_trial
+        return Δtsub, Δtsub_new, e_new, xH2_new, xHII_new, xHD_new, xDII_new, xHeII_new, xHeIII_new,
+               xOI_new, xOII_new, xCI_new, xCII_new, xCO_new, 
+               J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, J_IR,
+               H_r_opt, H_Z_opt,    H_r_FUV, H_Z_FUV,    H_r_LW, H_Z_LW,  
+               H_r_EUV1, H_Z_EUV1,  H_r_EUV2, H_Z_EUV2,  H_r_EUV3, H_Z_EUV3,
+               H_r_IR, H_Z_IR,
+               Δρu_r_trial, Δρu_Z_trial,  Δρu_r_IR_trial, Δρu_Z_IR_trial, # Diagnostics for radiation pressure 
+               ρu_r_new, ρu_Z_new,  ρdud_r_new, ρdud_Z_new,               # Updated gas & dust momenta 
+               Td_new, js_IR
 
     end
 
@@ -1085,6 +1628,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
                - Relative change in H₂ abundance, ΔxH2_rel   = $(ΔxH2_rel)
                - Relative change in H II abundance, ΔxHII_rel = $(ΔxHII_rel)
                - Relative change in e, Δe_rel = $(Δe)
+               - Converged carbon & oxygen chemistry?: $(ConvergedCarbonOxygen)
                - Relative change in stellar RT, ΔStellarRT = $(ΔStellarRT)
                - REDO_ABSORPTION     = $(REDO_ABSORPTION)
                - REDO_HEATINGCOOLING = $(REDO_HEATINGCOOLING) """ )
@@ -1096,14 +1640,7 @@ end # End of ThermoChemistrySubStepUpdate!
 max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global time-step (default = 10⁶)
 
 """ The full thermochemistry sub-cycling over a global time-step Δtglobal.
-    Updates the intensities, gas internal energy, and chemical abundances.
-    
-    **ARGUMENTS:** 
-    
-    - 
-    
-    
-    """
+    Updates the intensities, gas internal energy, and chemical abundances. """
 @views function ThermoChemistrySubCycleUpdate!(  icell::Int,  jcell::Int,
                                                     Δr::Float64, ΔZ::Float64,
                                               Δtglobal::Float64,
@@ -1117,12 +1654,23 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
                                               xDII_old::Float64,
                                              xHeII_old::Float64,
                                             xHeIII_old::Float64,
+                                               xOI_old::Float64, 
+                                              xOII_old::Float64, 
+                                               xCI_old::Float64, 
+                                              xCII_old::Float64, 
+                                               xCO_old::Float64,
+                                             Zgas_Zsun::Float64,
+                                                ρd_old::Float64,
+                                                  Dust::DustState,
 
+                                              ρu_r_old::Float64,
+                                              ρu_Z_old::Float64,
+                                            ρdud_r_old::Float64,
+                                            ρdud_Z_old::Float64,
                                          Δρu_stellar_r::AbstractArray{Float64, 2},
                                          Δρu_stellar_Z::AbstractArray{Float64, 2},
-                                               αF_EUV1::AbstractArray{Float64, 2},
-                                               αF_EUV2::AbstractArray{Float64, 2},
-                                               αF_EUV3::AbstractArray{Float64, 2},
+                                              Δρu_IR_r::AbstractArray{Float64, 2},
+                                              Δρu_IR_Z::AbstractArray{Float64, 2},
 
                                           J_opt_transp::Float64 = 0.0,
                                               dJ_optdt::Float64 = 0.0,
@@ -1166,10 +1714,21 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
                                             dHr_EUV3dt::Float64 = 0.0,
                                             dHZ_EUV3dt::Float64 = 0.0,
 
+                                           J_IR_transp::Float64 = 0.0,
+                                         H_r_IR_transp::Float64 = 0.0,
+                                         H_Z_IR_transp::Float64 = 0.0,
+
                                                      z::Float64 = 0.0,
-                                                 CaseB::Bool    = true,
+                                                   OTS::Bool    = true,
                                         CoolingHeating::Bool    = true
                                               )
+
+    # Initialize gas & dust momenta:
+    ρu_r_current     = ρu_r_old 
+    ρu_Z_current     = ρu_Z_old 
+    ρdud_r_current   = ρdud_r_old  
+    ρdud_Z_current   = ρdud_Z_old 
+
     # Initialize time, internal energy, and abundance fractions
     # using the ones from the previous global time-step:
     t_accum          = 0.0 
@@ -1180,7 +1739,14 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
     xDII_current     = xDII_old
     xHeII_current    = xHeII_old
     xHeIII_current   = xHeIII_old
-    # Similarly, initialize the intensities as those from 
+    xOI_current      = xOI_old
+    xOII_current     = xOII_old
+    xCI_current      = xCI_old
+    xCII_current     = xCII_old
+    xCO_current      = xCO_old
+    Td               = 30.0     # Dust temperature can be initialized arbitrarily 
+
+    # Similarly, initialize the intensities J as those from 
     # the transport step:
     J_opt_current    = J_opt_transp
     J_FUV_current    = J_FUV_transp
@@ -1188,7 +1754,15 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
     J_EUV1_current   = J_EUV1_transp
     J_EUV2_current   = J_EUV2_transp
     J_EUV3_current   = J_EUV3_transp
+    J_IR_current     = J_IR_transp
+
     # Initialize H components:
+    H_r_opt_current  =  H_r_opt_transp
+    H_Z_opt_current  =  H_Z_opt_transp
+
+    H_r_FUV_current  =  H_r_FUV_transp
+    H_Z_FUV_current  =  H_Z_FUV_transp
+
     H_r_LW_current   =  H_r_LW_transp
     H_Z_LW_current   =  H_Z_LW_transp
 
@@ -1201,16 +1775,11 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
     H_r_EUV3_current =  H_r_EUV3_transp
     H_Z_EUV3_current =  H_Z_EUV3_transp
 
-    # Initialize cell flux opacities:
-    αc_F_EUV1_current = 0.0
-    αc_F_EUV2_current = 0.0
-    αc_F_EUV3_current = 0.0
+    H_r_IR_current   =  H_r_IR_transp
+    H_Z_IR_current   =  H_Z_IR_transp
 
-
-    # Initialize the momentum density change from 
-    # stellar radiation pressure:
-    Δρu_stellar_r[icell, jcell] = 0.0  # r-direction momentum change in gas 
-    Δρu_stellar_Z[icell, jcell] = 0.0  # Z-direction momentum change in gas 
+    # Initialize IR emissivity:
+    js_IR = 0.0
     
     # Start with the global time-step as an initial guess
     # for the sub-cycle time-step:
@@ -1227,9 +1796,18 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
                   e_current, ρ, ∇ρ,
                   xH2_current, xHII_current, xHD_current, xDII_current,
                   xHeII_current, xHeIII_current, 
+                  xCI_current, xCII_current, xCO_current, 
+                  xOI_current, xOII_current,
+                  Zgas_Zsun, ρd_old,
+                  ρdud_r_current, ρdud_Z_current,     
+                  ρu_r_current, ρu_Z_current,      
+                  Dust,
 
                   J_opt_current, dJ_optdt, 
+                  H_r_opt_current, H_Z_opt_current, dHr_optdt, dHZ_optdt,
+
                   J_FUV_current, dJ_FUVdt,
+                  H_r_FUV_current, H_Z_FUV_current, dHr_FUVdt, dHZ_FUVdt,
 
                   J_LW_current, dJ_LWdt,
                   H_r_LW_current, H_Z_LW_current, dHr_LWdt, dHZ_LWdt,
@@ -1243,14 +1821,22 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
                   J_EUV3_current, dJ_EUV3dt,
                   H_r_EUV3_current, H_Z_EUV3_current, dHr_EUV3dt, dHZ_EUV3dt,
 
-                  z, CaseB, CoolingHeating )
+                  J_IR_current, 
+                  H_r_IR_current, H_Z_IR_current, 
+
+                  z, OTS, CoolingHeating )
 
         # Unpack result:
         Δtsub, Δtsub_new, e_new, xH2_new, xHII_new, xHD_new, xDII_new, xHeII_new, xHeIII_new, 
-        J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, 
-        H_r_LW, H_Z_LW,  H_r_EUV1, H_Z_EUV1,  H_r_EUV2, H_Z_EUV2,  H_r_EUV3, H_Z_EUV3,
-        αc_F_EUV1, αc_F_EUV2, αc_F_EUV3,
-        Δρu_r_substep, Δρu_Z_substep  = result
+        xOI_new, xOII_new, xCI_new, xCII_new, xCO_new,
+        J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, J_IR,
+        H_r_opt, H_Z_opt,    H_r_FUV, H_Z_FUV,    H_r_LW, H_Z_LW,  
+        H_r_EUV1, H_Z_EUV1,  H_r_EUV2, H_Z_EUV2,  H_r_EUV3, H_Z_EUV3,
+        H_r_IR, H_Z_IR,
+        Δρu_r_substep, Δρu_Z_substep,  
+        Δρu_r_IR_substep, Δρu_Z_IR_substep, 
+        ρu_r_new, ρu_Z_new,  ρdud_r_new, ρdud_Z_new,  
+        Td, js_IR  = result
 
         # Update our current internal energy & abundance fractions:
         e_current        = e_new
@@ -1260,6 +1846,11 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
         xDII_current     = xDII_new
         xHeII_current    = xHeII_new
         xHeIII_current   = xHeIII_new
+        xOI_current      = xOI_new
+        xOII_current     = xOII_new
+        xCI_current      = xCI_new
+        xCII_current     = xCII_new
+        xCO_current      = xCO_new
         # Update our current intensities:
         J_opt_current    = J_opt
         J_FUV_current    = J_FUV 
@@ -1267,7 +1858,12 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
         J_EUV1_current   = J_EUV1
         J_EUV2_current   = J_EUV2
         J_EUV3_current   = J_EUV3 
+        J_IR_current     = J_IR
         # Update our current H-components:
+        H_r_opt_current  = H_r_opt
+        H_Z_opt_current  = H_Z_opt 
+        H_r_FUV_current  = H_r_FUV
+        H_Z_FUV_current  = H_Z_FUV
         H_r_LW_current   = H_r_LW
         H_Z_LW_current   = H_Z_LW 
         H_r_EUV1_current = H_r_EUV1
@@ -1276,15 +1872,22 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
         H_Z_EUV2_current = H_Z_EUV2 
         H_r_EUV3_current = H_r_EUV3
         H_Z_EUV3_current = H_Z_EUV3
+        H_r_IR_current   = H_r_IR
+        H_Z_IR_current   = H_Z_IR
 
-        # Update cell flux opacities:
-        αc_F_EUV1_current = αc_F_EUV1
-        αc_F_EUV2_current = αc_F_EUV2
-        αc_F_EUV3_current = αc_F_EUV3
+        # Update gas & dust momenta:
+        ρu_r_current     = ρu_r_new
+        ρu_Z_current     = ρu_Z_new
+        ρdud_r_current   = ρdud_r_new
+        ρdud_Z_current   = ρdud_Z_new
 
-        # Add stellar radiation pressure momentum from this sub-step: 
+        # Add diagnostic stellar radiation pressure momentum from this sub-step: 
         Δρu_stellar_r[icell, jcell] += Δρu_r_substep
         Δρu_stellar_Z[icell, jcell] += Δρu_Z_substep
+
+        # Add diagnostic IR radiation pressure momentum from this sub-step: 
+        Δρu_IR_r[icell, jcell]      += Δρu_r_IR_substep
+        Δρu_IR_Z[icell, jcell]      += Δρu_Z_IR_substep
 
         # Update current time:
         t_accum += Δtsub
@@ -1300,16 +1903,17 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
         end
     end
 
-    # Save latest flux opacities:
-    αF_EUV1[icell, jcell] = 0.0 * αc_F_EUV1_current
-    αF_EUV2[icell, jcell] = 0.0 * αc_F_EUV2_current
-    αF_EUV3[icell, jcell] = 0.0 * αc_F_EUV3_current
-
     # Return the updated state after evolving over the global time-step:
     return e_current, xH2_current, xHII_current, xHD_current, xDII_current, xHeII_current, xHeIII_current, 
-           J_opt_current, J_FUV_current, J_LW_current, J_EUV1_current, J_EUV2_current, J_EUV3_current,
-           H_r_LW_current, H_Z_LW_current,  H_r_EUV1_current, H_Z_EUV1_current,  
-           H_r_EUV2_current, H_Z_EUV2_current,  H_r_EUV3_current, H_Z_EUV3_current
+           xOI_current, xOII_current, xCI_current, xCII_current, xCO_current,
+           J_opt_current, J_FUV_current, J_LW_current, J_EUV1_current, J_EUV2_current, J_EUV3_current, 
+           J_IR_current,
+           H_r_opt_current,  H_Z_opt_current,   H_r_FUV_current,  H_Z_FUV_current,
+           H_r_LW_current,   H_Z_LW_current,    H_r_EUV1_current, H_Z_EUV1_current,  
+           H_r_EUV2_current, H_Z_EUV2_current,  H_r_EUV3_current, H_Z_EUV3_current, 
+           H_r_IR_current,   H_Z_IR_current, 
+           ρu_r_current, ρu_Z_current,  ρdud_r_current, ρdud_Z_current, 
+           Td, js_IR
 end
 
 
@@ -1317,6 +1921,7 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                                              RT::StellarRTArrays,
                                      HydroState::HydrodynamicsState,
                                       ChemState::ChemistryState,
+                                           Dust::DustState,
                                               z::Float64,
                                  CoolingHeating::Bool,
 
@@ -1359,16 +1964,32 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
         @assert LyaState.c̃_Lyα == c̃ "Lyα and stellar RT c̃ mismatch in the photothermochemistry solver."
     end
     
-    # Unpack hydro & chemistry arrays:
-    ρ      = HydroState.ρ
-    e      = HydroState.e 
-    T      = HydroState.T
-    xH2    = ChemState.xH2
-    xHII   = ChemState.xHII
-    xHD    = ChemState.xHD
-    xDII   = ChemState.xDII
-    xHeII  = ChemState.xHeII 
-    xHeIII = ChemState.xHeIII
+    # Unpack hydro, dust & chemistry arrays:
+    ρ         = HydroState.ρ
+    ρu_r      = HydroState.ρu_X
+    ρu_Z      = HydroState.ρu_Y
+    e         = HydroState.e 
+    T         = HydroState.T
+
+    ρd        = HydroState.ρd
+    ρdud_r    = HydroState.ρdud_X
+    ρdud_Z    = HydroState.ρdud_Y
+
+    xH2       = ChemState.xH2
+    xHII      = ChemState.xHII
+    xHD       = ChemState.xHD
+    xDII      = ChemState.xDII
+    xHeII     = ChemState.xHeII 
+    xHeIII    = ChemState.xHeIII 
+    xCI       = ChemState.xCI 
+    xCII      = ChemState.xCII
+    xCO       = ChemState.xCO
+    xOI       = ChemState.xOI 
+    xOII      = ChemState.xOII
+    Zgas_Zsun = ChemState.Zgas_Zsun
+
+    # On-spot-approximation (Case B) or modelling of recombination radiation:
+    OTS       = RT.OTS
 
     #######################################################################
     #######                                                         #######
@@ -1377,6 +1998,8 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
     #######################################################################
 
     # Stellar emission update: 
+    RT.J_opt      .= RT.J_opt   .+  RT.js_opt  .* c̃ .* Δt_RT
+    RT.J_FUV      .= RT.J_FUV   .+  RT.js_FUV  .* c̃ .* Δt_RT
     RT.J_LW       .= RT.J_LW    .+  RT.js_LW   .* c̃ .* Δt_RT
     RT.J_EUV1     .= RT.J_EUV1  .+  RT.js_EUV1 .* c̃ .* Δt_RT
     RT.J_EUV2     .= RT.J_EUV2  .+  RT.js_EUV2 .* c̃ .* Δt_RT
@@ -1400,6 +2023,42 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
     end
 
     UpdateStellarJold = false # Don't update Jold, since we want the pre-(injection + transport) value to compute dJ/dt
+
+    # Advect IR photons:
+    AdvectJandH!( c̃Δt_RT,   RT.α_F_IR,  RT.J_IR,     RT.J_IR_old,   RT.H_r_IR,   RT.H_Z_IR, 
+                  RT.D_rr_IR,        RT.D_ZZ_IR,  RT.D_rZ_IR, 
+                  RT.K_ϕϕ_iphalf_IR, RT.K_ϕϕ_imhalf_IR,
+                  RT.F_r_IR,         RT.F_Z_IR,
+                  RT.F_r_Hr_IR,      RT.F_Z_Hr_IR, 
+                  RT.F_r_HZ_IR,      RT.F_Z_HZ_IR, 
+                  inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
+                  u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  RT.rfirst_StellarRT, Val(:Threaded) )
+
+    # Advect optical photons:
+    AdvectJandH!( c̃Δt_RT,   RT.α_F_opt,  RT.J_opt,     RT.J_opt_old,   RT.H_r_opt,   RT.H_Z_opt, 
+                  RT.D_rr_opt,        RT.D_ZZ_opt,  RT.D_rZ_opt, 
+                  RT.K_ϕϕ_iphalf_opt, RT.K_ϕϕ_imhalf_opt,
+                  RT.F_r_opt,         RT.F_Z_opt,
+                  RT.F_r_Hr_opt,      RT.F_Z_Hr_opt, 
+                  RT.F_r_HZ_opt,      RT.F_Z_HZ_opt, 
+                  inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
+                  u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  RT.rfirst_StellarRT, Val(:Threaded) )
+
+    # Advect FUV photons:
+    AdvectJandH!( c̃Δt_RT,   RT.α_F_FUV,  RT.J_FUV,     RT.J_FUV_old,   RT.H_r_FUV,   RT.H_Z_FUV, 
+                  RT.D_rr_FUV,        RT.D_ZZ_FUV,  RT.D_rZ_FUV, 
+                  RT.K_ϕϕ_iphalf_FUV, RT.K_ϕϕ_imhalf_FUV,
+                  RT.F_r_FUV,         RT.F_Z_FUV,
+                  RT.F_r_Hr_FUV,      RT.F_Z_Hr_FUV, 
+                  RT.F_r_HZ_FUV,      RT.F_Z_HZ_FUV, 
+                  inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
+                  u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  RT.rfirst_StellarRT, Val(:Threaded) )
 
     # Advect LW photons:
     AdvectJandH!( c̃Δt_RT,   RT.α_F_LW,  RT.J_LW,     RT.J_LW_old,   RT.H_r_LW,   RT.H_Z_LW, 
@@ -1510,10 +2169,16 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                                                          e[i,j],   ρ[i,j],   ∇ρ,
                                                        xH2[i,j],   xHII[i,j],
                                                        xHD[i,j],   xDII[i,j],
-                                                     xHeII[i,j],   xHeIII[i,j], 
+                                                     xHeII[i,j],   xHeIII[i,j],
+                                                       xOI[i,j],   xOII[i,j],
+                                                       xCI[i,j],   xCII[i,j],
+                                                       xCO[i,j],   Zgas_Zsun[i,j],
+                                                        ρd[i,j],   Dust, 
+                                                      ρu_r[i,j],   ρu_Z[i,j],
+                                                    ρdud_r[i,j],   ρdud_Z[i,j],
 
                                                  RT.Δρu_stellar_r, RT.Δρu_stellar_Z,
-                                                      RT.α_F_EUV1, RT.α_F_EUV2, RT.α_F_EUV3,
+                                                      RT.Δρu_IR_r, RT.Δρu_IR_Z,
 
                                                 RT.J_opt_old[i,j], dJ_optdt,
                                               RT.H_r_opt_old[i,j], RT.H_Z_opt_old[i,j], dHr_optdt, dHZ_optdt,
@@ -1533,24 +2198,52 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                                                RT.J_EUV3_old[i,j], dJ_EUV3dt,
                                              RT.H_r_EUV3_old[i,j], RT.H_Z_EUV3_old[i,j], dHr_EUV3dt, dHZ_EUV3dt,
 
-                                                          z, true, CoolingHeating )
+                                                 RT.J_IR[i,j], 
+                                               RT.H_r_IR[i,j], RT.H_Z_IR[i,j], 
+
+                                                          z, OTS, CoolingHeating )
 
                 # Get updated quantities:
                 e[i,j], xH2[i,j], xHII[i,j], xHD[i,j], xDII[i,j], xHeII[i,j], xHeIII[i,j], 
+                xOI[i,j], xOII[i,j], xCI[i,j], xCII[i,j], xCO[i,j],
                 RT.J_opt[i,j], RT.J_FUV[i,j], RT.J_LW[i,j], RT.J_EUV1[i,j], RT.J_EUV2[i,j], RT.J_EUV3[i,j],
+                RT.J_IR[i,j],
+                RT.H_r_opt[i,j],  RT.H_Z_opt[i,j],
+                RT.H_r_FUV[i,j],  RT.H_Z_FUV[i,j],
                 RT.H_r_LW[i,j],   RT.H_Z_LW[i,j],
                 RT.H_r_EUV1[i,j], RT.H_Z_EUV1[i,j],  
                 RT.H_r_EUV2[i,j], RT.H_Z_EUV2[i,j],
-                RT.H_r_EUV3[i,j], RT.H_Z_EUV3[i,j] = result 
+                RT.H_r_EUV3[i,j], RT.H_Z_EUV3[i,j],
+                RT.H_r_IR[i,j],   RT.H_Z_IR[i,j],
+                ρu_r[i,j],        ρu_Z[i,j],  
+                ρdud_r[i,j],      ρdud_Z[i,j], 
+                Dust.Td[i,j],     RT.js_IR[i,j]  = result 
+
+                # Update IR flux opacity (for accurate M1 transport in optically thick regime):
+                RT.α_F_IR[i,j] = ρd[i,j] * κR(Dust, Dust.Td[i,j])
+
+                # Update stellar RT flux opacities:
+                #xHI = max( 1 - xHII[i,j] - 2 * xH2[i,j], 0.0 )
+                #nHI = xHI * X_over_mH * ρ[i,j]
+                #nH2 = xH2[i,j] * X_over_mH * ρ[i,j]
+
+                #RT.α_F_EUV1[i,j] = nHI * σHI_EUV1_F  + nH2 * σH2_EUV1_F +  Dust.DG[i,j] * ρ[i,j] * Dust.κd_F_EUV1
+                #RT.α_F_EUV2[i,j] = nHI * σHI_EUV2_F  +  Dust.DG[i,j] * ρ[i,j] * Dust.κd_F_EUV2
+                #RT.α_F_EUV3[i,j] = nHI * σHI_EUV3_F  +  Dust.DG[i,j] * ρ[i,j] * Dust.κd_F_EUV3
+                #RT.α_F_FUV[i,j]  = Dust.DG[i,j] * ρ[i,j] * Dust.κd_F_FUV
+
+
             end
         end # End of i-loop 
     end # End of j-loop 
+
 
     # Update the old stellar J and H:
     @threads for j in dN_Z
         @simd for i in dN_r 
             @inbounds begin
                 # Update old J:
+                RT.J_IR_old[i,j]     = RT.J_IR[i,j]
                 RT.J_opt_old[i,j]    = RT.J_opt[i,j]
                 RT.J_FUV_old[i,j]    = RT.J_FUV[i,j]
                 RT.J_LW_old[i,j]     = RT.J_LW[i,j]
@@ -1559,6 +2252,9 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                 RT.J_EUV3_old[i,j]   = RT.J_EUV3[i,j]
 
                 # Update old H:
+                RT.H_r_IR_old[i,j]   = RT.H_r_IR[i,j]
+                RT.H_Z_IR_old[i,j]   = RT.H_Z_IR[i,j]
+
                 RT.H_r_opt_old[i,j]  = RT.H_r_opt[i,j]
                 RT.H_Z_opt_old[i,j]  = RT.H_Z_opt[i,j]
 
@@ -1628,11 +2324,18 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
         # Update the Lyα Voigt profile & emission profile for all cells:
         UpdateVoigtAndEmissionProfile!( LyaState, T )
 
-        # Update the flux opacity using the newly updated Hvoigt:
+        # Update the flux opacity using the newly updated Hvoigt,
+        # and the dust/continuum opacities:
         @threads for k in dN_ν 
             @inbounds @simd for j in dN_Z 
                 for i in dN_r
-                    LyaState.α_F_Lyα[i,j,k] = LyaState.α_Lyα[i,j] * LyaState.Hvoigt[i,j,k]  
+                    # Lyα dust absorption & flux opacities:
+                    αd_abs_Lyα = ρd[i,j] * Dust.κd_abs_Lyα   # Lyα dust absorption opacity 
+                    αd_F_Lyα   = ρd[i,j] * Dust.κd_F_Lyα     # Lyα dust flux opacity 
+
+                    # Total Lyα absorption & flux opacities:
+                    LyaState.αc_Lyα[i,j]    = αd_abs_Lyα
+                    LyaState.α_F_Lyα[i,j,k] = LyaState.α_Lyα[i,j] * LyaState.Hvoigt[i,j,k]  +  αd_F_Lyα
                 end # End of i-loop
             end # End of j-loop 
         end # End of k-loop
@@ -1646,7 +2349,7 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                          u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
                          true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top )
 
-    end
+    end # End of Lyα update 
 
     return Δt_RT
 end
@@ -1703,7 +2406,8 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
                                           Z::AbstractArray{Float64, 1},
                                   Zstar_pos::Float64,
                                  σstar_cell::Float64,
-                                          c̃::Float64
+                                          c̃::Float64,
+                                        OTS::Bool = false  # On-the-spot approximation (if true) or not (if false)
                                  )
    
     # Grid size: 
@@ -1716,7 +2420,8 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
     zeros_rf() = zeros(Float64, N_r+1, N_Z)   # For r-interface fluxes 
     zeros_zf() = zeros(Float64, N_r,   N_Z+1) # For Z-interface fluxes 
 
-    # Intensities (latest & old, and stage values for RK2) for all bands: 
+    # Intensities (latest & old) for all bands: 
+    J_IR     = zeros_c();  J_IR_old   = copy(J_IR)
     J_opt    = zeros_c();  J_opt_old  = copy(J_opt)
     J_FUV    = zeros_c();  J_FUV_old  = copy(J_FUV)
     J_LW     = zeros_c();  J_LW_old   = copy(J_LW)
@@ -1725,25 +2430,29 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
     J_EUV3   = zeros_c();  J_EUV3_old = copy(J_EUV3)
 
     # H ≡ ∫dΩ I n̂ / 4π arrays for all bands:
+    H_r_IR         = zeros_c();  H_Z_IR        = zeros_c()
+    H_r_IR_old     = zeros_c();  H_Z_IR_old    = zeros_c()
+
     H_r_opt        = zeros_c();  H_Z_opt       = zeros_c()
     H_r_opt_old    = zeros_c();  H_Z_opt_old   = zeros_c()
 
     H_r_FUV        = zeros_c();  H_Z_FUV       = zeros_c()
     H_r_FUV_old    = zeros_c();  H_Z_FUV_old   = zeros_c()
 
-    H_r_LW         = zeros_c();  H_Z_LW       = zeros_c()
-    H_r_LW_old     = zeros_c();  H_Z_LW_old   = zeros_c()
+    H_r_LW         = zeros_c();  H_Z_LW        = zeros_c()
+    H_r_LW_old     = zeros_c();  H_Z_LW_old    = zeros_c()
 
-    H_r_EUV1       = zeros_c();  H_Z_EUV1       = zeros_c()
-    H_r_EUV1_old   = zeros_c();  H_Z_EUV1_old   = zeros_c()
+    H_r_EUV1       = zeros_c();  H_Z_EUV1      = zeros_c()
+    H_r_EUV1_old   = zeros_c();  H_Z_EUV1_old  = zeros_c()
 
-    H_r_EUV2       = zeros_c();  H_Z_EUV2       = zeros_c()
-    H_r_EUV2_old   = zeros_c();  H_Z_EUV2_old   = zeros_c()
+    H_r_EUV2       = zeros_c();  H_Z_EUV2      = zeros_c()
+    H_r_EUV2_old   = zeros_c();  H_Z_EUV2_old  = zeros_c()
 
-    H_r_EUV3       = zeros_c();  H_Z_EUV3     = zeros_c()
-    H_r_EUV3_old   = zeros_c();  H_Z_EUV3_old = zeros_c()
+    H_r_EUV3       = zeros_c();  H_Z_EUV3      = zeros_c()
+    H_r_EUV3_old   = zeros_c();  H_Z_EUV3_old  = zeros_c()
 
     # Eddington tensor components for all bands:
+    D_rr_IR   = fill(1/3, N_r, N_Z);  D_ZZ_IR   = fill(1/3, N_r, N_Z);  D_rZ_IR   = zeros_c()
     D_rr_opt  = fill(1/3, N_r, N_Z);  D_ZZ_opt  = fill(1/3, N_r, N_Z);  D_rZ_opt  = zeros_c()
     D_rr_FUV  = fill(1/3, N_r, N_Z);  D_ZZ_FUV  = fill(1/3, N_r, N_Z);  D_rZ_FUV  = zeros_c()
     D_rr_LW   = fill(1/3, N_r, N_Z);  D_ZZ_LW   = fill(1/3, N_r, N_Z);  D_rZ_LW   = zeros_c()
@@ -1753,12 +2462,19 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
 
     # ϕϕ-component of radiation pressure tensor K = D × J at interfaces, 
     # needed for geometric source term:
+    K_ϕϕ_iphalf_IR   = zeros_c();     K_ϕϕ_imhalf_IR   = zeros_c()
+    K_ϕϕ_iphalf_opt  = zeros_c();     K_ϕϕ_imhalf_opt  = zeros_c()
+    K_ϕϕ_iphalf_FUV  = zeros_c();     K_ϕϕ_imhalf_FUV  = zeros_c()
     K_ϕϕ_iphalf_LW   = zeros_c();     K_ϕϕ_imhalf_LW   = zeros_c()
     K_ϕϕ_iphalf_EUV1 = zeros_c();     K_ϕϕ_imhalf_EUV1 = zeros_c()
     K_ϕϕ_iphalf_EUV2 = zeros_c();     K_ϕϕ_imhalf_EUV2 = zeros_c()
     K_ϕϕ_iphalf_EUV3 = zeros_c();     K_ϕϕ_imhalf_EUV3 = zeros_c()
 
     # Interface fluxes for all bands: 
+    F_r_IR      = zeros_rf(); F_Z_IR      = zeros_zf()
+    F_r_Hr_IR   = zeros_rf(); F_Z_Hr_IR   = zeros_zf()
+    F_r_HZ_IR   = zeros_rf(); F_Z_HZ_IR   = zeros_zf()
+
     F_r_opt     = zeros_rf(); F_Z_opt     = zeros_zf()
     F_r_Hr_opt  = zeros_rf(); F_Z_Hr_opt  = zeros_zf()
     F_r_HZ_opt  = zeros_rf(); F_Z_HZ_opt  = zeros_zf()
@@ -1784,6 +2500,7 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
     F_r_HZ_EUV3 = zeros_rf(); F_Z_HZ_EUV3 = zeros_zf()
 
     # Flux opacities for all bands:
+    α_F_IR        = zeros_c()
     α_F_opt       = zeros_c()
     α_F_FUV       = zeros_c()
     α_F_LW        = zeros_c()
@@ -1792,6 +2509,7 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
     α_F_EUV3      = zeros_c()
 
     # Emissivities for all bands:
+    js_IR         = zeros_c()
     js_opt        = zeros_c()
     js_FUV        = zeros_c()
     js_LW         = zeros_c()
@@ -1808,10 +2526,15 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
     # Arrays for tracking changes in gas momentum from radiation pressure:
     Δρu_stellar_r = zeros_c()
     Δρu_stellar_Z = zeros_c()
-    f_stellar_r   = zeros_c()    # Rad. pressure force per unit volume in r-direction
-    f_stellar_Z   = zeros_c()    # Rad. pressure force per unit volume in Z-direction
+    Δρu_IR_r      = zeros_c()
+    Δρu_IR_Z      = zeros_c()
+    f_stellar_r   = zeros_c()    # Stellar rad. pressure force per unit volume in r-direction
+    f_stellar_Z   = zeros_c()    # Stellar rad. pressure force per unit volume in Z-direction
+    f_IR_r        = zeros_c()    # IR rad. pressure force per unit volume in r-direction
+    f_IR_Z        = zeros_c()    # IR rad. pressure force per unit volume in Z-direction
 
-    # Get stellar luminosities in all bands:
+    # Get luminosities in all bands:
+    Lum_IR        = 0.0                  # Initialize IR luminosity as zero
     Lum_opt       = L_opt(mstarZAMS, Zstar_Zsun)  * Lsun 
     Lum_FUV       = L_FUV(mstarZAMS, Zstar_Zsun)  * Lsun
     Lum_LW        = L_LW(mstarZAMS, Zstar_Zsun)   * Lsun 
@@ -1825,7 +2548,7 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
     dN_dt_LW      = dNdt_LW(mstarZAMS, Zstar_Zsun)
     dN_dt_EUV1    = dNdt_EUV1(mstarZAMS, Zstar_Zsun)
     dN_dt_EUV2    = dNdt_EUV2(mstarZAMS, Zstar_Zsun)
-    dN_dt_EUV3    = dNdt_EUV2(mstarZAMS, Zstar_Zsun)
+    dN_dt_EUV3    = dNdt_EUV3(mstarZAMS, Zstar_Zsun)
     dN_dt_LyC     = dN_dt_EUV1 + dN_dt_EUV2 + dN_dt_EUV3
     
     # Compute weight factors f_ij that determine the emissivity 
@@ -1847,6 +2570,17 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
         end
     end
 
+    # Get stellar luminosities in actual simulated volume (will be 0.5 * L for 
+    # reflective BCs, but we compute it explicitly here to be sure):
+    fstar_ij_sum = sum( fstar_ij )
+    Lum_opt_vol  = Lum_opt  * fstar_ij_sum
+    Lum_FUV_vol  = Lum_FUV  * fstar_ij_sum
+    Lum_LW_vol   = Lum_LW   * fstar_ij_sum
+    Lum_EUV1_vol = Lum_EUV1 * fstar_ij_sum
+    Lum_EUV2_vol = Lum_EUV2 * fstar_ij_sum
+    Lum_EUV3_vol = Lum_EUV3 * fstar_ij_sum
+
+
     # Get the stellar mass density in a given cell (i,j), weighted 
     # so that the total stellar mass over all (infinite) space is 
     # mstarZAMS:
@@ -1863,16 +2597,28 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
     f_esc_LyC = 0.0
     f_esc_LW  = 0.0 
 
+    # Initialize direct radiation pressure 'force multipliers':
+    M_F_dir             = 0.0
+    M_F_dir_antigravity = 0.0
+
+    # Initialize IR radiation pressure force multipliers:
+    M_F_IR              = 0.0
+    M_F_IR_antigravity  = 0.0
+
 
     return StellarRTArrays( 
         c̃,
 
-        J_opt, J_opt_old,  
-        J_FUV, J_FUV_old,  
-        J_LW, J_LW_old,     
+        J_IR,   J_IR_old,  
+        J_opt,  J_opt_old,  
+        J_FUV,  J_FUV_old,  
+        J_LW,   J_LW_old,     
         J_EUV1, J_EUV1_old, 
         J_EUV2, J_EUV2_old,  
         J_EUV3, J_EUV3_old, 
+
+        H_r_IR,         H_Z_IR, 
+        H_r_IR_old,     H_Z_IR_old,
 
         H_r_opt,        H_Z_opt, 
         H_r_opt_old,    H_Z_opt_old,
@@ -1892,6 +2638,7 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
         H_r_EUV3,       H_Z_EUV3,
         H_r_EUV3_old,   H_Z_EUV3_old,
 
+        D_rr_IR,  D_ZZ_IR, D_rZ_IR, 
         D_rr_opt,  D_ZZ_opt, D_rZ_opt, 
         D_rr_FUV,  D_ZZ_FUV, D_rZ_FUV, 
         D_rr_LW,   D_ZZ_LW, D_rZ_LW,
@@ -1899,11 +2646,15 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
         D_rr_EUV2, D_ZZ_EUV2, D_rZ_EUV2, 
         D_rr_EUV3, D_ZZ_EUV3, D_rZ_EUV3,
 
+        K_ϕϕ_iphalf_IR,   K_ϕϕ_imhalf_IR,
+        K_ϕϕ_iphalf_opt,  K_ϕϕ_imhalf_opt,
+        K_ϕϕ_iphalf_FUV,  K_ϕϕ_imhalf_FUV,
         K_ϕϕ_iphalf_LW,   K_ϕϕ_imhalf_LW,
         K_ϕϕ_iphalf_EUV1, K_ϕϕ_imhalf_EUV1,
         K_ϕϕ_iphalf_EUV2, K_ϕϕ_imhalf_EUV2,
         K_ϕϕ_iphalf_EUV3, K_ϕϕ_imhalf_EUV3,
 
+        F_r_IR,   F_Z_IR,   F_r_Hr_IR,   F_Z_Hr_IR,   F_r_HZ_IR,   F_Z_HZ_IR,
         F_r_opt,  F_Z_opt,  F_r_Hr_opt,  F_Z_Hr_opt,  F_r_HZ_opt,  F_Z_HZ_opt,
         F_r_FUV,  F_Z_FUV,  F_r_Hr_FUV,  F_Z_Hr_FUV,  F_r_HZ_FUV,  F_Z_HZ_FUV,
         F_r_LW,   F_Z_LW,   F_r_Hr_LW,   F_Z_Hr_LW,   F_r_HZ_LW,   F_Z_HZ_LW,
@@ -1911,20 +2662,30 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
         F_r_EUV2, F_Z_EUV2, F_r_Hr_EUV2, F_Z_Hr_EUV2, F_r_HZ_EUV2, F_Z_HZ_EUV2,
         F_r_EUV3, F_Z_EUV3, F_r_Hr_EUV3, F_Z_Hr_EUV3, F_r_HZ_EUV3, F_Z_HZ_EUV3,
 
-        α_F_opt, α_F_FUV, α_F_LW, α_F_EUV1, α_F_EUV2, α_F_EUV3,
+        α_F_IR, α_F_opt, α_F_FUV, α_F_LW, α_F_EUV1, α_F_EUV2, α_F_EUV3,
 
-        Lum_opt, Lum_FUV, Lum_LW, Lum_EUV1, Lum_EUV2, Lum_EUV3,
+        Lum_IR, Lum_opt, Lum_FUV, Lum_LW, Lum_EUV1, Lum_EUV2, Lum_EUV3,
+
+        Lum_opt_vol, Lum_FUV_vol, Lum_LW_vol, Lum_EUV1_vol, Lum_EUV2_vol, Lum_EUV3_vol,
 
         dN_dt_opt, dN_dt_FUV, dN_dt_LW, dN_dt_EUV1, dN_dt_EUV2, dN_dt_EUV3, dN_dt_LyC,
 
-        js_opt, js_FUV, js_LW, js_EUV1, js_EUV2, js_EUV3, ρ_star,
+        js_IR, js_opt, js_FUV, js_LW, js_EUV1, js_EUV2, js_EUV3, ρ_star,
 
         Δρu_stellar_r, Δρu_stellar_Z, 
+        Δρu_IR_r,      Δρu_IR_Z, 
         f_stellar_r,   f_stellar_Z,
+        f_IR_r,        f_IR_Z,
 
         rfirst_StellarRT, 
 
-        f_esc_LyC, f_esc_LW
+        f_esc_LyC, f_esc_LW,
+
+        M_F_dir, M_F_dir_antigravity,
+
+        M_F_IR, M_F_IR_antigravity,
+
+        OTS
     )
 
 end

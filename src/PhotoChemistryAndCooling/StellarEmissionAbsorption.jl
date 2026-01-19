@@ -4,7 +4,8 @@
 
     PURPOSE:    Contains everything related to stellar emission, 
                 i.e. photon emission rates and luminosities in different bands
-                for stars of different mass. 
+                for stars of different mass. The band energies can be found in 
+                ConstantsAndFunctions.jl.
 
     REFERENCES: The emission rates and mean stellar photon energies are taken
                 from the following references, assuming Solar metallicity:
@@ -35,17 +36,6 @@ export dNdt_opt, L_opt, dNdt_FUV, L_FUV, dNdt_LW, L_LW,
        IonRate_HI, IonRate_H2, IonRate_HeI, IonRate_HeII, IonRate_OI, IonRate_CI,
        PhotoDissRate_H2, PhotoDetachRate_Hminus, PhotoDissRate_HD, PhotoDissRate_CO,
        PhotoDissRate_OHₓ, PhotoDissRate_CHₓ, StromGrenRadius
-
-# Average stellar photon energy in each band (see ref. 2):
-
-const E_opt      = 3.67  * eV       # 1-5.8 eV band (optical)
-const E_FUV      = 8.45  * eV       # 5.8-11.2 eV band (FUV)
-const E_LW       = 12.26 * eV       # 11.2-13.6 eV band (Lyman-Werner)
-const E_EUV1     = 18.01 * eV       # 13.6-24.6 eV band (H I ionizing)
-const E_EUV2     = 29.89 * eV       # 24.6-54.4 eV band (He I ionizing)
-const E_EUV3     = 56.85 * eV       # 54.4-∞ eV band (He II ionizing) 
-
-export E_opt, E_FUV, E_LW, E_EUV1, E_EUV2, E_EUV3
 
 # Average stellar radiation pressure-weighted photon energy (erg): 
 # p = ( ∫dν 4πJσ ) / ( ∫dν 4πJσ/hν ) ,
@@ -110,12 +100,28 @@ const σHminus_EUV3 = 0.092e-18
 const σCI_EUV3     = 1.61e-18
 const σOI_EUV3     = 4.73e-18
 
+# Radiation pressure/flux-weighted cross-sections, which differ slightly from photon 
+# number-weighted cross-sections:
+const σHI_EUV1_F   = σHI_EUV1 * pHI_EUV1 / E_EUV1
+const σH2_EUV1_F   = σH2_EUV1 * pH2_EUV1 / E_EUV1
+
+const σHI_EUV2_F   = σHI_EUV2  * pHI_EUV2 / E_EUV2 
+const σH2_EUV2_F   = σH2_EUV2  * pH2_EUV2 / E_EUV2 
+const σHeI_EUV2_F  = σHeI_EUV2 * pHeI_EUV2 / E_EUV2 
+
+const σHI_EUV3_F   = σHI_EUV3   * pHI_EUV3   / E_EUV3 
+const σH2_EUV3_F   = σH2_EUV3   * pH2_EUV3   / E_EUV3 
+const σHeI_EUV3_F  = σHeI_EUV3  * pHeI_EUV3  / E_EUV3 
+const σHeII_EUV3_F = σHeII_EUV3 * pHeII_EUV3 / E_EUV3
+
 export σHminus_opt, σCH_opt,
        σHminus_FUV, σOH_FUV, σCH_FUV,
        σHI_LW, σH2_LW, σHD_LW, σHminus_LW, σCI_LW, σOH_LW, σCH_LW, σCO_LW,
        σHI_EUV1, σH2_EUV1, σHminus_EUV1, σCI_EUV1, σOI_EUV1,
        σHI_EUV2, σH2_EUV2, σHeI_EUV2, σHminus_EUV2, σCI_EUV2, σOI_EUV2,
-       σHI_EUV3, σH2_EUV3, σHeI_EUV3, σHeII_EUV3, σHminus_EUV3, σCI_EUV3, σOI_EUV3
+       σHI_EUV3, σH2_EUV3, σHeI_EUV3, σHeII_EUV3, σHminus_EUV3, σCI_EUV3, σOI_EUV3,
+       σHI_EUV1_F, σH2_EUV1_F,  σHI_EUV2_F, σH2_EUV2_F, σHeI_EUV2_F,  
+       σHI_EUV3_F, σH2_EUV3_F, σHeI_EUV3_F, σHeII_EUV3_F
 
 # Mean photo-heating energy (erg) in each band:
 
@@ -587,7 +593,7 @@ const Crad::Float64 = 2e-7  # Typical radiative de-excitation rate for H₂ (see
     E_H2_pump  = 2 * eV * Cdex / (Cdex + Crad)
 
     # Heating from vibrational excitation (but not photodissociation) of H₂:
-    HeatingRate_PumpH2  = ( Four_π * J_LW / E_LW) * nH2 * σH2_LW_pump * E_H2_pump
+    HeatingRate_PumpH2  = ( Four_π * J_LW * inv_E_LW) * nH2 * σH2_LW_pump * E_H2_pump
 
     return HeatingRate_PhotoDissH2 + HeatingRate_PumpH2
 end
@@ -600,7 +606,7 @@ end
                                       nH2::Float64 
                                   )
 
-    ( Four_π * J_EUV1 / E_EUV1) * ( nHI * σHI_EUV1 * hHI_EUV1  +  nH2 * σH2_EUV1 * hH2_EUV1 )
+    ( Four_π * J_EUV1 * inv_E_EUV1) * ( nHI * σHI_EUV1 * hHI_EUV1  +  nH2 * σH2_EUV1 * hH2_EUV1 )
 end
 
 
@@ -612,7 +618,7 @@ end
                                      nHeI::Float64
                                   )
 
-    ( Four_π * J_EUV2 / E_EUV2) * ( 
+    ( Four_π * J_EUV2 * inv_E_EUV2) * ( 
     nHI * σHI_EUV2 * hHI_EUV2  +  nH2 * σH2_EUV2 * hH2_EUV2  +  nHeI * σHeI_EUV2 * hHeI_EUV2 )
 end
 
@@ -626,7 +632,7 @@ end
                                     nHeII::Float64
                                   )
 
-    ( Four_π * J_EUV3 / E_EUV3) * ( 
+    ( Four_π * J_EUV3 * inv_E_EUV3) * ( 
         nHI * σHI_EUV3 * hHI_EUV3  +  nH2 * σH2_EUV3 * hH2_EUV3  
     +  nHeI * σHeI_EUV3 * hHeI_EUV3  + nHeII * σHeII_EUV3 * hHeII_EUV3 )
 end
@@ -706,14 +712,14 @@ end
 """ H₂ photodissociation rate (s⁻¹) 
     from absorptions of stellar Lyman-Werner photons. """
 @inline function PhotoDissRate_H2( J_LW::Float64 )
-    Four_π * J_LW * σH2_LW_diss / E_LW
+    Four_π * J_LW * σH2_LW_diss * inv_E_LW
 end
 
 
 """ CO photodissociation rate (s⁻¹) 
     from absorptions of stellar Lyman-Werner photons. """
 @inline function PhotoDissRate_CO( J_LW::Float64 )
-    Four_π * J_LW * σCO_LW / E_LW
+    Four_π * J_LW * σCO_LW * inv_E_LW
 end
 
 
@@ -722,7 +728,7 @@ end
 @inline function PhotoDissRate_OHₓ( J_FUV::Float64, 
                                      J_LW::Float64
                                       )
-    Four_π * ( J_FUV * σOH_FUV / E_FUV  +  J_LW * σOH_LW / E_LW )
+    Four_π * ( J_FUV * σOH_FUV * inv_E_FUV  +  J_LW * σOH_LW * inv_E_LW )
 end
 
 
@@ -732,7 +738,7 @@ end
                                     J_FUV::Float64, 
                                      J_LW::Float64
                                     )
-    Four_π * ( J_opt * σCH_opt / E_opt +  J_FUV * σCH_FUV / E_FUV  +  J_LW * σCH_LW / E_LW )
+    Four_π * ( J_opt * σCH_opt * inv_E_opt +  J_FUV * σCH_FUV * inv_E_FUV  +  J_LW * σCH_LW * inv_E_LW )
 end
 
 
@@ -746,19 +752,19 @@ end
                                         J_EUV3::Float64
                                        )
 
-    Four_π * ( J_opt  * σHminus_opt  / E_opt  
-             + J_FUV  * σHminus_FUV  / E_FUV  
-             + J_LW   * σHminus_LW   / E_LW
-             + J_EUV1 * σHminus_EUV1 / E_EUV1 
-             + J_EUV2 * σHminus_EUV2 / E_EUV2  
-             + J_EUV3 * σHminus_EUV3 / E_EUV3 )
+    Four_π * ( J_opt  * σHminus_opt  * inv_E_opt  
+             + J_FUV  * σHminus_FUV  * inv_E_FUV  
+             + J_LW   * σHminus_LW   * inv_E_LW
+             + J_EUV1 * σHminus_EUV1 * inv_E_EUV1 
+             + J_EUV2 * σHminus_EUV2 * inv_E_EUV2  
+             + J_EUV3 * σHminus_EUV3 * inv_E_EUV3 )
 end
 
 
 """ HD photodissociation rate (s⁻¹) 
     from absorptions of stellar Lyman-Werner photons. """
 @inline function PhotoDissRate_HD( J_LW::Float64 )
-    Four_π * J_LW * σHD_LW / E_LW
+    Four_π * J_LW * σHD_LW * inv_E_LW
 end
 
 
@@ -768,9 +774,9 @@ end
                              J_EUV2::Float64,
                              J_EUV3::Float64
                               )
-    Four_π * ( J_EUV1 * σH2_EUV1 / E_EUV1 
-             + J_EUV2 * σH2_EUV2 / E_EUV2 
-             + J_EUV3 * σH2_EUV3 / E_EUV3  )
+    Four_π * ( J_EUV1 * σH2_EUV1 * inv_E_EUV1 
+             + J_EUV2 * σH2_EUV2 * inv_E_EUV2 
+             + J_EUV3 * σH2_EUV3 * inv_E_EUV3  )
 end
 
 
@@ -780,9 +786,9 @@ end
                              J_EUV2::Float64,
                              J_EUV3::Float64
                              )
-    Four_π * ( J_EUV1 * σHI_EUV1 / E_EUV1 
-             + J_EUV2 * σHI_EUV2 / E_EUV2 
-             + J_EUV3 * σHI_EUV3 / E_EUV3  )
+    Four_π * ( J_EUV1 * σHI_EUV1 * inv_E_EUV1 
+             + J_EUV2 * σHI_EUV2 * inv_E_EUV2 
+             + J_EUV3 * σHI_EUV3 * inv_E_EUV3  )
 end
 
 
@@ -791,15 +797,15 @@ end
 @inline function IonRate_HeI( J_EUV2::Float64,
                               J_EUV3::Float64
                              )
-    Four_π * ( J_EUV2 * σHeI_EUV2 / E_EUV2 
-             + J_EUV3 * σHeI_EUV3 / E_EUV3  )
+    Four_π * ( J_EUV2 * σHeI_EUV2 * inv_E_EUV2 
+             + J_EUV3 * σHeI_EUV3 * inv_E_EUV3  )
 end
 
 
 """ He II photoionization rate (s⁻¹) from absorptions of
     ionizing stellar photons. """
 @inline function IonRate_HeII( J_EUV3::Float64 )
-    Four_π * J_EUV3 * σHeII_EUV3 / E_EUV3 
+    Four_π * J_EUV3 * σHeII_EUV3 * inv_E_EUV3 
 end
 
 
@@ -809,9 +815,9 @@ end
                              J_EUV2::Float64,
                              J_EUV3::Float64
                              )
-    Four_π * ( J_EUV1 * σOI_EUV1 / E_EUV1 
-             + J_EUV2 * σOI_EUV2 / E_EUV2 
-             + J_EUV3 * σOI_EUV3 / E_EUV3  )
+    Four_π * ( J_EUV1 * σOI_EUV1 * inv_E_EUV1 
+             + J_EUV2 * σOI_EUV2 * inv_E_EUV2 
+             + J_EUV3 * σOI_EUV3 * inv_E_EUV3  )
 end
 
 
@@ -822,10 +828,10 @@ end
                            J_EUV2::Float64,
                            J_EUV3::Float64
                              )
-    Four_π * ( J_LW   * σCI_LW   / E_LW
-             + J_EUV1 * σCI_EUV1 / E_EUV1 
-             + J_EUV2 * σCI_EUV2 / E_EUV2 
-             + J_EUV3 * σCI_EUV3 / E_EUV3  )
+    Four_π * ( J_LW   * σCI_LW   * inv_E_LW
+             + J_EUV1 * σCI_EUV1 * inv_E_EUV1 
+             + J_EUV2 * σCI_EUV2 * inv_E_EUV2 
+             + J_EUV3 * σCI_EUV3 * inv_E_EUV3  )
 end
 
 
@@ -837,7 +843,7 @@ end
                                   CaseB::Bool    = true,
                              Zstar_Zsun::Float64 = 1.0
                                  )
-    dNdt_LyC = dNdt_EUV1(mstar, Zstar_Zsun) + 0.0*dNdt_EUV2(mstar, Zstar_Zsun) + 0.0*dNdt_EUV3(mstar, Zstar_Zsun)
+    dNdt_LyC = dNdt_EUV1(mstar, Zstar_Zsun) + dNdt_EUV2(mstar, Zstar_Zsun) + dNdt_EUV3(mstar, Zstar_Zsun)
     
     return ( 3 * dNdt_LyC / (Four_π * krecHII(T, CaseB) * (nH^2)) )^(1/3)
 end

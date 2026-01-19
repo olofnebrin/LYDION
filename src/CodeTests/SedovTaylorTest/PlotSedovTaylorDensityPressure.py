@@ -6,7 +6,7 @@ from matplotlib.ticker import AutoMinorLocator
 
 # ---------------- User inputs ----------------
 script_dir = os.path.dirname(os.path.abspath(__file__))
-filename   = os.path.join(script_dir, "SedovTest_E1.00e+00_rho1_gamma1.67_t0.4_128x128.h5")
+filename   = os.path.join(script_dir, "SedovTest_E1.00e+00_rho1_gamma1.67_t0.4_256x256.h5")
 analytic_file = os.path.join(script_dir, "SedovTaylorAnalytical_E1.0_rho1.0_t0.4_gamma53.txt")
 
 Axis        = "r"   # choose "r" or "Z" for profile direction

@@ -3,7 +3,7 @@
 
     PURPOSE:    Contains everything related to gas photochemistry,
                 involving e⁻, H I, H II, H₂, D I, D II, HD, He I, He II, He III,
-                C I, C II, CO, O I, and O II.
+                C I, C II, CO, O I, O II, and O III.
 
     REFERENCES: The rates below come from several sources (most of them summarized 
                 in the first few papers below):
@@ -40,63 +40,131 @@
 
 using .ConstantsAndFunctions  # Needed constants 
 
-export krecHII, krecHeII, krecHeIII, kcollion_HI, kcollion_HeI, kcollion_HeII,
+export krecHII_1, krecHII, krecHeII_1, krecHeII, krecHeIII_1, krecHeIII, 
+       kcollion_HI, kcollion_HeI, kcollion_HeII,
        kdust_H2, kGP_H2, k3B_H2, kdiss_H2HI, kdiss_H2H2, kdiss_H2e, kdiss_H2HII,
        k50_D, k51_D, k52_D, k53_D, k54_D, k55_D, kCIe, kOIe, kCIIe, kOIIe, kCIIH2_1,
        kCIIH2_2, kHIIOI, kOIIHI, kOIIH2_1, kOIIH2_2, kCHxOI, kCHxHI, kOHxCI, kOHxOI,
        kCIH3plus, kOIH3plus, kH3pluse
 
 
-""" The H II (Case-B or Case-A) recombination rate (cm³ s⁻¹) as a function of temperature T (K).
-    See ref. (1). """
-function krecHII( T::Float64, 
-              CaseB::Bool = true
-                 )
-    λHI = 315614.0 / clamp( T, 1.0, 1e9 ) 
-    if CaseB 
-        # Case-B:
-        krecHII_B = 2.753e-14 * (λHI^1.5) / ( 1 + (λHI/2.74)^0.407 )^2.242
-        return krecHII_B
+""" The H II Case A recombination rate (cm³ s⁻¹) as a function of temperature T (K).
+    See ref. (1). """       
+@inline function krecHII_A( T::Float64 )
+    λHI       = 315614.0 / clamp( T, 1.0, 1e9 ) 
+    krecHII_A = 1.269e-13 * (λHI^1.503) / ( 1 + (λHI/0.522)^0.47 )^1.923
+    return krecHII_A
+end
+
+
+""" The H II Case B recombination rate (cm³ s⁻¹) as a function of temperature T (K).
+    See ref. (1). """       
+@inline function krecHII_B( T::Float64 )
+    λHI       = 315614.0 / clamp( T, 1.0, 1e9 ) 
+    krecHII_B = 2.753e-14 * (λHI^1.5) / ( 1 + (λHI/2.74)^0.407 )^2.242
+    return krecHII_B
+end
+
+
+""" The H II LyC → ground state recombination rate (cm³ s⁻¹) as a function of temperature T (K).
+    Useful if EUV1 recombination radiation is modelled. """       
+@inline function krecHII_1( T::Float64 )
+    return max( krecHII_A(T) - krecHII_B(T), 0.0 )
+end
+
+
+""" The H II recombination rate (cm³ s⁻¹) as a function of temperature T (K).
+    Returns the Case B coefficient if on-the-spot approximation is used, 
+    and the Case A rate otherwise. """
+@inline function krecHII( T::Float64, 
+                        OTS::Bool = true
+                         )
+    if OTS  
+        # Case-B if on-the-spot (OTS) approximation is used:
+        return krecHII_B(T)
     else
-        # Case-A:
-        krecHII_A = 1.269e-13 * (λHI^1.503) / ( 1 + (λHI/0.522)^0.47 )^1.923
-        return krecHII_A 
+        # Otherwise Case-A:
+        return krecHII_A(T)
     end
+end
+
+
+""" The He II Case A recombination rate (cm³ s⁻¹) as a function of temperature T (K).
+    See ref. (1). """       
+@inline function krecHeII_A( T::Float64 )
+    λHeI       = 570670.0 / clamp( T, 1.0, 1e9 ) 
+    krecHeII_A = 3e-14 * (λHeI^0.654)
+    return krecHeII_A
+end
+
+
+""" The He II Case B recombination rate (cm³ s⁻¹) as a function of temperature T (K).
+    See ref. (1). """       
+@inline function krecHeII_B( T::Float64 )
+    λHeI       = 570670.0 / clamp( T, 1.0, 1e9 ) 
+    krecHeII_B = 1.26e-14 * (λHeI^0.75)
+    return krecHeII_B
+end
+
+
+""" The He II continuum → ground state recombination rate (cm³ s⁻¹) as a function of temperature T (K).
+    Useful if EUV2 recombination radiation is modelled. """       
+@inline function krecHeII_1( T::Float64 )
+    return max( krecHeII_A(T) - krecHeII_B(T), 0.0 )
 end
 
 
 """ The He II (Case-B or Case-A) recombination rate (cm³ s⁻¹) as a function of temperature T (K).
     See ref. (1). """
-function krecHeII( T::Float64, 
-               CaseB::Bool = true
-                  )
-    λHeI = 570670.0 / clamp( T, 1.0, 1e9 ) 
-    if CaseB
-        # Case-B:
-        krecHeII_B = 1.26e-14 * (λHeI^0.75) 
-        return krecHeII_B
+@inline function krecHeII( T::Float64, 
+                         OTS::Bool = true
+                          )
+    if OTS
+        # Case-B if on-the-spot (OTS) approximation is used:
+        return krecHeII_B(T)
     else
         # Case-A:
-        krecHeII_A = 3e-14 * (λHeI^0.654)
-        return krecHeII_A
+        return krecHeII_A(T)
     end
+end
+
+
+""" The He III Case A recombination rate (cm³ s⁻¹) as a function of temperature T (K).
+    See ref. (1). """       
+@inline function krecHeIII_A( T::Float64 )
+    λHeII       = 1263030.0 / clamp( T, 1.0, 1e9 )  
+    krecHeIII_A = 2.538e-13 * (λHeII^1.503) / (1 + (λHeII/0.522)^0.47)^1.923
+    return krecHeIII_A
+end
+
+
+""" The He III Case B recombination rate (cm³ s⁻¹) as a function of temperature T (K).
+    See ref. (1). """       
+@inline function krecHeIII_B( T::Float64 )
+    λHeII       = 1263030.0 / clamp( T, 1.0, 1e9 )  
+    krecHeIII_B = 5.506e-14 * (λHeII^1.5) / (1 + (λHeII/2.74)^0.407 )^2.242 
+    return krecHeIII_B
+end
+
+
+""" The He III continuum → ground state recombination rate (cm³ s⁻¹) as a function of temperature T (K).
+    Useful if EUV3 recombination radiation is modelled. """       
+@inline function krecHeIII_1( T::Float64 )
+    return max( krecHeIII_A(T) - krecHeIII_B(T), 0.0 )
 end
 
 
 """ The He III (Case-B or Case-A) recombination rate (cm³ s⁻¹) as a function of temperature T (K).
     See ref. (1). """
-function krecHeIII( T::Float64, 
-                CaseB::Bool = true
-                )
-    λHeII = 1263030.0 / clamp( T, 1.0, 1e9 ) 
-    if CaseB 
-        # Case-B:
-        krecHeIII_B = 5.506e-14 * (λHeII^1.5) / (1 + (λHeII/2.74)^0.407 )^2.242 
-        return krecHeIII_B
+@inline function krecHeIII( T::Float64, 
+                          OTS::Bool = true
+                           )
+    if OTS 
+        # Case-B if on-the-spot (OTS) approximation is used:
+        return krecHeIII_B(T)
     else
         # Case-A:
-        krecHeIII_A = 2.538e-13 * (λHeII^1.503) / (1 + (λHeII/0.522)^0.47)^1.923
-        return krecHeIII_A
+        return krecHeIII_A(T)
     end
 end
 
@@ -137,49 +205,34 @@ end
 
 const Tdust_crit_H2::Float64 = 600.0
 
-""" The H₂ formation efficiency (assumed equal to sticking coefficient). 
-    From Hollenbach & Mckee (1979). """
-@inline function S_H( T::Float64, Tdust::Float64 )
+""" The H₂ formation efficiency (assumed equal to sticking coefficient),
+    as a function of the gas temperature T (K) and dust temperature Td (K). 
+    From Hollenbach & McKee (1979). """
+@inline function S_H( T::Float64, Td::Float64 )
 
     # Formation efficiency:
-    S_H     =  1 / ( ( 1  +  0.04 * (T + Tdust)^0.5  +  0.002 * T  +  8e-6 * (T^2) ) 
-                   * ( 1  +  1e4 * exp( - Tdust_crit_H2 / Tdust ) ) )
+    S_H     =  1 / ( ( 1  +  0.04 * (T + Td)^0.5  +  0.002 * T  +  8e-6 * (T^2) ) 
+                   * ( 1  +  1e4 * exp( - Tdust_crit_H2 / Td ) ) )
 
     return S_H
 end
 
 
-const Nbin::Int64 = 7
-const dNbin       = 1:Nbin
+const inv_DGnorm_kdust_H2::Float64 = 100.0 # Dust-to-gas ratio is normalized by 0.01 in the rate
 
 """ The H₂ formation rate on dust (cm³ s⁻¹) as a function of
-    temperature T (K), the dust bin densities (for silicates & graphites),
-    their dust temperatures (K), grain size etc. See e.g. Draine (2011). """
+    temperature T (K). See e.g. Hollenbach & McKee (1979) 
+    and Hopkins et al. (2023). """
 function kdust_H2( T::Float64, 
-              ρd_Sil::Union{AbstractVector{<:Float64}, NTuple{Nbin,Float64}},  # Silicate dust densities (can use either array or tuple as input)
-                ρd_C::Union{AbstractVector{<:Float64}, NTuple{Nbin,Float64}},  # Graphite dust densities              
-     T_dust_bins_Sil::AbstractVector{Float64},  # Array of silicate dust temperatures (one per grain size bin)
-       T_dust_bins_C::AbstractVector{Float64},  # Array of silicate dust temperatures (one per grain size bin)
-            agr_bins::AbstractVector{Float64},  # Array of grain sizes
-             ρgr_Sil::Float64,                  # Density of a single silicate grain 
-               ρgr_C::Float64                   # Density of a single graphite grain
+                  DG::Float64,
+                  Td::Float64 = 30.0
                   )
 
-    T = clamp( T, 1.0, 1e5 )  # Clamp the temperature 
+    # Clamp temperature (just for numerical reasons):
+    T        = clamp( T, 0.0, 1e9 )  
 
-    kdust_H2 = 0.0            # Initialize the rate 
-    for Bin in dNbin
-        @inbounds begin 
-            # The contribution to ⟨ngr π agr²⟩ = (3/4) (ρd/ρgr) (1/agr), 
-            # from this specific grain size bin:
-            Stuff_Sil = (3/4) * (ρd_Sil[Bin] / ρgr_Sil) * 1 / (agr_bins[Bin] * μm)
-            Stuff_C   = (3/4) * (ρd_C[Bin]   / ρgr_C)   * 1 / (agr_bins[Bin] * μm)
-            
-            # Contribution to the H₂ formation rate from this bin:
-            kdust_H2 += ( (1/2) * Stuff_Sil * sqrt( 8 * kB * T / (π * mH) ) * S_H(T, T_dust_bins_Sil[Bin])
-                        + (1/2) * Stuff_C   * sqrt( 8 * kB * T / (π * mH) ) * S_H(T, T_dust_bins_C[Bin]) )
-        end
-    end
+    # H₂ formation rate on dust :
+    kdust_H2 = 3e-18 * (DG * inv_DGnorm_kdust_H2) * sqrt(T) * S_H( T, Td )
 
     return kdust_H2
 end
@@ -586,16 +639,20 @@ const KCIH3plus0  = 1.04e-9; const p_CIH3plus  = 0.00231
 
 """ CHₓ formation rate/C I destruction rate (cm³ s⁻¹):
     C + H₃⁺ → CHₓ + H₂ 
-    See Gong et al. (2017). """
+    See Gong et al. (2017). 
+    
+    NOTE: Gong+ made an erratum in 2018 where they noted 
+    that the exponent should be T^(-1.5) instead of T^(+1.5) as in their 2017 paper.
+    This correction is included here. """
 @inline function kCIH3plus( T::Float64 )
     T    = clamp( T, 1.0, 1e5 )
     T300 = T / 300.0
 
     KCIH3plus = (  KCIH3plus0 * (T300^p_CIH3plus) 
-                + (T^1.5) * ( c1_CIH3plus * exp( - T1_CIH3plus / T ) 
-                            + c2_CIH3plus * exp( - T2_CIH3plus / T )
-                            + c3_CIH3plus * exp( - T3_CIH3plus / T )
-                            + c4_CIH3plus * exp( - T4_CIH3plus / T )) )
+                + (T^(-1.5)) * ( c1_CIH3plus * exp( - T1_CIH3plus / T ) 
+                               + c2_CIH3plus * exp( - T2_CIH3plus / T )
+                               + c3_CIH3plus * exp( - T3_CIH3plus / T )
+                               + c4_CIH3plus * exp( - T4_CIH3plus / T )) )
 
     return KCIH3plus 
 end
@@ -674,7 +731,7 @@ end
     B = 5.3e-6 * T^(-0.5) * ne
     r = A / ( A + B )  # A branching ratio
 
-    if ne > 0.0 || nH2 > 0.0
+    if nH2 > 0.0
         return 1.6e-9 * r
     else
         # Return 0.0 to avoid undefined values:
@@ -694,7 +751,12 @@ end
     A = 6e-10 * nH2
     B = 5.3e-6 * T^(-0.5) * ne
     r = A / ( A + B )  # A branching ratio
-    return 1.6e-9 * (1 - r)
+    if nH2 > 0.0
+        return 1.6e-9 * max( (1 - r), 0.0 )
+    else
+        # If there is no H₂ the overall rate is zero:
+        return 0.0
+    end
 end
 
 

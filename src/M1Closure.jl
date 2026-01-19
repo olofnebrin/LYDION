@@ -6,14 +6,15 @@
 
 """
 
-using Base.Threads      # For CPU acceleration
+using .ConstantsAndFunctions  # For constants like OneThird = 1/3
+using Base.Threads            # For CPU acceleration
 
 # Export functions:
 export Compute_D_Edd, Update_D_Edd!, Update_D_Edd_Serial!, Update_D_Edd_Threaded!,
        M1WaveSpeeds_r, M1WaveSpeeds_Z
 
 # Export constants:
-export OneThird, fmin, fmax, Jeps, Heps
+export fmin, fmax, Jeps, Heps
 
 
 const DEBUG_M1Closure = false
@@ -28,8 +29,7 @@ const DEBUG_M1Closure = false
     return χ
 end
 
-
-const OneThird::Float64     = 1 / 3        # For isotropic limit, often used  
+ 
 const fmin::Float64         = 1e-15      
 const fmax::Float64         = 1.0 - 1e-15  # To avoid rounding errors from calculation of χ 
 const Jeps::Float64         = 1e-60

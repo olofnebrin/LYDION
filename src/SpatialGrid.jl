@@ -596,13 +596,14 @@ function SetupCylindricalGrid( rmax::T,     rmax_lin::T,
     Get_WENO3_w_plus_w_minus_r!( r, w_plus_i_p1, w_minus_i_p1 )
     Get_WENO3_w_plus_w_minus_Z!( Z, w_plus_j_p1, w_minus_j_p1 )
 
-    #println( w_plus_j_p1[1:3], w_minus_j_p1[1:3])
-    #println(r[2])
-
     # Get 1 / ΔV:
-    inv_ΔV    .= T(1.0) ./ ΔV
+    inv_ΔV  .= T(1.0) ./ ΔV
+
+    # Get simulation box volume:
+    Vsim     = T( sum( ΔV ) )
 
     return GeometryCylindrical{T}( Val(:Cylindrical), r, Z, rCoM, ZCoM, ΔV, inv_ΔV, A_r, A_Z, inv_r_cell, 
+                                   Vsim,
                                    w_i_m1_r, w_i_0_r, w_i_p1_r, w_j_m1_Z, w_j_0_Z, w_j_p1_Z,
                                    q_i_m1_r, q_i_0_r, q_i_p1_r, q_j_m1_Z, q_j_0_Z, q_j_p1_Z,
                                    w_plus_i_p1, w_minus_i_p1, 
@@ -684,9 +685,13 @@ function SetupCylindricalGrid_FromSaved( r::AbstractArray{T}, rCoM::AbstractArra
     Get_WENO3_w_plus_w_minus_Z!( Z, w_plus_j_p1, w_minus_j_p1 )
 
     # Get 1 / ΔV:
-    inv_ΔV    .= T(1.0) ./ ΔV
+    inv_ΔV  .= T(1.0) ./ ΔV
+
+    # Get simulation box volume:
+    Vsim     = T( sum( ΔV ) )
 
     return GeometryCylindrical{T}( Val(:Cylindrical), r, Z, rCoM, ZCoM, ΔV, inv_ΔV, A_r, A_Z, inv_r_cell, 
+                                   Vsim,
                                    w_i_m1_r, w_i_0_r, w_i_p1_r, w_j_m1_Z, w_j_0_Z, w_j_p1_Z,
                                    q_i_m1_r, q_i_0_r, q_i_p1_r, q_j_m1_Z, q_j_0_Z, q_j_p1_Z,
                                    w_plus_i_p1, w_minus_i_p1, 
@@ -1086,9 +1091,13 @@ function SetupCartesianGrid( Xmax::T,     Xmax_lin::T,
     Get_WENO3_w_plus_w_minus_Z!( Y, w_plus_j_p1, w_minus_j_p1 )
 
     # Get 1 / ΔV:
-    inv_ΔV    .= T(1.0) ./ ΔV
+    inv_ΔV  .= T(1.0) ./ ΔV
+
+    # Get simulation box volume:
+    Vsim     = T( sum( ΔV ) )
 
     return GeometryCartesian{T}( Val(:Cartesian), X, Y, XCoM, YCoM, ΔV, inv_ΔV, A_X, A_Y, inv_r_cell, 
+                                 Vsim,
                                  w_i_m1_X, w_i_0_X, w_i_p1_X, w_j_m1_Y, w_j_0_Y, w_j_p1_Y,
                                  q_i_m1_X, q_i_0_X, q_i_p1_X, q_j_m1_Y, q_j_0_Y, q_j_p1_Y,
                                  w_plus_i_p1, w_minus_i_p1, 

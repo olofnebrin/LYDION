@@ -68,8 +68,8 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
                         BC_r_right::Symbol  = :Outflow,   # Lyα boundary conditions at outer r-boundary 
                           BC_Z_bot::Symbol  = :Reflect,   # Lyα boundary conditions at lower Z-boundary 
                           BC_Z_top::Symbol  = :Outflow,   # Lyα boundary conditions at upper r-boundary 
-                           N_r_lin::Int     = 64,
-                           N_Z_lin::Int     = 64,
+                           N_r_lin::Int     = 16,
+                           N_Z_lin::Int     = 16,
                          Nminsteps::Int     = 300,
                          Nmaxsteps::Int     = 100000,
                             Nsaved::Int     = 300,

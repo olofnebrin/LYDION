@@ -1,176 +1,161 @@
 
 """ MODULE:         AdvectScalars
 
-    PURPOSE:        This module contains the basic time integration 
-                    code that handles the advection of scalars, e.g. 
-                    abundance fractions like xHI = nHI / nH 
-                    (treated in AdvectGasFractions.jl using this module).
+    PURPOSE:        This module contains code for preparing passive scalars (e.g. ρx_HII),
+                    and recovering scalars like xHII from the passive scalar ρx_HII. Note that
+                    the advection of the passive scalars themselves takes place in the hydro update.
     
 """
 
 
+using .Structs: HydrodynamicsState, ChemistryState, DustState
 using .ConstantsAndFunctions
 using  Base.Threads              # For CPU acceleration
 
 
-export AdvectScalar!
+export PreparePassiveScalars!, RecoverChemistryFromPassiveScalars!
 
 
-function AdvectScalar!( Δt::Float64,
-                         x::AbstractArray{Float64, 2},
-                     x_old::AbstractArray{Float64, 2},
-                         ρ::AbstractArray{Float64, 2}, 
-                     F_ρ_X::AbstractArray{Float64, 2}, 
-                     F_ρ_Y::AbstractArray{Float64, 2}, 
-                    inv_ΔV::AbstractArray{Float64, 2}, 
-                       A_X::AbstractArray{Float64, 2}, 
-                       A_Y::AbstractArray{Float64, 2}, 
-            ClampAboveZero::Bool  = true
-                      )
+const C_over_O::Float64 = C_H_ratio / O_H_ratio  # nC / nO
 
-    N_X, N_Y = size( ρ ) # Grid size 
-    dN_X     = 1:N_X
-    dN_Y     = 1:N_Y 
-    Δt_half  = Δt / 2
+@views function PreparePassiveScalars!( HydroState::HydrodynamicsState, 
+                                         Chemistry::ChemistryState )
 
-    # Update x_old:
-    x_old .= x 
+    # Unpack:
+    ρ  = HydroState.ρ
+    S  = HydroState.Scalars 
 
-    ######### 1) HALF-STEP IN X-DIRECTION #########
+    # Initial values of H I, He I, D I, CHₓ, OHₓ are determined from conservation:
+    @. Chemistry.xHI_adv  = max( 1 - Chemistry.xHII  - 2 * Chemistry.xH2, 0.0 )
+    @. Chemistry.xHeI_adv = max( 1 - Chemistry.xHeII - Chemistry.xHeIII,  0.0 )
+    @. Chemistry.xDI_adv  = max( 1 - Chemistry.xDII  - Chemistry.xHD,     0.0 )
+    @. Chemistry.xCHx_adv = max( 1 - Chemistry.xCI   - Chemistry.xCII  -  Chemistry.xCO, 0.0 )
+    @. Chemistry.xOHx_adv = max( 1 - Chemistry.xOI   - Chemistry.xOII  -  C_over_O * Chemistry.xCO, 0.0 )
     
-    @threads for j in dN_Y
-        @simd for i in dN_X
-            @inbounds begin
-                # Clamp indices that enter x, which implicitly assumes 
-                # zero gradient extrapolation BC's:
-                ip1 = min( i + 1, N_X )
-                im1 = max( i - 1, 1 )           
+    # Prepare passive scalars for advection in the hydro code:
+    @. S[:,:,1]  = ρ * Chemistry.xHI_adv 
+    @. S[:,:,2]  = ρ * Chemistry.xHII
+    @. S[:,:,3]  = ρ * Chemistry.xH2 
+    @. S[:,:,4]  = ρ * Chemistry.xHeI_adv
+    @. S[:,:,5]  = ρ * Chemistry.xHeII
+    @. S[:,:,6]  = ρ * Chemistry.xHeIII
+    @. S[:,:,7]  = ρ * Chemistry.xDI_adv 
+    @. S[:,:,8]  = ρ * Chemistry.xDII
+    @. S[:,:,9]  = ρ * Chemistry.xHD 
+    @. S[:,:,10] = ρ * Chemistry.xCHx_adv * Chemistry.Zgas_Zsun
+    @. S[:,:,11] = ρ * Chemistry.xCI      * Chemistry.Zgas_Zsun
+    @. S[:,:,12] = ρ * Chemistry.xCII     * Chemistry.Zgas_Zsun
+    @. S[:,:,13] = ρ * Chemistry.xCO      * Chemistry.Zgas_Zsun
+    @. S[:,:,14] = ρ * Chemistry.xOHx_adv * Chemistry.Zgas_Zsun
+    @. S[:,:,15] = ρ * Chemistry.xOI      * Chemistry.Zgas_Zsun
+    @. S[:,:,16] = ρ * Chemistry.xOII     * Chemistry.Zgas_Zsun
+    @. S[:,:,17] = ρ * Chemistry.Zgas_Zsun
 
-                # Reconstruct x on interfaces, using a simple first-order method: 
-                if F_ρ_X[i,j] ≥ 0.0
-                    xL = x_old[im1,j]  # Flow left → right
-                else
-                    xL = x_old[i,j]    # Flow right → left
-                end
+    return nothing 
+end
 
-                if F_ρ_X[i+1,j] ≥ 0.0
-                    xR = x_old[i,j]    # Flow left → right
-                else
-                    xR = x_old[ip1,j]  # Flow right → left
-                end
 
-                # Get left (i-1/2) & right (i+1/2) interface fluxes:
-                F_L_X   = F_ρ_X[i,j]   * xL
-                F_R_X   = F_ρ_X[i+1,j] * xR
 
-                # Get interface areas:
-                A_R     = A_X[i+1,j]
-                A_L     = A_X[i,j]
+function RecoverChemistryFromPassiveScalars!( HydroState::HydrodynamicsState, 
+                                               Chemistry::ChemistryState)
 
-                # Update x over a half-step Δt / 2:
-                x[i,j]  = x_old[i,j] - (Δt_half * inv_ΔV[i,j] / ρ[i,j]) * ( A_R * F_R_X  -  A_L * F_L_X )
+    # Unpack:
+    ρ  = HydroState.ρ
+    S  = HydroState.Scalars 
 
-                if ClampAboveZero
-                    x[i,j] = max( x[i,j], 0.0 )
-                end
+    # Grid size:
+    N_r, N_Z = size( ρ )
+    dN_r     = 1:N_r 
+    dN_Z     = 1:N_Z 
 
-            end # End of inbounds 
-        end # End of i-loop
-    end # End of j-loop
+    @threads for j in dN_Z 
+        @inbounds @simd for i in dN_r 
+            # Convenient variable:
+            inv_ρ        = 1 / max( ρ[i,j], ρ_floor )
 
-    # Update x_old:
-    x_old .= x 
-    
-    ######### 2) FULL STEP IN Y-DIRECTION ###############
+            # Recover gas metallicity:
+            Chemistry.Zgas_Zsun[i,j] = S[i,j,17] * inv_ρ
 
-    @threads for j in dN_Y
-        @simd for i in dN_X
-            @inbounds begin
-                # Clamp indices that enter x, which implicitly assumes 
-                # zero gradient extrapolation BC's:
-                jp1 = min( j + 1, N_Y )
-                jm1 = max( j - 1, 1 ) 
+            # Another convenient variable:
+            inv_ZgasZsun = 1 / max( Chemistry.Zgas_Zsun[i,j], 1e-10 )
 
-                # Reconstruct x on interfaces, using a simple first-order method: 
-                if F_ρ_Y[i,j] ≥ 0.0
-                    xL = x_old[i,jm1]  # Flow left → right
-                else
-                    xL = x_old[i,j]    # Flow right → left
-                end
+            # Recover preliminary abundance fractions:
+            Chemistry.xHI_adv[i,j]   = S[i,j,1]  * inv_ρ
+            Chemistry.xHII[i,j]      = S[i,j,2]  * inv_ρ
+            Chemistry.xH2[i,j]       = S[i,j,3]  * inv_ρ
+            Chemistry.xHeI_adv[i,j]  = S[i,j,4]  * inv_ρ
+            Chemistry.xHeII[i,j]     = S[i,j,5]  * inv_ρ
+            Chemistry.xHeIII[i,j]    = S[i,j,6]  * inv_ρ
+            Chemistry.xDI_adv[i,j]   = S[i,j,7]  * inv_ρ
+            Chemistry.xDII[i,j]      = S[i,j,8]  * inv_ρ
+            Chemistry.xHD[i,j]       = S[i,j,9]  * inv_ρ
+            Chemistry.xCHx_adv[i,j]  = S[i,j,10] * inv_ρ * inv_ZgasZsun
+            Chemistry.xCI[i,j]       = S[i,j,11] * inv_ρ * inv_ZgasZsun
+            Chemistry.xCII[i,j]      = S[i,j,12] * inv_ρ * inv_ZgasZsun
+            Chemistry.xCO[i,j]       = S[i,j,13] * inv_ρ * inv_ZgasZsun
+            Chemistry.xOHx_adv[i,j]  = S[i,j,14] * inv_ρ * inv_ZgasZsun
+            Chemistry.xOI[i,j]       = S[i,j,15] * inv_ρ * inv_ZgasZsun
+            Chemistry.xOII[i,j]      = S[i,j,16] * inv_ρ * inv_ZgasZsun
 
-                if F_ρ_Y[i,j+1] ≥ 0.0
-                    xR = x_old[i,j]    # Flow left → right
-                else
-                    xR = x_old[i,jp1]  # Flow right → left
-                end
+            ######## Ensure machine-precision normalization ######################
+            inv_xHtot    = 1 / ( Chemistry.xHI_adv[i,j]  +  Chemistry.xHII[i,j]   +  2 * Chemistry.xH2[i,j] )
+            inv_xHetot   = 1 / ( Chemistry.xHeI_adv[i,j] +  Chemistry.xHeII[i,j]  +  Chemistry.xHeIII[i,j]  )
+            inv_xDtot    = 1 / ( Chemistry.xDI_adv[i,j]  +  Chemistry.xDII[i,j]   +  Chemistry.xHD[i,j]     )
+            inv_xCtot    = 1 / ( Chemistry.xCHx_adv[i,j] +  Chemistry.xCI[i,j]    +  Chemistry.xCII[i,j]  +  Chemistry.xCO[i,j] )
 
-                # Get left (j-1/2) & right (j+1/2) interface fluxes:
-                F_L_Y   = F_ρ_Y[i,j]   * xL
-                F_R_Y   = F_ρ_Y[i,j+1] * xR
+            # Safety checks:
+            @assert isfinite(inv_xHtot) """ Non-finite inv_xHtot in cell (i,j)=($i,$j)
+                
+            xHI_adv  = $(Chemistry.xHI_adv[i,j])
+            xHII     = $(Chemistry.xHII[i,j])
+            xH2      = $(Chemistry.xH2[i,j])
+                
+            Occurred after gas fraction advection, but before renormalization. """
 
-                # Get interface areas:
-                A_R     = A_Y[i,j+1]
-                A_L     = A_Y[i,j]
+            @assert isfinite(inv_xHetot) """ Non-finite inv_xHetot in cell (i,j)=($i,$j)
+                
+            xHeI_adv  = $(Chemistry.xHeI_adv[i,j])
+            xHeII     = $(Chemistry.xHeII[i,j])
+            xHeIII    = $(Chemistry.xHeIII[i,j])
+                
+            Occurred after gas fraction advection, but before renormalization. """
 
-                # Update x over a full step Δt:
-                x[i,j]  = x_old[i,j] - (Δt * inv_ΔV[i,j] / ρ[i,j]) * ( A_R * F_R_Y  -  A_L * F_L_Y )
+            @assert isfinite(inv_xDtot) """ Non-finite inv_xDtot in cell (i,j)=($i,$j)
+                
+            xDI_adv  = $(Chemistry.xDI_adv[i,j])
+            xDII     = $(Chemistry.xDII[i,j])
+            xHD      = $(Chemistry.xHD[i,j])
+                
+            Occurred after gas fraction advection, but before renormalization. """
 
-                if ClampAboveZero
-                    x[i,j] = max( x[i,j], 0.0 )
-                end
+            # Normalize hydrogen species (H I is not needed after advection):
+            Chemistry.xHII[i,j]   = Chemistry.xHII[i,j]   * inv_xHtot
+            Chemistry.xH2[i,j]    = Chemistry.xH2[i,j]    * inv_xHtot
+            # Normalize helium species (He I is not needed after advection):
+            Chemistry.xHeII[i,j]  = Chemistry.xHeII[i,j]  * inv_xHetot
+            Chemistry.xHeIII[i,j] = Chemistry.xHeIII[i,j] * inv_xHetot
+            # Normalize deuterium species (D I is not needed after advection):
+            Chemistry.xDII[i,j]   = Chemistry.xDII[i,j]   * inv_xDtot
+            Chemistry.xHD[i,j]    = Chemistry.xHD[i,j]    * inv_xDtot
 
-            end # End of inbounds 
-        end # End of i-loop 
-    end # End of j-loop 
+            # Normalize carbon species (CHₓ is not needed after advection):
+            Chemistry.xCI[i,j]    = Chemistry.xCI[i,j]    * inv_xCtot
+            Chemistry.xCII[i,j]   = Chemistry.xCII[i,j]   * inv_xCtot
+            Chemistry.xCO[i,j]    = Chemistry.xCO[i,j]    * inv_xCtot
 
-    # Update x_old:
-    x_old .= x
+            # Normalize oxygen species (OHₓ is not needed after advection, since it's 
+            # obtained from conservation), in such a way that the CO abundance 
+            # remain consistent/unchanged:
+            f_renorm =  ( max( ( 1 - C_over_O * Chemistry.xCO[i,j] ), 0.0 ) 
+                        / ( Chemistry.xOHx_adv[i,j] +  Chemistry.xOI[i,j]  +  Chemistry.xOII[i,j] ) )
+            
+            Chemistry.xOI[i,j]    = Chemistry.xOI[i,j]  * f_renorm
+            Chemistry.xOII[i,j]   = Chemistry.xOII[i,j] * f_renorm
 
-    ######### 3) FINAL HALF-STEP IN X-DIRECTION #########
-    
-    @threads for j in dN_Y
-        @simd for i in dN_X
-            @inbounds begin
-                # Clamp indices that enter x, which implicitly assumes 
-                # zero gradient extrapolation BC's:
-                ip1 = min( i + 1, N_X )
-                im1 = max( i - 1, 1 )           
-
-                # Reconstruct x on interfaces, using a simple first-order method: 
-                if F_ρ_X[i,j] ≥ 0.0
-                    xL = x_old[im1,j]  # Flow left → right
-                else
-                    xL = x_old[i,j]    # Flow right → left
-                end
-
-                if F_ρ_X[i+1,j] ≥ 0.0
-                    xR = x_old[i,j]    # Flow left → right
-                else
-                    xR = x_old[ip1,j]  # Flow right → left
-                end
-
-                # Get left (i-1/2) & right (i+1/2) interface fluxes:
-                F_L_X   = F_ρ_X[i,j]   * xL
-                F_R_X   = F_ρ_X[i+1,j] * xR
-
-                # Get interface areas:
-                A_R     = A_X[i+1,j]
-                A_L     = A_X[i,j]
-
-                # Update x over a half-step Δt / 2:
-                x[i,j]  = x_old[i,j] - (Δt_half * inv_ΔV[i,j] / ρ[i,j]) * ( A_R * F_R_X  -  A_L * F_L_X )
-
-                if ClampAboveZero
-                    x[i,j] = max( x[i,j], 0.0 )
-                end
-
-            end # End of inbounds 
-        end # End of i-loop
-    end # End of j-loop 
-
-    # Update x_old:
-    x_old .= x
+        end
+    end
 
     return nothing
 end
+
 

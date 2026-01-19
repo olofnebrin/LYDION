@@ -98,6 +98,7 @@ mutable struct StellarRTArrays
     c̃::Float64
 
     # Intensities (latest & old) for all bands: 
+    J_IR::Array{Float64, 2};      J_IR_old::Array{Float64, 2}
     J_opt::Array{Float64, 2};     J_opt_old::Array{Float64, 2}
     J_FUV::Array{Float64, 2};     J_FUV_old::Array{Float64, 2}
     J_LW::Array{Float64, 2};      J_LW_old::Array{Float64, 2}
@@ -106,6 +107,9 @@ mutable struct StellarRTArrays
     J_EUV3::Array{Float64, 2};    J_EUV3_old::Array{Float64, 2}
 
     # H ≡ ∫dΩ I n̂ / 4π arrays for all bands:
+    H_r_IR::Array{Float64, 2};         H_Z_IR::Array{Float64, 2}
+    H_r_IR_old::Array{Float64, 2};     H_Z_IR_old::Array{Float64, 2}
+
     H_r_opt::Array{Float64, 2};        H_Z_opt::Array{Float64, 2}
     H_r_opt_old::Array{Float64, 2};    H_Z_opt_old::Array{Float64, 2}
 
@@ -125,6 +129,7 @@ mutable struct StellarRTArrays
     H_r_EUV3_old::Array{Float64, 2};   H_Z_EUV3_old::Array{Float64, 2}
 
     # Eddington tensor componens for all bands:
+    D_rr_IR::Array{Float32, 2};   D_ZZ_IR::Array{Float32, 2};   D_rZ_IR::Array{Float32, 2}
     D_rr_opt::Array{Float32, 2};  D_ZZ_opt::Array{Float32, 2};  D_rZ_opt::Array{Float32, 2}
     D_rr_FUV::Array{Float32, 2};  D_ZZ_FUV::Array{Float32, 2};  D_rZ_FUV::Array{Float32, 2}
     D_rr_LW::Array{Float32, 2};   D_ZZ_LW::Array{Float32, 2};   D_rZ_LW::Array{Float32, 2}
@@ -134,12 +139,19 @@ mutable struct StellarRTArrays
 
     # ϕϕ-component of radiation pressure tensor K = D × J at interfaces, 
     # needed for geometric source term:
+    K_ϕϕ_iphalf_IR::Array{Float64, 2};     K_ϕϕ_imhalf_IR::Array{Float64, 2}
+    K_ϕϕ_iphalf_opt::Array{Float64, 2};    K_ϕϕ_imhalf_opt::Array{Float64, 2}
+    K_ϕϕ_iphalf_FUV::Array{Float64, 2};    K_ϕϕ_imhalf_FUV::Array{Float64, 2}
     K_ϕϕ_iphalf_LW::Array{Float64, 2};     K_ϕϕ_imhalf_LW::Array{Float64, 2}
     K_ϕϕ_iphalf_EUV1::Array{Float64, 2};   K_ϕϕ_imhalf_EUV1::Array{Float64, 2}
     K_ϕϕ_iphalf_EUV2::Array{Float64, 2};   K_ϕϕ_imhalf_EUV2::Array{Float64, 2}
     K_ϕϕ_iphalf_EUV3::Array{Float64, 2};   K_ϕϕ_imhalf_EUV3::Array{Float64, 2}
 
     # Flux components for all bands: 
+    F_r_IR::Array{Float64, 2};      F_Z_IR::Array{Float64, 2}
+    F_r_Hr_IR::Array{Float64, 2};   F_Z_Hr_IR::Array{Float64, 2}
+    F_r_HZ_IR::Array{Float64, 2};   F_Z_HZ_IR::Array{Float64, 2}
+
     F_r_opt::Array{Float64, 2};     F_Z_opt::Array{Float64, 2}
     F_r_Hr_opt::Array{Float64, 2};  F_Z_Hr_opt::Array{Float64, 2}
     F_r_HZ_opt::Array{Float64, 2};  F_Z_HZ_opt::Array{Float64, 2}
@@ -165,6 +177,7 @@ mutable struct StellarRTArrays
     F_r_HZ_EUV3::Array{Float64, 2}; F_Z_HZ_EUV3::Array{Float64, 2}
 
     # Flux opacities for all bands:
+    α_F_IR::Array{Float64, 2}
     α_F_opt::Array{Float64, 2}
     α_F_FUV::Array{Float64, 2}
     α_F_LW::Array{Float64, 2}
@@ -172,7 +185,8 @@ mutable struct StellarRTArrays
     α_F_EUV2::Array{Float64, 2}
     α_F_EUV3::Array{Float64, 2}
 
-    # Stellar luminosities in all bands:
+    # Luminosities in all bands, over infinite space (i.e. the full luminosity of the star):
+    Lum_IR::Float64
     Lum_opt::Float64
     Lum_FUV::Float64
     Lum_LW::Float64
@@ -180,7 +194,15 @@ mutable struct StellarRTArrays
     Lum_EUV2::Float64
     Lum_EUV3::Float64
 
-    # Stellar photon emission rates in all bands:
+    # Stellar luminosities in all bands, in the simulated volume:
+    Lum_opt_vol::Float64
+    Lum_FUV_vol::Float64
+    Lum_LW_vol::Float64
+    Lum_EUV1_vol::Float64
+    Lum_EUV2_vol::Float64
+    Lum_EUV3_vol::Float64
+
+    # Stellar photon emission rates in all non-IR bands:
     dN_dt_opt::Float64
     dN_dt_FUV::Float64
     dN_dt_LW::Float64
@@ -190,6 +212,7 @@ mutable struct StellarRTArrays
     dN_dt_LyC::Float64    # Total LyC (EUV1 + EUV2 + EUV3) emission rate 
 
     # Emissivities for all bands:
+    js_IR::Array{Float64, 2}
     js_opt::Array{Float64, 2}
     js_FUV::Array{Float64, 2}
     js_LW::Array{Float64, 2}
@@ -200,11 +223,15 @@ mutable struct StellarRTArrays
     # Stellar mass density for all cells:
     ρ_star::Array{Float64, 2}
 
-    # Arrays for tracking gas momentum changes from radiation pressure:
+    # Arrays for tracking gas momentum changes from direct & indirect (IR) radiation pressure:
     Δρu_stellar_r::Array{Float64, 2}
     Δρu_stellar_Z::Array{Float64, 2}
+    Δρu_IR_r::Array{Float64, 2}
+    Δρu_IR_Z::Array{Float64, 2}
     f_stellar_r::Array{Float64, 2}
     f_stellar_Z::Array{Float64, 2}
+    f_IR_r::Array{Float64, 2}
+    f_IR_Z::Array{Float64, 2}
 
     # Strang-split order for M1 advection (changes automatically every advection step):
     rfirst_StellarRT::Bool 
@@ -213,6 +240,17 @@ mutable struct StellarRTArrays
     f_esc_LyC::Float64 
     f_esc_LW::Float64
 
+    # Direct stellar radiation pressure 'force multipliers' (expected ~ 1 for absorption from point source):
+    M_F_dir::Float64
+    M_F_dir_antigravity::Float64   # Force multiplier anti-parallel to gravity 
+
+    # IR radiation pressure force multipliers (useful diagnostics):
+    M_F_IR::Float64
+    M_F_IR_antigravity::Float64   # Force multiplier anti-parallel to gravity 
+
+    # On-the-spot approximation (Case B) or modelling of recombination photons:
+    OTS::Bool
+
 end
 
 
@@ -220,7 +258,8 @@ end
     Stores fractional populations of all major gas 
     species tracked in the code. """
 mutable struct ChemistryState{T<:AbstractFloat}
-    
+
+    # Primordial species (H I, H II, He II, He III, D I, D II, HD): 
     xHI_adv::Array{T, 2}
     xHI_adv_old::Array{T, 2}
 
@@ -248,6 +287,87 @@ mutable struct ChemistryState{T<:AbstractFloat}
     xHD::Array{T, 2}
     xHD_old::Array{T, 2}
 
+    # Metals (C I, C II, CHₓ, CO, O I, O II, OHₓ): 
+    xCI::Array{T, 2}
+    xCI_old::Array{T, 2}
+
+    xCII::Array{T, 2} 
+    xCII_old::Array{T, 2}
+
+    xCHx_adv::Array{T, 2}       # CHₓ is only advected for accuracy, but otherwise obtained from conservation 
+    xCHx_adv_old::Array{T, 2}
+
+    xCO::Array{T, 2}            # Defined as nCO / nC
+    xCO_old::Array{T, 2}
+
+    xOI::Array{T, 2} 
+    xOI_old::Array{T, 2}
+
+    xOII::Array{T, 2} 
+    xOII_old::Array{T, 2}
+
+    xOHx_adv::Array{T, 2}       # OHₓ is only advected for accuracy, but otherwise obtained from conservation 
+    xOHx_adv_old::Array{T, 2}
+
+    # Overall gas metallicity:
+    Zgas_Zsun::Array{T, 2}
+
+end
+
+
+""" A struct for storing the dust properties. The dust is advected and experiences 
+    radiation pressure, drag, and gravity, but can also change as a result of 
+    dust destruction and dust growth. This struct also stores dust 
+    optical properties (opacities etc.) for all bands. """
+mutable struct DustState{ITP_P, ITP_R}
+
+    # Dust temperature for every cell:
+    Td::Array{Float64, 2}
+
+    # Grain charges (silicates & graphite):
+    Zgr_sil::Array{Float64, 2}
+    Zgr_C::Array{Float64, 2}
+
+    # Band absorption opacities (cm² g⁻¹ of dust):
+    κd_abs_opt::Float64
+    κd_abs_FUV::Float64
+    κd_abs_LW::Float64
+    κd_abs_EUV1::Float64
+    κd_abs_EUV2::Float64
+    κd_abs_EUV3::Float64
+    κd_abs_Lyα::Float64
+
+    # Band flux opacities (cm² g⁻¹ of dust):
+    κd_F_opt::Float64
+    κd_F_FUV::Float64
+    κd_F_LW::Float64
+    κd_F_EUV1::Float64
+    κd_F_EUV2::Float64
+    κd_F_EUV3::Float64
+    κd_F_Lyα::Float64
+
+    # Band albedos:
+    ωd_opt::Float64
+    ωd_FUV::Float64
+    ωd_LW::Float64
+    ωd_EUV1::Float64
+    ωd_EUV2::Float64
+    ωd_EUV3::Float64
+    ωd_Lyα::Float64
+
+    # Band scattering asymmetry:
+    gd_opt::Float64
+    gd_FUV::Float64
+    gd_LW::Float64
+    gd_EUV1::Float64
+    gd_EUV2::Float64
+    gd_EUV3::Float64
+    gd_Lyα::Float64
+
+    # --- IR mean opacity interpolations ---
+    # Store log₁₀(κ) vs. log₁₀(T) interpolations:
+    logκP_itp::ITP_P
+    logκR_itp::ITP_R
 end
 
 
@@ -340,11 +460,59 @@ mutable struct HydrodynamicsState{T<:AbstractFloat}
     BC_Y_left::Symbol
     BC_Y_right::Symbol
 
+    # All dust arrays:
+    ρd_new::Array{T, 2} 
+    ρdud_X_new::Array{T, 2} 
+    ρdud_Y_new::Array{T, 2} 
+    ρd::Array{T, 2} 
+    ρdud_X::Array{T, 2} 
+    ρdud_Y::Array{T, 2} 
+    ρd0::Array{T, 2} 
+    ρdud_X0::Array{T, 2} 
+    ρdud_Y0::Array{T, 2} 
+    ρd_stage::Array{T, 2} 
+    ρdud_X_stage::Array{T, 2} 
+    ρdud_Y_stage::Array{T, 2}
+    ud_X::Array{T, 2} 
+    ud_Y::Array{T, 2} 
+    ρd_L_X::Array{T, 2} 
+    ρd_R_X::Array{T, 2} 
+    ud_X_L_X::Array{T, 2} 
+    ud_X_R_X::Array{T, 2} 
+    ud_Y_L_X::Array{T, 2} 
+    ud_Y_R_X::Array{T, 2}
+    F_ρd_X::Array{T, 2} 
+    F_ρdud_X_X::Array{T, 2} 
+    F_ρdud_Y_X::Array{T, 2}
+    ρd_L_Y::Array{T, 2} 
+    ρd_R_Y::Array{T, 2} 
+    ud_Y_L_Y::Array{T, 2} 
+    ud_Y_R_Y::Array{T, 2} 
+    ud_X_L_Y::Array{T, 2} 
+    ud_X_R_Y::Array{T, 2} 
+    F_ρd_Y::Array{T, 2} 
+    F_ρdud_X_Y::Array{T, 2} 
+    F_ρdud_Y_Y::Array{T, 2} 
+    ρdg_old::Array{T, 2} 
+    ud_Xg_old::Array{T, 2} 
+    ud_Yg_old::Array{T, 2}
+    ρdc::Array{T, 2}
+    ρdud_Xc::Array{T, 2} 
+    ρdud_Yc::Array{T, 2} 
+    ud_Xc::Array{T, 2} 
+    ud_Yc::Array{T, 2}
+
+    # Arrays for advecting passive scalars (e.g. ρx_HII, ρZ, etc):
+    Scalars::Array{Float64, 3}         # Size (N_X, N_Y, N_Scalars)
+    Scalars_old::Array{Float64, 3}     # Size (N_X, N_Y, N_Scalars)
+    Scalars_stage::Array{Float64, 3}   # Size (N_X, N_Y, N_Scalars)
+    ρ_save::Array{Float64, 2}          # Size (N_X, N_Y), for storing the gas density in RK2 updates of scalar advection 
+    
     # Strang split order:
     rfirst_Hydro::Bool
 
     # Total mass (g) in simulation volume:
-    M_simvol::Float64
+    M_simvol::T
 end
 
 
@@ -374,6 +542,8 @@ struct GeometryCylindrical{T<:AbstractFloat}
     A_Z::Array{T, 2}              # (N_r, N_Z+1)
     # Values of ⟨1/r⟩ for all cells:
     inv_r_cell::Array{T, 1}       # length N_r
+    # Simulation box volume = sum(ΔV):
+    Vsim::Float64
 
     # WENO3 weights for converting cell-averaged conservatives 
     # to cell-center conservatives:
@@ -421,6 +591,8 @@ struct GeometryCartesian{T<:AbstractFloat}
     A_Y::Array{T, 2}              # (N_X, N_Y+1)
     # NOT NEEDED IN CARTESIAN COORDINATES:
     inv_r_cell::Array{T, 1}       # length N_X
+    # Simulation box volume = sum(ΔV):
+    Vsim::Float64
 
     # WENO3 weights for converting cell-averaged conservatives 
     # to cell-center conservatives:
@@ -460,8 +632,13 @@ mutable struct GravityState{T<:AbstractFloat}
     Φ_snapshot::Array{T, 2}
     ∂Φ∂r::Array{T, 2}   
     ∂Φ∂Z::Array{T, 2}
+    ρtot::Array{T, 2}        # Total gravitating mass 
+    ρ_bg::Array{T, 2}        # Static non-gas gravitating mass density, e.g. from star & dark matter 
     f_gravity_r::Array{T, 2}
     f_gravity_Z::Array{T, 2}
+    P::Array{T, 1}           # Legendre polynomials (for BCs)
+    Q::Array{T, 1}           # Multipole moments (for BCs)
+    ℓmax::Int                # Maximum ℓ to use in Legendre polynomials
 end
 
 """ A struct for the Poisson equation coefficients. These never 

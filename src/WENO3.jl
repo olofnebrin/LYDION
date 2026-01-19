@@ -20,7 +20,7 @@
     
     """
 
-using .ConstantsAndFunctions  # For MinMod 
+using .ConstantsAndFunctions  # For MinMod & MonCen 
 using Base.Threads            # For CPU acceleration
 
 
@@ -107,14 +107,6 @@ function Compute_q_k( ξc_km1::Float64, # ξcₖ₋₁
 end
 
 
-""" MinMod slope limiter. """
-@inline function MinMod( A::Float64,
-                         B::Float64 
-                        )
-    0.5 * (sign(A) + sign(B)) * min( abs(A), abs(B) )
-end
-
-
 const C_ref::Float64      = 20.0
 const Wref_floor::Float64 = 1e-40
 
@@ -143,7 +135,7 @@ function Get_QL_and_QR( W_im2::Float64,      # We need W[i-2] and W[i-1] for the
     # If at least one of the cells around the interface i - 1/2 
     # has been flagged as containing a shock, then we revert from 
     # WENO3 to a piecewise linear approximation (see e.g. ref. 2):
-    if max( Shock_i, Shock_im1 ) == Shock_HLL_and_PLM || MaxReconstructionOrder < Int8(3)
+    if max( Shock_i, Shock_im1 ) == Shock_HLL_and_PLM || MaxReconstructionOrder < Int8(3) 
         # Slopes in cell i-1 (for W_L):
         sL_im1 = (W_im1 - W_im2) / (XCoM_im1 - XCoM_im2)
         sR_im1 = (W_i   - W_im1) / (XCoM_i   - XCoM_im1)

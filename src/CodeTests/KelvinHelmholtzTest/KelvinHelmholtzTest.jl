@@ -213,8 +213,12 @@ function SetupKHTest( tmax::Float64,
         print("\r\033[KInitialising hydro arrays..."); flush(stdout)
     end 
 
+    # We have zero passive scalars:
+    N_Scalars = 0
+
     # Set up hydro state + ghost grid arrays:
     hydrostate, ghostgrid = GenerateHydroArrays( X, XCoM, Y, YCoM, 5 / 3,
+                                                 N_Scalars,
                                                  :Periodic, :Periodic,   # Periodic BCs in X 
                                                  :Reflect,  :Reflect     # Reflective BCs in Y 
                                                   )
