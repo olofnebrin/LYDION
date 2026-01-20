@@ -5,7 +5,7 @@
 Taken together, LYDION allows realistic simulations of stellar feedback around young massive stars, from Lyα and non-Lyα radiation pressure, and photoionization. This can be used to assess the relative importance of these processes, and inform feedback prescriptions in 3D galaxy/star formation simulations.
 
 This has become increasingly urgent recently, following the launch of the James Webb Space Telescope (JWST). With
-the JWST, observations of dust-poor galaxies in the early Universe has become possible, which is precisely 
+the JWST, observations of dust-poor galaxies at Cosmic Dawn has become possible, which is precisely 
 the regime where Lyα feedback can strongly regulate star formation.
 
 A full description and test of LYDION can be found at: TODO
