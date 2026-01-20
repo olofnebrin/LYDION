@@ -1,9 +1,10 @@
 
 
-include( "src/ConstantsAndFunctions.jl" )
+#include( "src/ConstantsAndFunctions.jl" )
 include( "src/RHDSolver.jl" )
-using .ConstantsAndFunctions   # For constants (e.g. unit conversions)
+#using .ConstantsAndFunctions   # For constants (e.g. unit conversions)
 using .RHDSolver               # The full RHD solver module
+using .RHDSolver.ConstantsAndFunctions   # For constants (e.g. unit conversions)
 using  Dates                   # To have date in the file name for convenience
 
 
@@ -40,8 +41,8 @@ Rmax_lin::Float64                  =  3 * pc        # Uniform/linear grid out to
 Zmax_lin::Float64                  =  3 * pc        # Uniform/linear grid out to cylindrical Z = Zmax_lin 
 Rmax::Float64                      =  3 * pc        # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
 Zmax::Float64                      =  3 * pc        # Logarithmic grid from Zmax_lin to Zmax (typically lower-resolution region)
-N_r_lin::Int                       =  64 
-N_Z_lin::Int                       =  64
+N_r_lin::Int                       =  32 
+N_Z_lin::Int                       =  32
 N_r_log::Int                       =  0
 N_Z_log::Int                       =  0
  

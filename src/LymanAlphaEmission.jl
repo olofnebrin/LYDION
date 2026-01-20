@@ -17,7 +17,6 @@
                 MNRAS, 517, 1, 1-27
 """
 
-include( "./ConstantsAndFunctions.jl" )
 using .ConstantsAndFunctions  # Needed constants & functions
 using Interpolations          # For fitting the probability of Lyα emission following a recombination 
 
