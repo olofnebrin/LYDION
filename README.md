@@ -35,7 +35,8 @@ julia --project=.
 
 In the Julia REPL, all required dependencies can be installed using:
 
-```using Pkg
+```julia
+using Pkg
 Pkg.instantiate()
 ```
 
