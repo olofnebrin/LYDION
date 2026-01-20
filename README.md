@@ -17,9 +17,11 @@ Besides the core Julia language, the following external packages are used:
 
 - HDF5.jl
 - Interpolations.jl
-- ProgressMeter.jl
 - Roots.jl
 - SpecialFunctions.jl
+- StaticArrays.jl
+- QuadGK.jl
+- ProgressMeter.jl
 
 These dependencies are listed in 'Project.toml', and can be installed automatically, as shown below.
 
