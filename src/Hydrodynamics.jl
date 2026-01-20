@@ -40,14 +40,13 @@ export GetPrimitive, GetCFLTimeStep,
 # which you can change.
 
 const CFL::Float64         =  0.4        # CFL factor for gas tim                            (< 1, default: 0.4)
-const C_Grav::Float64      =  0.1        # Sets the gravity-limited time-step                  (default: 0.1)
-const C_RP::Float64        =  0.1        # Sets the rad. presure-limited time-step             (default: 0.1)
-const ρ_floor::Float64     =  1e-20 * mH # Gas density floor                                   (default: 10⁻¹⁰ mH per cm⁻³)
-const ρd_floor::Float64    =  1e-20 * mH # Dust density floor                                  (default: 10⁻²⁰ mH per cm⁻³)
-const P_floor::Float64     =  1e-30      # Gas pressure floor                                  (default: 10⁻³⁰ in cgs units)
+const C_Grav::Float64      =  0.1        # Sets the gravity-limited time-step                (default: 0.1)
+const C_RP::Float64        =  0.1        # Sets the rad. presure-limited time-step           (default: 0.1)
+const ρ_floor::Float64     =  1e-20 * mH # Gas density floor                                 (default: 10⁻²⁰ mH per cm⁻³)
+const ρd_floor::Float64    =  1e-20 * mH # Dust density floor                                (default: 10⁻²⁰ mH per cm⁻³)
+const P_floor::Float64     =  1e-30      # Gas pressure floor                                (default: 10⁻³⁰ in cgs units)
 const γmon::Float64        =  5 / 3      # Adiabatic index of monoatomic gas
 const γdia::Float64        =  7 / 5      # Adiabatic index of diatomic gas
-const γrad::Float64        =  4 / 3      # Adiabatic index of radiation 
 const DEBUG_Hydro::Bool    =  true       # Checks for non-physical values & errors, on if true (default: true)
 
 export CFL, C_Grav, C_RP, ρ_floor, ρd_floor, P_floor, γmon, γdia  
@@ -108,8 +107,11 @@ end
     N_X, N_Y    = size( ρ )  # Grid size
     dN_X        = 1:N_X
     dN_Y        = 1:N_Y
-    @assert length(X) == N_X + 1 "X must have N_X + 1 entries"
-    @assert length(Y) == N_Y + 1 "Y must have N_Y + 1 entries"
+
+    if DEBUG_Hydro
+        @assert length(X) == N_X + 1 "X must have N_X + 1 entries"
+        @assert length(Y) == N_Y + 1 "Y must have N_Y + 1 entries"
+    end
 
     min_ΔtHydro = Inf64  # Initialize the minimum local time-scale
 
@@ -235,8 +237,14 @@ const inv_γmon_m1::Float64 = 1 / ( γmon  -  1 )
 const inv_γdia_m1::Float64 = 1 / ( γdia  -  1 )
 
 """ Adiabatic index of the gas, taking into account 
-    H₂, approximating γH2 ≈ γdia. See refs. (2)-(3)
-    for further discussion and more accurate expressions. """
+    H₂, approximating γH2 ≈ γdia. For further discussion
+    and more accurate expressions, see:
+
+    Omukai & Nishi (1998) 'Formation of primordial protostars',
+    ApJ, 508, 1, 141-150
+
+    Sharda et al. (2019) 'The role of the H₂ adiabatic index in
+    the formation of the first stars', MNRAS, 490, 1, 513-526  """
 @inline function Getγad( xHII::Float64,
                           xH2::Float64, 
                         xHeII::Float64,
@@ -275,7 +283,10 @@ const Δx::Float64 = 1e-10  # Constant threshold for considering limiting values
 
 """ This function gives the mean molecular weight μ given
     known fractional abundances of H II, H₂, He II, and He III.
-    See ref. (1). """
+
+    See: Black & Bodenheimer (1975) 'Evolution of rotating 
+         interstellar clouds. I. Numerical techniques.',
+         ApJ, 199, 1, 619-632 """
 @inline function Getμ( xHII::Float64, 
                         xH2::Float64, 
                       xHeII::Float64, 

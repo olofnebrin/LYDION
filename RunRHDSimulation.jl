@@ -40,8 +40,8 @@ Rmax_lin::Float64                  =  3 * pc        # Uniform/linear grid out to
 Zmax_lin::Float64                  =  3 * pc        # Uniform/linear grid out to cylindrical Z = Zmax_lin 
 Rmax::Float64                      =  3 * pc        # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
 Zmax::Float64                      =  3 * pc        # Logarithmic grid from Zmax_lin to Zmax (typically lower-resolution region)
-N_r_lin::Int                       =  32 
-N_Z_lin::Int                       =  32
+N_r_lin::Int                       =  64 
+N_Z_lin::Int                       =  64
 N_r_log::Int                       =  0
 N_Z_log::Int                       =  0
  
@@ -87,7 +87,7 @@ xOII_ext::Float64                  =  0.0
 
 Hydro::Bool                        =  true       # Hydrodynamics                    (on if true, off if false)
 Gravity::Bool                      =  true       # Self-gravity                     (on if true, off if false)
-Lyα::Bool                          =  false      # Lyα RT/RHD                       (on if true, off if false)
+Lyα::Bool                          =  true       # Lyα RT/RHD                       (on if true, off if false)
 Recoil::Bool                       =  true       # Atomic recoil for Lyα RT         (on if true, off if false)
 LyαDestruction::Bool               =  true       # Lyα destruction (pd > 0)         (on if true, off if false)
 RadPressure::Bool                  =  true       # Radiation pressure feedback      (on if true, off if false - NOTE: Lyα feedback is only on if Lyα RT is on)

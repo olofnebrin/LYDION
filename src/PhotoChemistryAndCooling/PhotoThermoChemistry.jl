@@ -94,8 +94,8 @@ function FindRSL_LyαRT_TODO( c̃_Lyα::Float64,                   # Old reduced
                          xHII::AbstractArray{Float64, 2}, # H II abundance fraction 
                           xH2::AbstractArray{Float64, 2}, # H₂ abundance fraction
                           γad::AbstractArray{Float64, 2}, # Gas adiabatic index
-                            r::AbstractArray{Float64, 2}, # Cell interface r-values 
-                            Z::AbstractArray{Float64, 2}  # Cell interface Z-values    
+                            r::AbstractArray{Float64, 1}, # Cell interface r-values 
+                            Z::AbstractArray{Float64, 1}  # Cell interface Z-values    
                        )
 
     N_r, N_Z = size(ρ)
@@ -172,8 +172,8 @@ function FindRSL_LyαRT( c̃_Lyα::Float64,                   # Old reduced spee
                          xHII::AbstractArray{Float64, 2}, # H II abundance fraction 
                           xH2::AbstractArray{Float64, 2}, # H₂ abundance fraction
                           γad::AbstractArray{Float64, 2}, # Gas adiabatic index
-                            r::AbstractArray{Float64, 2}, # Cell interface r-values 
-                            Z::AbstractArray{Float64, 2}  # Cell interface Z-values    
+                            r::AbstractArray{Float64, 1}, # Cell interface r-values 
+                            Z::AbstractArray{Float64, 1}  # Cell interface Z-values    
                        )
 
     N_r, N_Z = size(ρ)
@@ -401,6 +401,13 @@ function AbsorptionStep( Δt::Float64,
                         nH2::Float64,          # H₂ number density   
                        nHeI::Float64,          # He I number density 
                       nHeII::Float64,          # He II number density   
+                        nDI::Float64,          # D I number density 
+                        nHD::Float64,          # HD number density 
+                        nCI::Float64,          # C I number density 
+                       nCHx::Float64,          # CHₓ number density 
+                        nCO::Float64,          # CO number density 
+                        nOI::Float64,          # O I number density 
+                       nOHx::Float64,          # OHₓ number density 
                          ne::Float64,          # Electron number density (for Thomson scattering)
                          ρd::Float64,          # Dust density 
                        Dust::DustState,        # Dust struct, for opacities 
@@ -482,7 +489,7 @@ function AbsorptionStep( Δt::Float64,
     #######################################################################
         
     # Optical opacities:
-    α_gas_abs_opt  =   0.0                                      # Optical gas absorption opacity 
+    α_gas_abs_opt  =   nCHx * σCH_opt                           # Optical gas absorption opacity 
     α_gas_F_opt    =   α_gas_abs_opt  +  ne  * σT               # Optical flux opacity (adds Thomson scattering)  
     α_abs_opt      =   α_gas_abs_opt  +  Dust.κd_abs_opt * ρd   # Absorption opacity (for J_opt)
     α_F_opt_dust   =   Dust.κd_F_opt  * ρd                      # Dust flux opacity  (for H_opt)
@@ -539,8 +546,13 @@ function AbsorptionStep( Δt::Float64,
     #######################################################################
 
     # FUV opacities:
-    α_gas_abs_FUV  =   0.0                                      # FUV gas absorption opacity 
-    α_gas_F_FUV    =   α_gas_abs_FUV  +  ne  * σT               # FUV flux opacity (adds Thomson scattering)  
+
+    # FUV gas absorption opacity:
+    α_gas_abs_FUV  =   nOHx * σOH_FUV  +  nCHx * σCH_FUV                          
+
+    # FUV flux opacity (adds Thomson scattering):
+    α_gas_F_FUV    =   α_gas_abs_FUV  +  ne  * σT
+
     α_abs_FUV      =   α_gas_abs_FUV  +  Dust.κd_abs_FUV * ρd   # Absorption opacity (for J_FUV)
     α_F_FUV_dust   =   Dust.κd_F_FUV  * ρd                      # Dust flux opacity  (for H_FUV)
     α_F_FUV        =   α_gas_F_FUV    +  α_F_FUV_dust           # Total flux opacity (for H_FUV)
@@ -596,8 +608,16 @@ function AbsorptionStep( Δt::Float64,
     #######################################################################
 
     # Lyman-Werner opacities:
-    α_gas_abs_LW  =   nHI * σHI_LW  +  nH2 * σH2_LW          # LW gas absorption opacity 
-    α_gas_F_LW    =   α_gas_abs_LW  +  ne  * σT              # LW flux opacity (adds Thomson scattering)  
+
+    # LW gas absorption opacity:
+    α_gas_abs_LW  =   ( nHI * σHI_LW  +  nH2 * σH2_LW   +  nHD * σHD_LW 
+                      + nCI * σCI_LW  +  nOHx * σOH_LW  +  nCHx * σCH_LW
+                      + nCO * σCO_LW )    
+
+    # LW flux opacity (adds Thomson scattering) 
+    α_gas_F_LW    =   α_gas_abs_LW  +  ne  * σT 
+    
+    
     α_abs_LW      =   α_gas_abs_LW  +  Dust.κd_abs_LW * ρd   # Absorption opacity (for J_LW)
     α_F_LW_dust   =   Dust.κd_F_LW  * ρd                     # Dust flux opacity  (for H_LW)
     α_F_LW        =   α_gas_F_LW    +  α_F_LW_dust           # Total flux opacity (for H_LW)
@@ -653,8 +673,16 @@ function AbsorptionStep( Δt::Float64,
     #######################################################################
 
     # EUV1 opacities:
-    α_gas_abs_EUV1  =   nHI * σHI_EUV1    +  nH2 * σH2_EUV1                  # EUV1 gas absorption opacity 
-    α_gas_F_EUV1    =   nHI * σHI_EUV1_F  +  nH2 * σH2_EUV1_F  +  ne  * σT   # EUV1 gas flux opacity (adds Thomson scattering)
+
+    # EUV1 gas absorption opacity (D I has same cross-section as H I):
+    α_gas_abs_EUV1  =   ( nHI * σHI_EUV1    +  nH2 * σH2_EUV1   +   nDI * σHI_EUV1  
+                        + nCI * σCI_EUV1    +  nOI * σOI_EUV1 )
+
+    # EUV1 gas flux opacity (adds Thomson scattering)
+    α_gas_F_EUV1    =   ( nHI * σHI_EUV1_F  +  nH2 * σH2_EUV1_F   +   nDI * σHI_EUV1_F
+                        + nCI * σCI_EUV1    +  nOI * σOI_EUV1     +  ne  * σT )  
+
+
     α_abs_EUV1      =   α_gas_abs_EUV1    +  Dust.κd_abs_EUV1 * ρd           # Absorption opacity (for J_EUV1)
     α_F_EUV1_dust   =   Dust.κd_F_EUV1 * ρd                                  # Dust flux opacity  (for H_EUV1)
     α_F_EUV1        =   α_gas_F_EUV1      +  α_F_EUV1_dust                   # Total flux opacity (for H_EUV1)
@@ -710,10 +738,15 @@ function AbsorptionStep( Δt::Float64,
     #######################################################################
 
     # EUV2 opacities:
-    α_gas_abs_EUV2  =   ( nHI * σHI_EUV2  +  nH2 * σH2_EUV2  
-                        + nHeI * σHeI_EUV2 )                        # EUV2 gas absorption opacity 
-    α_gas_F_EUV2    =   ( nHI * σHI_EUV2_F  +  nH2 * σH2_EUV2_F  
-                        + nHeI * σHeI_EUV2_F )  +  ne * σT          # EUV2 gas flux opacity (adds Thomson scattering)
+
+    # EUV2 gas absorption opacity (D I has same opacity as H I):
+    α_gas_abs_EUV2  =   ( nHI * σHI_EUV2  +  nH2 * σH2_EUV2  + nHeI * σHeI_EUV2 
+                        + nDI * σHI_EUV2  +  nCI * σCI_EUV2  + nOI  * σOI_EUV2 )                     
+
+    # EUV2 gas flux opacity (adds Thomson scattering)
+    α_gas_F_EUV2    =   ( nHI * σHI_EUV2_F  +  nH2 * σH2_EUV2_F  + nHeI * σHeI_EUV2_F   
+                        + nDI * σHI_EUV2    +  nCI * σCI_EUV2    + nOI  * σOI_EUV2   +  ne * σT  )
+
     α_abs_EUV2      =   α_gas_abs_EUV2  +  Dust.κd_abs_EUV2 * ρd    # Absorption opacity (for J_EUV2)
     α_F_EUV2_dust   =   Dust.κd_F_EUV2 * ρd                         # Dust flux opacity  (for H_EUV2)
     α_F_EUV2        =   α_gas_F_EUV2    +    α_F_EUV2_dust          # Total flux opacity (for H_EUV2)
@@ -769,11 +802,14 @@ function AbsorptionStep( Δt::Float64,
     #######################################################################
 
     # EUV3 opacities:
-    α_gas_abs_EUV3   = ( nHI * σHI_EUV3  +  nH2 * σH2_EUV3  +  nHeI * σHeI_EUV3 
-                       + nHeII * σHeII_EUV3  )                       # EUV3 gas absorption opacity 
 
-    α_gas_F_EUV3     =   ( nHI * σHI_EUV3_F  +  nH2 * σH2_EUV3_F  +  nHeI * σHeI_EUV3_F
-                       + nHeII * σHeII_EUV3_F  )  +  ne * σT         # EUV3 gas flux opacity (adds Thomson scattering)
+    # EUV3 gas absorption opacity:
+    α_gas_abs_EUV3   = ( nHI * σHI_EUV3  +  nH2 * σH2_EUV3  +  nHeI * σHeI_EUV3  +  nHeII * σHeII_EUV3
+                       + nDI * σHI_EUV3  +  nCI * σCI_EUV3  +  nOI * σOI_EUV3  )                      
+
+    # EUV3 gas flux opacity (adds Thomson scattering):
+    α_gas_F_EUV3     = ( nHI * σHI_EUV3_F  +  nH2 * σH2_EUV3_F  +  nHeI * σHeI_EUV3_F + nHeII * σHeII_EUV3_F
+                       + nDI * σHI_EUV3    +  nCI * σCI_EUV3    +  nOI * σOI_EUV3     +  ne * σT  )       
 
     α_abs_EUV3       =   α_gas_abs_EUV3  +  Dust.κd_abs_EUV3 * ρd    # Absorption opacity (for J_EUV3)
     α_F_EUV3_dust    =   Dust.κd_F_EUV3 * ρd                         # Dust flux opacity  (for H_EUV3)
@@ -1261,6 +1297,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
     nHI_old           =   xHI_old    * nH_old
     nHII_old          =   xHII_old   * nH_old 
     nH2_old           =   xH2_old    * nH_old
+    nDI_old           =   xDI_old    * nD_old
     nHD_old           =   xHD_old    * nD_old    # Enters the cooling rate
     nHeI_old          =   xHeI_old   * nHe_old
     nHeII_old         =   xHeII_old  * nHe_old
@@ -1334,7 +1371,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
     Δne_rel                  = 0.0        # Initialize Δne_rel, for printing in case convergence fails 
     Δe                       = 0.0        # Initialize Δe, for printing in case convergence fails 
     ConvergedDustGasCoupling = false      # Initialize ΔDustGasCoupling, for printing in case convergence fails
-    ConvergedCarbonOxygen    = true       # Initialize check for carbon & oxygen chemistry 
+    ConvergedCarbonOxygen    = false      # Initialize check for carbon & oxygen chemistry 
     ΔStellarRT               = 0.0        # Initialize ΔStellarRT, for printing in case convergence fails 
     REDO_ABSORPTION          = false
     REDO_HEATINGCOOLING      = false
@@ -1370,7 +1407,8 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         H_Z_opt_trial, H_Z_FUV_trial, H_Z_LW_trial, H_Z_EUV1_trial, H_Z_EUV2_trial, H_Z_EUV3_trial, H_Z_IR_trial,
         Δρu_r_trial_Abs, Δρu_Z_trial_Abs,  Δρu_r_IR_trial_Abs, Δρu_Z_IR_trial_Abs,
         Δρu_r_rad_gas_trial_Abs, Δρu_Z_rad_gas_trial_Abs,  Δρu_r_rad_dust_trial_Abs, Δρu_Z_rad_dust_trial_Abs,
-        ΔStellarRT, js_IR, Td_new = AbsorptionStep( Δtsub, c̃, ρ, nH_old, nHI_old, nH2_old, nHeI_old, nHeII_old, ne_old,
+        ΔStellarRT, js_IR, Td_new = AbsorptionStep( Δtsub, c̃, ρ, nH_old, nHI_old, nH2_old, nHeI_old, nHeII_old, 
+                                                    nDI_old, nHD_old, nCI_old, nCHx_old, nCO_old, nOI_old, nOHx_old, ne_old,
                                                     ρd_old, Dust, T_old, Td, TCMB,
                                                     J_opt_old,  dJ_optdt,   H_r_opt_old,  H_Z_opt_old,  dHr_optdt,  dHZ_optdt,
                                                     J_FUV_old,  dJ_FUVdt,   H_r_FUV_old,  H_Z_FUV_old,  dHr_FUVdt,  dHZ_FUVdt,
@@ -2222,17 +2260,6 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                 # Update IR flux opacity (for accurate M1 transport in optically thick regime):
                 RT.α_F_IR[i,j] = ρd[i,j] * κR(Dust, Dust.Td[i,j])
 
-                # Update stellar RT flux opacities:
-                #xHI = max( 1 - xHII[i,j] - 2 * xH2[i,j], 0.0 )
-                #nHI = xHI * X_over_mH * ρ[i,j]
-                #nH2 = xH2[i,j] * X_over_mH * ρ[i,j]
-
-                #RT.α_F_EUV1[i,j] = nHI * σHI_EUV1_F  + nH2 * σH2_EUV1_F +  Dust.DG[i,j] * ρ[i,j] * Dust.κd_F_EUV1
-                #RT.α_F_EUV2[i,j] = nHI * σHI_EUV2_F  +  Dust.DG[i,j] * ρ[i,j] * Dust.κd_F_EUV2
-                #RT.α_F_EUV3[i,j] = nHI * σHI_EUV3_F  +  Dust.DG[i,j] * ρ[i,j] * Dust.κd_F_EUV3
-                #RT.α_F_FUV[i,j]  = Dust.DG[i,j] * ρ[i,j] * Dust.κd_F_FUV
-
-
             end
         end # End of i-loop 
     end # End of j-loop 
@@ -2315,7 +2342,7 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                 end
 
                 # Update the frequency integrated emissivity: 
-                LyaState.∫dν_js_Lyα[i,j] = ( ∫dν_js_recLyα( T[i,j], nHII, ne, true, true )
+                LyaState.∫dν_js_Lyα[i,j] = ( ∫dν_js_recLyα( T[i,j], nHII, ne, OTS )
                                          +   ∫dν_js_collLyα( T[i,j], nHI, ne ) )
 
             end # End of i-loop
