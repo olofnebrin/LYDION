@@ -50,8 +50,9 @@ mass of the star, physics settings, resolution, etc., can all be changed
 in that file. Running the file will set up the simulation, run it, and 
 continuously save output data to an HDF5 file.
 
-To launch a simulation from the repository root:
+To launch a simulation from the repository root, using 8 CPU threads 
+(as an example), do:
 
 ```bash
-julia --project=. RunRHDSimulation.jl
+julia --project=. --threads=8 RunRHDSimulation.jl
 ```
