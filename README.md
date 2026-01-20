@@ -42,7 +42,7 @@ Pkg.instantiate()
 
 # How to run
 
-The file RunRHDSimulation.jl contains the basic setup for running an RHD 
+The file **RunRHDSimulation.jl** contains the basic setup for running an RHD 
 simulation, with or without Lyα feedback. Cloud initial conditions, the 
 mass of the star, physics settings, resolution, etc., can all be changed
 in that file. Running the file will set up the simulation, run it, and 
