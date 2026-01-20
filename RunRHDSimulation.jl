@@ -1,11 +1,9 @@
 
 
-#include( "src/ConstantsAndFunctions.jl" )
 include( "src/RHDSolver.jl" )
-#using .ConstantsAndFunctions   # For constants (e.g. unit conversions)
-using .RHDSolver               # The full RHD solver module
+using .RHDSolver                         # The full RHD solver module
 using .RHDSolver.ConstantsAndFunctions   # For constants (e.g. unit conversions)
-using  Dates                   # To have date in the file name for convenience
+using  Dates                             # To have date in the file name for convenience
 
 
 tmax::Float64                      =  3e5 * yr     # Stop simulation at t = tmax (unless it stops automatically earlier)

@@ -51,8 +51,21 @@ in that file. Running the file will set up the simulation, run it, and
 continuously save output data to an HDF5 file.
 
 To launch a simulation from the repository root, using 8 CPU threads 
-(as an example), do:
+as an example, do:
 
 ```bash
 julia --project=. --threads=8 RunRHDSimulation.jl
 ```
+
+Since checkpoint data and settings are saved, simulations can be restarted 
+from the output in the HDF5 file. This can be done by specifying the 
+right HDF5 file name in **RestartRHDSimulation.jl**, and then do (again
+assuming 8 CPU threads):
+
+```bash
+julia --project=. --threads=8 RestartRHDSimulation.jl
+```
+
+# Simulation output 
+
+Simulation results in the HDF5 file can be used for post-simulation analysis.

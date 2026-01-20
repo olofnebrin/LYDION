@@ -1,9 +1,8 @@
 
 
-include( "src/ConstantsAndFunctions.jl" )
 include( "src/RHDSolver.jl" )
-using .ConstantsAndFunctions   # For constants (e.g. unit conversions)
-using .RHDSolver               # The full RHD solver module
+using .RHDSolver.ConstantsAndFunctions   # For constants (e.g. unit conversions)
+using .RHDSolver                         # The full RHD solver module
 
 
 # Name of HDF5 file containing simulation you want to restart:
