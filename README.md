@@ -1,6 +1,6 @@
 # LYDION: Lyman-α Radiation Hydrodynamics & Stellar Feedback Simulations
 
-**LYDION** (**LY**man-α **DI**ffus**ION**) is a fully coupled 2D Lyman-α (Lyα) radiation hydrodynamics code, capable of simulating **Lyα radiation pressure feedback** on-the-fly. This is done using a novel M1 moment method for Lyα radiative transfer. Also implemented in LYDION is stellar and IR radiative transfer, detailed non-equilibrium ISM photo-chemistry and heating/cooling, and dust dynamics and dust physics.
+**LYDION** (**LY**man-α **DI**ffus**ION**) is a fully coupled 2D Lyman-α (Lyα) radiation hydrodynamics (RHD) code, capable of simulating **Lyα radiation pressure feedback** on-the-fly. This is done using a novel M1 moment method for Lyα radiative transfer. Also implemented in LYDION is stellar and IR radiative transfer, detailed non-equilibrium ISM photo-chemistry and heating/cooling, and dust dynamics and dust physics.
 
 Taken together, LYDION allows realistic simulations of stellar feedback around young massive stars, from Lyα and non-Lyα radiation pressure, and photoionization. This can be used to assess the relative importance of these processes, and inform feedback prescriptions in 3D galaxy/star formation simulations.
 
@@ -40,7 +40,7 @@ using Pkg
 Pkg.instantiate()
 ```
 
-# How to run
+# How to run an RHD simulation
 
 The file **RunRHDSimulation.jl** contains the basic setup for running an RHD 
 simulation, with or without Lyα feedback. Cloud initial conditions, the 
