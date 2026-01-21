@@ -86,7 +86,7 @@ xOII_ext::Float64                  =  0.0
 
 Hydro::Bool                        =  true       # Hydrodynamics                    (on if true, off if false)
 Gravity::Bool                      =  true       # Self-gravity                     (on if true, off if false)
-Lyα::Bool                          =  true       # Lyα RT/RHD                       (on if true, off if false)
+Lyα::Bool                          =  false      # Lyα RT/RHD                       (on if true, off if false)
 Recoil::Bool                       =  true       # Atomic recoil for Lyα RT         (on if true, off if false)
 LyαDestruction::Bool               =  true       # Lyα destruction (pd > 0)         (on if true, off if false)
 RadPressure::Bool                  =  true       # Radiation pressure feedback      (on if true, off if false - NOTE: Lyα feedback is only on if Lyα RT is on)

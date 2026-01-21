@@ -234,10 +234,6 @@ end
     # Arrays for frequency diffusion:
     Fij_kp = Lyα.Fij_kp;   Fij_k = Lyα.Fij_k;   Fij_km = Lyα.Fij_km
 
-    # Changes in gas momentum, for tracking radiation pressure:
-    Δρu_Lyα_r = Lyα.Δρu_Lyα_r
-    Δρu_Lyα_Z = Lyα.Δρu_Lyα_Z
-
     # Grid size & intervals:
     N_r, N_Z, N_ν  = size( J )               # Grid size 
     dN_r           = 1:N_r                   # Useful r-interval 
@@ -259,10 +255,6 @@ end
         @assert size( F_r_HZ, 3 )      == nthreads
         @assert size( F_Z_HZ, 3 )      == nthreads
     end
-
-
-    #t_adv = 0.0
-    #t_freq = 0.0
 
     ################################################################################
     ############                                     ###############################
@@ -317,22 +309,6 @@ end
             
         end
     end
-    #t_adv = (time_ns() - t0) * 1e-9
-
-    #nbins_adv = kmax - kmin + 1
-    # optionally print once per step along with timings
-    #@info "Lyα adv bins" nbins_adv N_ν
-
-    LyαAbsorptionUpdate!( Lyα.J_Lyα, 
-                          Lyα.H_r_Lyα, Lyα.H_Z_Lyα,
-                          Lyα.H_r_Lyα_old, Lyα.H_Z_Lyα_old,
-                          Lyα.Hvoigt, Lyα.α_Lyα, Lyα.αc_Lyα, Lyα.α_F_Lyα, 
-                          Lyα.pd, 
-                          Lyα.Δρu_Lyα_r, Lyα.Δρu_Lyα_Z,
-                          Lyα.Δν,
-                          c̃, Δt )
-
-    Lyα.J_Lyα_old .= Lyα.J_Lyα
 
     ################################################################################
     ############                                     ###############################
@@ -378,9 +354,6 @@ end
             end
         end
     end
-    #t_freq = (time_ns() - t0) * 1e-9
-
-    #@info "Lyα timings (s)" adv=t_adv freq=t_freq total=(t_adv+t_freq)
 
     # Update old H components a final time:
     H_r_old .= H_r 

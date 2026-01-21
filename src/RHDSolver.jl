@@ -244,7 +244,8 @@ function UpdateRHD!( Δt_Hydro::Float64,
                                              inv_ΔV, A_r, A_Z, 
                                              r, rCoM, Z, ZCoM, inv_r_cell,
                                              u_r_star_r, u_Z_star_Z, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r, 
-                                             LyaState, Lyα )
+                                             LyaState, Lyα, 
+                                             RadPressure )
 
         # Update time:
         t_RT += Δt_RT
@@ -257,6 +258,9 @@ function UpdateRHD!( Δt_Hydro::Float64,
     #######                                                 #######
     ###############################################################
 
+    # TODO: Lyα radiation pressure should be moved to sub-cycling,
+    # like for stellar & IR.
+
     if RadPressure && Hydro
         # If radiation pressure feedback is turned on, deposit the momentum 
         # computed during the photo-thermochemistry sub-cycling:
@@ -265,15 +269,6 @@ function UpdateRHD!( Δt_Hydro::Float64,
         @threads for j in dN_Z
             @simd for i in dN_r
                 @inbounds begin
-                    # Add stellar radiation pressure momenta to the gas:
-                    #ρu_r[i,j] += RT.Δρu_stellar_r[i,j]
-                    #ρu_Z[i,j] += RT.Δρu_stellar_Z[i,j]
-
-                    # Add IR radiation pressure momenta to the gas:
-                    #if IRfeedback
-                    #    ρu_r[i,j] += RT.Δρu_IR_r[i,j]
-                    #    ρu_Z[i,j] += RT.Δρu_IR_Z[i,j]
-                    #end
 
                     # Add Lyα radiation pressure momentum to the gas:
                     if Lyα
@@ -633,7 +628,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     # Initialize struct for dust, and initialize the dust density 
     # as ρd = DG₀ × ρ:
 
-    Teff      = 3e4 
+    Teff      = 4.8e4 
     Td₀       = 30.0
     duststate = SetupDustState( N_r, N_Z, Teff, Td₀, "DustData.txt", 
                                 "DustIRData.txt", false )
@@ -1005,7 +1000,9 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         chemstate.xOII    .=  CheckPoint["xOII"][:, :]
 
         # Set up dust state struct, containing dust properties:
-        duststate          = SetupDustState( N_r, N_Z )
+        Teff      = 4.8e4 
+        Td₀       = 30.0
+        duststate = SetupDustState( N_r, N_Z, Teff, Td0 )
 
         # Setup hydro state (not initialized to right values yet) + ghost grid arrays:
         N_scalars::Int        = 17

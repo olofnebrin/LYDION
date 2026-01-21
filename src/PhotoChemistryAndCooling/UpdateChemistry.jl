@@ -198,20 +198,15 @@ function CarbonOxygenChemistry( xOI_old::Float64,
     xOHx_new = max( 1 - xOI_new - xOII_new - C_over_O * xCO_new, 0.0 )
     xCHx_new = max( 1 - xCI_new - xCII_new - xCO_new, 0.0 )
 
-    # Check accuracy/convergence:
-    ΔOI        = abs( xOI_new   - xOI_old )    / max( xOI_old,   xmin )
-    ΔOII       = abs( xOII_new  - xOII_old )   / max( xOII_old,  xmin )
-    ΔOHx       = abs( xOHx_new  - xOHx_old )   / max( xOHx_old,  xmin )
-    ΔCI        = abs( xCI_new   - xCI_old )    / max( xCI_old,   xmin )
-    ΔCII       = abs( xCII_new  - xCII_old )   / max( xCII_old,  xmin )
-    ΔCHx       = abs( xCHx_new  - xCHx_old )   / max( xCHx_old,  xmin )
-    ΔCO        = abs( xCO_new   - xCO_old )    / max( xCO_old,   xmin )
+    # Check consistency/convergence - corrector updates of O I, O II, and OHₓ
+    # should not differ much from the original O-solve:
     ΔOI_star   = abs( xOI_new   - xOI_star )   / max( xOI_star,  xmin )
     ΔOII_star  = abs( xOII_new  - xOII_star )  / max( xOII_star, xmin )
     ΔOHx_star  = abs( xOHx_new  - xOHx_star )  / max( xOHx_star, xmin )
-    ΔCarbOxy   = maximum( (ΔOI, ΔOII, ΔOHx, ΔCI, ΔCII, ΔCHx, ΔCO, 
-                           ΔOI_star, ΔOII_star, ΔOHx_star) )
 
+    ΔCarbOxy   = maximum( (ΔOI_star, ΔOII_star, ΔOHx_star) )
+
+    # Check that all abundances are positive (or at least very nearly so):
     Positivity = ( xOI_new ≥ - ϵneg && xOII_new ≥ - ϵneg && xOHx_new ≥ - ϵneg &&
                    xCI_new ≥ - ϵneg && xCII_new ≥ - ϵneg && xCHx_new ≥ - ϵneg
                    && xCO_new ≥ - ϵneg )
@@ -530,7 +525,7 @@ function UpdateChemistrySubStep( Δtsub::Float64,
         xOI_new, xOII_new, xCI_new, xCII_new, xCO_new, ConvergedCarbonOxygen = 
         CarbonOxygenChemistry( xOI_old, xOII_old, xCI_old, xCII_old,
                                xCO_old, nC, nO, nHI_new, nHII_new,
-                               nH2_new, ne_new, ΓionH2, ΓionOI, ΓionCI,
+                               nH2_new, ne_final, ΓionH2, ΓionOI, ΓionCI,
                                ΓdissCO, ΓdissOHx, ΓdissCHx,
                                T, Δtsub )
     else 

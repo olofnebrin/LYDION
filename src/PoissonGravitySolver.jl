@@ -256,7 +256,7 @@ function Set_Φ_BC!( Φ::AbstractArray{Float64, 2},
                     Q::AbstractArray{Float64, 1},
                  rCoM::AbstractArray{Float64, 1},
                  ZCoM::AbstractArray{Float64, 1},
-                 ℓmax::Int    = 20,
+                 ℓmax::Int    = 10,
              BC_Z_bot::Symbol = :Reflect
                     )
 
@@ -371,7 +371,7 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
                             ZCoM::AbstractArray{Float64, 1},
                                Q::AbstractArray{Float64, 1},
                                P::AbstractArray{Float64, 1},
-                            ℓmax::Int    = 20,
+                            ℓmax::Int    = 10,
                         BC_Z_bot::Symbol = :Reflect
                                )
 

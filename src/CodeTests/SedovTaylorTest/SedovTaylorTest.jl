@@ -150,13 +150,19 @@ function SetupSedovTaylorTest( ρ₀::Float64,
                                                  :Reflect, :Reflect,
                                                  :Reflect, :Reflect )
 
-    ρ   = hydrostate.ρ
-    u_r = hydrostate.u_X 
-    u_Z = hydrostate.u_Y
-    E   = hydrostate.E
-    P   = hydrostate.P 
-    e   = hydrostate.e 
-    γad = hydrostate.γad
+    # Hydro arrays:
+    ρ    = hydrostate.ρ
+    u_r  = hydrostate.u_X 
+    u_Z  = hydrostate.u_Y
+    E    = hydrostate.E
+    P    = hydrostate.P 
+    e    = hydrostate.e 
+    γad  = hydrostate.γad
+
+    # Dust arrays (not really active in the test, but needs to be initialized)
+    ρd   = hydrostate.ρd
+    ud_r = hydrostate.ud_X 
+    ud_Z = hydrostate.ud_Y
 
     # Get blastwave volume:
     Vblast = 0.0                  # Initialize blast volume 
@@ -180,6 +186,9 @@ function SetupSedovTaylorTest( ρ₀::Float64,
                 # Initial gas density & adiabatic index:
                 ρ[i,j]   = ρ₀
                 γad[i,j] = γ
+
+                # Set dust density to arbitrary value (it's not coupled to gas):
+                ρd[i,j]  = max( 1e-5 * ρ₀, ρd_floor )
 
                 # Distance from cloud center at the edge of this cell:
                 R = sqrt( r[i+1] * r[i+1]  +   Z[j+1] * Z[j+1] )
@@ -229,7 +238,7 @@ function SetupSedovTaylorTest( ρ₀::Float64,
     while t < tmax
 
         # Hydro CFL time-step:
-        Δt_CFL = GetCFLTimeStep( r, Z, ρ, P, u_r, u_Z, γad )  
+        Δt_CFL = GetCFLTimeStep( r, Z, ρ, P, u_r, u_Z, ud_r, ud_Z, γad )  
 
         # Set hydro time-step:
         Δt_Hydro = min( 1.25 * Δt_Hydro, Δt_CFL, Δt_Resolve, tmax - t )

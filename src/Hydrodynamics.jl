@@ -15,6 +15,9 @@
                     (2) Mignone (2014) 'High-order conservative reconstruction schemes for finite 
                         volume methods in cylindrical and spherical coordinates', Journal of Computational 
                         Physics, 270, pp. 784-814
+
+                    (3) Verrier et al. (2025) 'A new multifluid method for dusty astrophysical flows: 
+                        Application to turbulent protostellar collapses', A&A, 701, A174
     
     """
 
@@ -42,8 +45,8 @@ export GetPrimitive, GetCFLTimeStep,
 const CFL::Float64         =  0.4        # CFL factor for gas tim                            (< 1, default: 0.4)
 const C_Grav::Float64      =  0.1        # Sets the gravity-limited time-step                (default: 0.1)
 const C_RP::Float64        =  0.1        # Sets the rad. presure-limited time-step           (default: 0.1)
-const ρ_floor::Float64     =  1e-20 * mH # Gas density floor                                 (default: 10⁻²⁰ mH per cm⁻³)
-const ρd_floor::Float64    =  1e-20 * mH # Dust density floor                                (default: 10⁻²⁰ mH per cm⁻³)
+const ρ_floor::Float64     =  1e-10 * mH # Gas density floor                                 (default: 10⁻¹⁰ mH per cm⁻³)
+const ρd_floor::Float64    =  1e-13 * mH # Dust density floor                                (default: 10⁻¹³ mH per cm⁻³)
 const P_floor::Float64     =  1e-30      # Gas pressure floor                                (default: 10⁻³⁰ in cgs units)
 const γmon::Float64        =  5 / 3      # Adiabatic index of monoatomic gas
 const γdia::Float64        =  7 / 5      # Adiabatic index of diatomic gas
@@ -67,10 +70,11 @@ export CFL, C_Grav, C_RP, ρ_floor, ρd_floor, P_floor, γmon, γdia
                                 E::Float64, # Total gas energy 
                               γad::Float64  # Adiabatic index 
                                )
-    u_X  = ρu_X / ρ
-    u_Y  = ρu_Y / ρ
-    u_sq = u_X * u_X  +  u_Y * u_Y
-    P    = (γad - 1) * ( E  -  ρ * u_sq / 2 )
+    inv_ρ = 1 / ρ
+    u_X   = ρu_X * inv_ρ
+    u_Y   = ρu_Y * inv_ρ
+    u_sq  = u_X * u_X  +  u_Y * u_Y
+    P     = (γad - 1) * ( E  -  ρ * u_sq / 2 )
     return u_X, u_Y, P
 end
 
@@ -132,7 +136,7 @@ end
 
             # Compute the local CFL time-scale:
             Δt = min( ΔX / (cs + abs(u_X[i,j])), ΔX / abs(ud_r[i,j]), 
-                      ΔY / (cs + abs(u_Y[i,j])), ΔY / abs(ud_Z[i,j]),  )
+                      ΔY / (cs + abs(u_Y[i,j])), ΔY / abs(ud_Z[i,j])  )
             
             if Δt < local_min_ΔtHydro 
                 # Update the smallest time-scale found:
@@ -279,7 +283,7 @@ const inv_γdia_m1::Float64 = 1 / ( γdia  -  1 )
 end
 
 
-const Δx::Float64 = 1e-10  # Constant threshold for considering limiting values
+const Δx_Getμ::Float64 = 1e-10  # Constant threshold for considering limiting values
 
 """ This function gives the mean molecular weight μ given
     known fractional abundances of H II, H₂, He II, and He III.
@@ -293,10 +297,10 @@ const Δx::Float64 = 1e-10  # Constant threshold for considering limiting values
                      xHeIII::Float64 )
 
     # For added numerical stability:
-    xHII   = clamp( xHII, Δx, 1.0 - Δx )
-    xH2    = clamp( xH2, Δx / 2, (1.0 - Δx) / 2)
-    xHeII  = clamp( xHeII, Δx, 1.0 - Δx )
-    xHeIII = clamp( xHeIII, Δx, 1.0 - Δx )
+    xHII   = clamp( xHII,   Δx_Getμ,      1.0 - Δx_Getμ )
+    xH2    = clamp( xH2,    Δx_Getμ / 2, (1.0 - Δx_Getμ) / 2)
+    xHeII  = clamp( xHeII,  Δx_Getμ,      1.0 - Δx_Getμ )
+    xHeIII = clamp( xHeIII, Δx_Getμ,      1.0 - Δx_Getμ )
 
     ##### H Y D R O G E N #####
 
@@ -309,11 +313,11 @@ const Δx::Float64 = 1e-10  # Constant threshold for considering limiting values
     # fractions, but care must be taken for limiting values 
     # to avoid overflow or wrong results.
 
-    if abs( xHII - 1.0 ) ≤ 2 * Δx 
+    if abs( xHII - 1.0 ) ≤ 2 * Δx_Getμ 
         # In this case, consider hydrogen fully 
         # ionized:
         x = 1.0; y = 1.0
-    elseif abs( 2 * xH2 - 1.0 ) ≤ 2 * Δx 
+    elseif abs( 2 * xH2 - 1.0 ) ≤ 2 * Δx_Getμ 
         # In this case, consider hydrogen fully molecular:
         x = 0.0; y = 0.0
     else
@@ -333,13 +337,13 @@ const Δx::Float64 = 1e-10  # Constant threshold for considering limiting values
     # fractions, but care must be taken for limiting values 
     # to avoid overflow or wrong results.
 
-    if abs( xHeII - 1.0 ) ≤ 2 * Δx 
+    if abs( xHeII - 1.0 ) ≤ 2 * Δx_Getμ 
         # Consider helium singly ionized:
         z1 = 1.0; z2 = 0.0
-    elseif abs( xHeIII - 1.0 ) ≤ 2 * Δx 
+    elseif abs( xHeIII - 1.0 ) ≤ 2 * Δx_Getμ
         # Consider heloum doubly ionized:
         z1 = 1.0; z2 = 1.0
-    elseif abs( xHeIII + xHeII ) ≤ 2 * Δx
+    elseif abs( xHeIII + xHeII ) ≤ 2 * Δx_Getμ
         # Consider helium neutral:
         z1 = 0.0; z2 = 0.0
     else

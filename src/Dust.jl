@@ -1165,7 +1165,7 @@ const λ_Lyα_μm::Float64 = λμm_from_ν( νLyα )   # Lyα wavelength in μm
     to a text file for later reuse.
         
     All κ values are per dust mass, i.e. cm² g⁻¹ of dust. """
-function SaveDustOpacities( FileName::String, Teff::Float64 = 3e4 )
+function SaveDustOpacities( FileName::String, Teff::Float64 = 4.8e4 )
 
     # Stellar RT band-averaged optical properties:
     κabs_opt,  κsc_opt,  κext_opt,  ω_opt,  g_opt,  κF_opt  = DustBandMeans( Emin_opt,  Emax_opt,  Teff )
@@ -1287,7 +1287,7 @@ end
     properties. """
 function SetupDustState(  N_r::Int     = 128, 
                           N_Z::Int     = 128,
-                         Teff::Float64 = 3e4, 
+                         Teff::Float64 = 4.8e4, 
                           Td0::Float64 = 30.0,
               DustOpacityFile::String  = joinpath(@__DIR__, "DustData.txt"),
               DustIRMeansFile::String  = joinpath(@__DIR__, "DustIRData.txt"),

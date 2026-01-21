@@ -21,8 +21,8 @@ include("./StellarEmissionAbsorption.jl")  # For band opacities & stellar lumino
 include("./CosmicRays.jl")
 
 
-const CFL_RT::Float64                  = 0.4   # CFL factor that determines the advection time-step for stellar & Lyα RT (Default: 0.5. NOTE: Must be < 1)
-const DEBUG_PhotoThermoChemistry::Bool = false  # Allow safety checks for physical values etc. Cheap & good for tracking bugs.
+const CFL_RT::Float64                  = 0.4   # CFL factor that determines the advection time-step for stellar, IR & Lyα RT (Default: 0.4. NOTE: Must be < 1)
+const DEBUG_PhotoThermoChemistry::Bool = false # Allow safety checks for physical values etc. Cheap & good for tracking bugs.
 
 
 # Export constants and functions: 
@@ -680,7 +680,7 @@ function AbsorptionStep( Δt::Float64,
 
     # EUV1 gas flux opacity (adds Thomson scattering)
     α_gas_F_EUV1    =   ( nHI * σHI_EUV1_F  +  nH2 * σH2_EUV1_F   +   nDI * σHI_EUV1_F
-                        + nCI * σCI_EUV1    +  nOI * σOI_EUV1     +  ne  * σT )  
+                        + nCI * σCI_EUV1    +  nOI * σOI_EUV1     +   ne  * σT )  
 
 
     α_abs_EUV1      =   α_gas_abs_EUV1    +  Dust.κd_abs_EUV1 * ρd           # Absorption opacity (for J_EUV1)
@@ -745,7 +745,7 @@ function AbsorptionStep( Δt::Float64,
 
     # EUV2 gas flux opacity (adds Thomson scattering)
     α_gas_F_EUV2    =   ( nHI * σHI_EUV2_F  +  nH2 * σH2_EUV2_F  + nHeI * σHeI_EUV2_F   
-                        + nDI * σHI_EUV2    +  nCI * σCI_EUV2    + nOI  * σOI_EUV2   +  ne * σT  )
+                        + nDI * σHI_EUV2_F  +  nCI * σCI_EUV2    + nOI  * σOI_EUV2   +  ne * σT  )
 
     α_abs_EUV2      =   α_gas_abs_EUV2  +  Dust.κd_abs_EUV2 * ρd    # Absorption opacity (for J_EUV2)
     α_F_EUV2_dust   =   Dust.κd_F_EUV2 * ρd                         # Dust flux opacity  (for H_EUV2)
@@ -809,7 +809,7 @@ function AbsorptionStep( Δt::Float64,
 
     # EUV3 gas flux opacity (adds Thomson scattering):
     α_gas_F_EUV3     = ( nHI * σHI_EUV3_F  +  nH2 * σH2_EUV3_F  +  nHeI * σHeI_EUV3_F + nHeII * σHeII_EUV3_F
-                       + nDI * σHI_EUV3    +  nCI * σCI_EUV3    +  nOI * σOI_EUV3     +  ne * σT  )       
+                       + nDI * σHI_EUV3_F  +  nCI * σCI_EUV3    +  nOI * σOI_EUV3     +  ne * σT  )       
 
     α_abs_EUV3       =   α_gas_abs_EUV3  +  Dust.κd_abs_EUV3 * ρd    # Absorption opacity (for J_EUV3)
     α_F_EUV3_dust    =   Dust.κd_F_EUV3 * ρd                         # Dust flux opacity  (for H_EUV3)
@@ -1131,6 +1131,7 @@ const tol_enlargestep::Float64     = 0.5 * tol_Chem  # Recommend a 2 × larger s
 const J_floor::Float64             = 1e-10           # Maximum stellar J below which we don't care about the 10% rule 
 const H_floor::Float64             = 1e-10           # Maximum stellar H below which we don't care about the 10% rule 
 const xmin::Float64                = 1e-10           # Minimum abundance fraction below which we don't care about the 10% rule for primordial species 
+const xmax::Float64                = 1 + xmin        # Abundances should add up to 1, to within a margin xmin 
 const max_iter::Int                = 100             # Maximum number of adaptive refinements of sub-cycle time-step 
 const kB_T_floor::Float64          = kB * T_floor    # Convenient constant 
 const kB_T_ceil::Float64           = kB * T_ceiling  # Convenient constant 
@@ -1218,7 +1219,9 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
                                   H_Z_IR_old::Float64 = 0.0,
 
                                             z::Float64 = 0.0,
-                                          OTS::Bool    = true,  # On-the-spot approximation
+                                          OTS::Bool    = true,   # On-the-spot approximation
+                                  RadPressure::Bool    = true,   # Radiation pressure feedback on gas & dust (on if true, off if false)
+                                        L_box::Float64 = ΔL_max, # Box size, to limit column densities 
                                CoolingHeating::Bool    = true
                                       )
 
@@ -1252,22 +1255,22 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         @assert isfinite(H_r_EUV3_old)                   "H_r_EUV3_old = $(H_r_EUV3_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
         @assert isfinite(H_Z_EUV3_old)                   "H_Z_EUV3_old = $(H_Z_EUV3_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
 
-        @assert isfinite(xH2_old)                      "xH2_old = $(xH2_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xHII_old)                     "xHII_old = $(xHII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xHD_old)                      "xHD_old = $(xHD_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xDII_old)                     "xDII_old = $(xDII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xHeII_old)                    "xHeII_old = $(xHeII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xHeIII_old)                   "xHeIII_old = $(xHeIII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xCI_old)                      "xCI_old = $(xCI_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xCII_old)                     "xCII_old = $(xCII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xCO_old)                      "xCO_old = $(xCO_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xOI_old)                      "xOI_old = $(xOI_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(xOII_old)                     "xOII_old = $(xOII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert xHII_old + 2 * xH2_old ≤ 1.0           "xHII_old + 2 * xH2_old = $(xHII_old + 2 * xH2_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert xDII_old + xHD_old ≤ 1.0               "xDII_old + xHD_old = $(xDII_old + xHD_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert xHeII_old + xHeIII_old ≤ 1.0           "xHeII_old + xHeIII_old = $(xHeII_old + xHeIII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert xCI_old + xCII_old + xCO_old ≤ 1.0     "xCI_old + xCII_old + xCO_old = $(xCI_old + xCII_old + xCO_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert xOI_old + xOII_old ≤ 1.0               "xOI_old + xOII_old = $(xOI_old + xOII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xH2_old)                       "xH2_old = $(xH2_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xHII_old)                      "xHII_old = $(xHII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xHD_old)                       "xHD_old = $(xHD_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xDII_old)                      "xDII_old = $(xDII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xHeII_old)                     "xHeII_old = $(xHeII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xHeIII_old)                    "xHeIII_old = $(xHeIII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xCI_old)                       "xCI_old = $(xCI_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xCII_old)                      "xCII_old = $(xCII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xCO_old)                       "xCO_old = $(xCO_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xOI_old)                       "xOI_old = $(xOI_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(xOII_old)                      "xOII_old = $(xOII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert xHII_old + 2 * xH2_old ≤ xmax           "xHII_old + 2 * xH2_old = $(xHII_old + 2 * xH2_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert xDII_old + xHD_old ≤ xmax               "xDII_old + xHD_old = $(xDII_old + xHD_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert xHeII_old + xHeIII_old ≤ xmax           "xHeII_old + xHeIII_old = $(xHeII_old + xHeIII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert xCI_old + xCII_old + xCO_old ≤ xmax     "xCI_old + xCII_old + xCO_old = $(xCI_old + xCII_old + xCO_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert xOI_old + xOII_old ≤ xmax               "xOI_old + xOII_old = $(xOI_old + xOII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
     end
 
     # --------- Get gas phase metal density -----------------------------------------------------
@@ -1320,10 +1323,6 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
     mH_inv_kBρ        =   mH / ( kB * ρ )
     inv_xH2_old       =   1  / max( xH2_old,  xmin )             # Used in 10% rule check 
     inv_xHII_old      =   1  / max( xHII_old, xmin )             # Used in 10% rule check 
-    inv_xCO_old       =   1  / max( xCO_old,  xmin )             # Used in 10% rule check 
-    inv_xCII_old      =   1  / max( xCII_old, xmin )             # Used in 10% rule check 
-    inv_xOI_old       =   1  / max( xOI_old,  xmin )             # Used in 10% rule check 
-    inv_xOII_old      =   1  / max( xOII_old, xmin )             # Used in 10% rule check 
     inv_ne_old        =   1  / max( ne_old,   xmin * nH_old )    # Used in 10% rule check
     inv_γ_minus_1     =   1  / ( γad - 1 )
     e_floor           =   n * kB_T_floor * inv_γ_minus_1         # Used in limiting updated e
@@ -1351,8 +1350,9 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
     # -----------------------------------------------------------------------------------------
 
     # Sobolev-type column length estimate ~ cell width + density variation scale (following 
-    # e.g. Hopkins+ 2023, for FIRE-3). We limit ΔL to ≤ ΔL_max to avoid infinities if ∇ρ ~ 0:
-    ΔL   = min( min( Δr, ΔZ )  +  ρ  / abs(∇ρ),  ΔL_max )
+    # e.g. Hopkins+ 2023, for FIRE-3). We limit ΔL to ≤ min( ΔL_max, L_box)
+    # to avoid infinities if ∇ρ ~ 0:
+    ΔL   = min( min( Δr, ΔZ )  +  ρ  / abs(∇ρ),  ΔL_max, L_box )
 
     # Estimated H₂, HD, and CO column densities:
     N_H2 = nH2_old * ΔL 
@@ -1370,7 +1370,6 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
     ΔxHII_rel                = 0.0        # Initialize ΔxHII_rel, for printing in case convergence fails 
     Δne_rel                  = 0.0        # Initialize Δne_rel, for printing in case convergence fails 
     Δe                       = 0.0        # Initialize Δe, for printing in case convergence fails 
-    ConvergedDustGasCoupling = false      # Initialize ΔDustGasCoupling, for printing in case convergence fails
     ConvergedCarbonOxygen    = false      # Initialize check for carbon & oxygen chemistry 
     ΔStellarRT               = 0.0        # Initialize ΔStellarRT, for printing in case convergence fails 
     REDO_ABSORPTION          = false
@@ -1421,6 +1420,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         if REDO_ABSORPTION
             # Change in J or H were too large, so reject update and try a smaller sub-cycle time-step: 
             Δtsub = Δtsub_half
+
             continue 
         else
             # If changes in J and H were small enough, we accept the trial updated J and H:
@@ -1445,12 +1445,12 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
             Δρu_Z_IR_trial   += Δρu_Z_IR_trial_Abs
 
             # Radiation pressure momentum to be dumped into gas:
-            Δρu_r_gas_trial  += Δρu_r_rad_gas_trial_Abs
-            Δρu_Z_gas_trial  += Δρu_Z_rad_gas_trial_Abs
+            Δρu_r_gas_trial  += RadPressure * Δρu_r_rad_gas_trial_Abs
+            Δρu_Z_gas_trial  += RadPressure * Δρu_Z_rad_gas_trial_Abs
 
             # Radiation pressure momentum to be dumped into dust:
-            Δρu_r_dust_trial += Δρu_r_rad_dust_trial_Abs
-            Δρu_Z_dust_trial += Δρu_Z_rad_dust_trial_Abs
+            Δρu_r_dust_trial += RadPressure * Δρu_r_rad_dust_trial_Abs
+            Δρu_Z_dust_trial += RadPressure * Δρu_Z_rad_dust_trial_Abs
         end
 
         # Get photo-ionization/dissociation rates (s⁻¹), for use in chemistry 
@@ -1497,13 +1497,13 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         ρu_Z_new                 = ρu_Z_old
         # Initialize iteration count & convergence check:
         iter_DustGasCoupling     = 0
+        ConvergedDustGasCoupling = false
 
         while ConvergedDustGasCoupling == false && iter_DustGasCoupling < 10
             # Compute drag coefficient:
             Kdrag   = ComputeDragCoefficientK( Zgr_sil, Zgr_C, ρd_old, T_old, nHI_old, nH2_old, 
                                                nHII_old, nHeI_old, nHeII_old, nHeIII_old, ne_old, 
                                                ud_r_new, u_r_new, ud_Z_new, u_Z_new )
-            #Kdrag = 1e8 * mH / (1e-6*yr)
 
             # Get candidate update:
             ρu_r_new, ρu_Z_new, 
@@ -1539,6 +1539,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         if ConvergedDustGasCoupling == false 
             # Change in velocities were too large, reduce Δtsub & retry:
             Δtsub = Δtsub_half
+
             continue    
         end
 
@@ -1580,6 +1581,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
             # smaller sub-cycle time-step:
             Δtsub = min( Δtsub_half,  
                          Δt_e )
+
             continue 
         end 
 
@@ -1618,19 +1620,15 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         # e⁻ fractions/number densities (NOTE: Δne is already taking abs into account, hence Δne > 0):
         ΔxH2_rel    = abs( xH2_new   - xH2_old )  * inv_xH2_old
         ΔxHII_rel   = abs( xHII_new  - xHII_old ) * inv_xHII_old
-        ΔxCO_rel    = abs( xCO_new   - xCO_old )  * inv_xCO_old 
-        ΔxCII_rel   = abs( xCII_new  - xCII_old ) * inv_xCII_old 
-        ΔxOI_rel    = abs( xOI_new   - xOI_old )  * inv_xOI_old
-        ΔxOII_rel   = abs( xOII_new  - xOII_old ) * inv_xOII_old 
         Δne_rel     = Δne * inv_ne_old
 
         # Get the maximum relative change among them:
-        Δx_rel      = maximum( ( ΔxH2_rel, ΔxHII_rel, ΔxCO_rel, ΔxCII_rel, ΔxOI_rel, ΔxOII_rel, Δne_rel ) )
+        Δx_rel      = maximum( ( ΔxH2_rel, ΔxHII_rel, Δne_rel ) )
 
         if Δx_rel > tol_Chem || ConvergedCarbonOxygen == false 
-            # Change in H₂, H II, e⁻, CO, C II, O I, and/or O II 
-            # fraction was too high, reduce Δtsub & retry:
+            # Change in H₂, H II, or e⁻ was too high, reduce Δtsub & retry:
             Δtsub = Δtsub_half
+
             continue    
         end
 
@@ -1758,6 +1756,8 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
 
                                                      z::Float64 = 0.0,
                                                    OTS::Bool    = true,
+                                           RadPressure::Bool    = true,   # Radiation pressure feedback on gas & dust (on if true, off if false)
+                                                 L_box::Float64 = ΔL_max, # Box size, to limit column densities
                                         CoolingHeating::Bool    = true
                                               )
 
@@ -1862,7 +1862,7 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
                   J_IR_current, 
                   H_r_IR_current, H_Z_IR_current, 
 
-                  z, OTS, CoolingHeating )
+                  z, OTS, RadPressure, L_box, CoolingHeating )
 
         # Unpack result:
         Δtsub, Δtsub_new, e_new, xH2_new, xHII_new, xHD_new, xDII_new, xHeII_new, xHeIII_new, 
@@ -1986,17 +1986,17 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                                        LyaState::Union{LyαArrays,Nothing},
                                             Lyα::Bool = false,
 
-                                           # Boundary conditions:
-                                      BC_r_left::Symbol = :Reflect,
-                                     BC_r_right::Symbol = :Outflow,
-                                       BC_Z_bot::Symbol = :Reflect,
-                                       BC_Z_top::Symbol = :Outflow
+                                           # Radiation pressure feedback on gas & dust 
+                                           # (on if true, off if false):
+                                    RadPressure::Bool    = true  
+
                                               )
 
     c̃         = RT.c̃
     Δt_CFL_RT = GetRHDCFLTimeStep( r, Z, c̃, HydroState.u_X, HydroState.u_Y, CFL_RT ) 
     Δt_RT     = min( Δt_CFL_RT, Δt_RT_max )  
     c̃Δt_RT    = c̃ * Δt_RT 
+    L_box     = max( abs(r[end] - r[1]), abs(Z[end] - Z[1]) )  # Box size, to limit column densities 
     
     if Lyα
         @assert LyaState.c̃_Lyα == c̃ "Lyα and stellar RT c̃ mismatch in the photothermochemistry solver."
@@ -2027,7 +2027,13 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
     Zgas_Zsun = ChemState.Zgas_Zsun
 
     # On-spot-approximation (Case B) or modelling of recombination radiation:
-    OTS       = RT.OTS
+    OTS        = RT.OTS
+
+    # Boundary conditions:
+    BC_r_left  = HydroState.BC_X_left
+    BC_r_right = HydroState.BC_X_right
+    BC_Z_bot   = HydroState.BC_Y_left
+    BC_Z_top   = HydroState.BC_Y_right
 
     #######################################################################
     #######                                                         #######
@@ -2239,7 +2245,7 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                                                  RT.J_IR[i,j], 
                                                RT.H_r_IR[i,j], RT.H_Z_IR[i,j], 
 
-                                                          z, OTS, CoolingHeating )
+                                                          z, OTS, RadPressure, L_box, CoolingHeating )
 
                 # Get updated quantities:
                 e[i,j], xH2[i,j], xHII[i,j], xHD[i,j], xDII[i,j], xHeII[i,j], xHeIII[i,j], 

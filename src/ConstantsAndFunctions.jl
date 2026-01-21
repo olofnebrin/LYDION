@@ -16,8 +16,9 @@ using Roots             # Needed for root-finding in the frequency grid setup
 
 export LyαArrays, GenerateLyαArrays, H, Htophat, b, a, σ0, 
        Update_Hvoigt!, Update_ϕν!, Update_e_Lyα!,
-       AbsorptionUpdateJorH, LyαEmissionUpdate!, LyαAbsorptionUpdate!, Update_f_Lyα_MF_L_Lyα!,
-       Reset_Δρu!, AbsorptionUpdateH, Update_∇u_RHD!, D_colon_∇u_Cylindrical, 
+       AbsorptionUpdateJorH, LyαEmissionUpdate!, LyαEmissionAbsorptionUpdate!, 
+       Update_f_Lyα_MF_L_Lyα!, Reset_Δρu!, AbsorptionUpdateH, 
+       Update_∇u_RHD!, D_colon_∇u_Cylindrical, 
        eLyα_sphere_point, eLyα_sphere_uni,
        D_colon_∇u_Cartesian, Compute_f_esc_Cylindrical, Compute_f_esc_Lyα_Cylindrical,
        GetHydrogenDensities, GetHeliumDensities, GetElectronDensity,
@@ -334,38 +335,15 @@ end
 end
 
 
-""" This function updates J and H as a result of Lyα emission, 
+""" This function updates J and H as a result of Lyα emission,
     absorption of J (including by pd > 0), and absorption of H
-    (i.e. flux absorption). """
-function LyαEmissionUpdate!( J::AbstractArray{Float64, 3},
-                        js_Lyα::AbstractArray{Float64, 2},
-                           ϕ_ν::AbstractArray{Float64, 3},
-                             c̃::Float64,
-                            Δt::Float64 )
+    (i.e. flux absorption):
 
-    # Grid size & intervals:
-    N_r, N_Z, N_ν  = size( J )   # Grid size 
-    dN_r           = 1:N_r       # r-interval 
-    dN_Z           = 1:N_Z       # Z-interval
-    dN_ν           = 1:N_ν       # ν-interval
-
-    @threads for k in dN_ν
-        @inbounds @simd for j in dN_Z 
-            for i in dN_r 
-                # Update J:
-                J[i,j,k] += js_Lyα[i,j] * ϕ_ν[i,j,k] * c̃ * Δt
-            end # End of i-loop 
-        end # End of j-loop 
-    end # End of k-loop 
-
-    return nothing 
-end
-
-
-
-""" This function updates J and H as a result of Lyα
-    absorption of J (including by pd > 0), and absorption of H
-    (i.e. flux absorption). It also computes the corresponding 
+    (1/c̃)(∂J/∂t) = (∫dν js) ϕν  -  [αc_Lyα + α_Lyα * Hvoigt * pd] J
+    
+    (1/c̃)(∂H/∂t) = - α_F_Lyα * H
+    
+    It also computes the corresponding 
     change in gas momentum density from Lyα radiation pressure:
 
     Δρu = (4π/c) ∫dν ∫dt α_F * H 
@@ -375,21 +353,23 @@ end
     where we have used (1/c̃)(∂H/∂t) = - α_F H (for the absorption step).
     
     NOTE: This function also updates the old values of H. """
-function LyαAbsorptionUpdate!( J_Lyα::AbstractArray{Float64, 3},
-                             H_r_Lyα::AbstractArray{Float64, 3}, 
-                             H_Z_Lyα::AbstractArray{Float64, 3},
-                         H_r_old_Lyα::AbstractArray{Float64, 3},
-                         H_Z_old_Lyα::AbstractArray{Float64, 3},
-                              Hvoigt::AbstractArray{Float64, 3},
-                               α_Lyα::AbstractArray{Float64, 2},
-                              αc_Lyα::AbstractArray{Float64, 2},
-                             α_F_Lyα::AbstractArray{Float64, 3},
-                                  pd::AbstractArray{Float64, 2},
-                           Δρu_Lyα_r::AbstractArray{Float64, 2},
-                           Δρu_Lyα_Z::AbstractArray{Float64, 2},
-                                  Δν::AbstractArray{Float64},
-                                   c̃::Float64,
-                                  Δt::Float64 )
+function LyαEmissionAbsorptionUpdate!( J_Lyα::AbstractArray{Float64, 3},
+                                     H_r_Lyα::AbstractArray{Float64, 3}, 
+                                     H_Z_Lyα::AbstractArray{Float64, 3},
+                                 H_r_old_Lyα::AbstractArray{Float64, 3},
+                                 H_Z_old_Lyα::AbstractArray{Float64, 3},
+                                  ∫dν_js_Lyα::AbstractArray{Float64, 2},
+                                         ϕ_ν::AbstractArray{Float64, 3},
+                                      Hvoigt::AbstractArray{Float64, 3},
+                                       α_Lyα::AbstractArray{Float64, 2},
+                                      αc_Lyα::AbstractArray{Float64, 2},
+                                     α_F_Lyα::AbstractArray{Float64, 3},
+                                          pd::AbstractArray{Float64, 2},
+                                   Δρu_Lyα_r::AbstractArray{Float64, 2},
+                                   Δρu_Lyα_Z::AbstractArray{Float64, 2},
+                                          Δν::AbstractArray{Float64},
+                                           c̃::Float64,
+                                          Δt::Float64 )
 
     # Grid size & intervals:
     N_r, N_Z, N_ν  = size( J_Lyα )   # Grid size 
@@ -403,30 +383,22 @@ function LyαAbsorptionUpdate!( J_Lyα::AbstractArray{Float64, 3},
                 # Absorption opacity for J:
                 αabs_J = αc_Lyα[i,j]  +  α_Lyα[i,j] * Hvoigt[i,j,k] * pd[i,j]
 
-                # Flux opacity for H_r and H_Z:
-                αabs_H = α_F_Lyα[i,j,k]
+                # Change in J from emission:
+                dJdt   = ∫dν_js_Lyα[i,j] * ϕ_ν[i,j,k] * c̃
 
                 # Update J:
-                J_Lyα[i,j,k] = AbsorptionUpdateJorH( J_Lyα[i,j,k], Δt, 0.0, αabs_J, c̃ )
+                J_Lyα[i,j,k] = AbsorptionUpdateJorH( J_Lyα[i,j,k], Δt, dJdt, αabs_J, c̃ )
 
                 # Store & set old (un-updated) H components:
                 H_r_old_Lyα[i,j,k] = H_r_Lyα[i,j,k] 
                 H_Z_old_Lyα[i,j,k] = H_Z_Lyα[i,j,k]
 
+                # Flux opacity for H_r and H_Z:
+                αabs_H = α_F_Lyα[i,j,k]
+
                 # Candidate updates for H_r and H_Z:
                 H_r_Lyα[i,j,k]  = AbsorptionUpdateJorH( H_r_old_Lyα[i,j,k], Δt, 0.0, αabs_H, c̃ )
                 H_Z_Lyα[i,j,k]  = AbsorptionUpdateJorH( H_Z_old_Lyα[i,j,k], Δt, 0.0, αabs_H, c̃ )
-
-                # Ensure that H ≤ J:
-                #H_mag = sqrt( H_r_new * H_r_new  +  H_Z_new * H_Z_new )
-                #if H_mag > J_Lyα[i,j,k]
-                #    f              = H_mag / J_Lyα[i,j,k]
-                #    H_r_Lyα[i,j,k] = H_r_new / f
-                #    H_Z_Lyα[i,j,k] = H_Z_new / f
-                #else
-                #    H_r_Lyα[i,j,k] = H_r_new
-                #    H_Z_Lyα[i,j,k] = H_Z_new
-                #end
 
             end # End of i-loop 
         end # End of j-loop 

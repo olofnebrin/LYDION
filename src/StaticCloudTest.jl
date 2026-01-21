@@ -58,10 +58,10 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
                                pd₀::Float64,              # Destruction probability pd in the cloud 
                                 rs::Float64 = 1.0,        # Relative size of emission region, Rs/Rcl
                               umax::Float64 = 0.0,        # Maximum gas velocity (km/s), at cloud edge (Hubble flow is assumed, u ∝ R) 
+                            Recoil::Bool    = false,      # Whether atomic recoil is turned on (if true) or not (if false)
                              θhole::Float64 = 0.0,        # Opening angle (radians) of a hole in the cloud (0 for uniform cloud)
                              L_Lyα::Float64 = 1e5 * Lsun, # Total Lyα luminosity within spherical radius Rs 
                IonizedSourceRegion::Bool    = false,      # Whether the emission region is ionized (if true) or not (if false)
-                            Recoil::Bool    = false,      # Whether atomic recoil is turned on (if true) or not (if false)
                                Rcl::Float64 = pc,         # Cloud radius (no real impact on the test setup)
                                 Zc::Float64 = 0.0,        # Cloud center position 
                      tmax_unitless::Float64 = 4.0,        # Maximum time for time integration, in units (aτ_cl)^(1/3) Rcl / c̃
@@ -271,10 +271,15 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
         Δt     = min(Δt_CFL, tmax - t)
         c̃Δt    = c̃ * Δt
 
-        # 1) Lyα emission
-        LyαEmissionUpdate!( J, ∫dν_js_Lyα, ϕ_ν, c̃, Δt )
+        # 1) Lyα emission & absorption:
+        LyαEmissionAbsorptionUpdate!( J, H_r, H_Z,
+                                      H_r_old, H_Z_old,
+                                      ∫dν_js_Lyα, ϕ_ν,
+                                      Hvoigt, α_Lyα, αc, α_F, pd,
+                                      Δρu_r, Δρu_Z, Δν,
+                                      c̃, Δt )
 
-        # 2) M1 spatial advection + absorption + frequency diffusion + Doppler shift
+        # 2) M1 spatial advection + frequency diffusion + Doppler shift
         UpdateLyαJandH!( Δt, c̃, LyaState,
                          inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
                          T,

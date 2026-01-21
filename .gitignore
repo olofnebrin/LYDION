@@ -9,11 +9,11 @@ Manifest.toml
 # VS Code
 .vscode/
 
-# Outputs / data (adjust to taste)
+# Outputs / data 
 *.h5
 *.dat
-*.txt
 *.mp4
 *.png
 *.pdf
+#*.txt
 .DS_Store
