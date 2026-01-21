@@ -41,6 +41,10 @@ function Initialize_ν_Scratch2D!( N_ν::Int64 )
 end
 
 
+""" The frequency update of J for Lyα, from frequency diffusion, 
+    Doppler shifts, and atomic recoil. H is also updated for consistency 
+    with assumed fixed Eddington tensor. A BDF1 method is used over a 
+    time-step Δt, with Δw ≡ 1 / c̃ Δt. """
 @views @fastmath function FrequencyUpdateJLyα!( Δw::Float64, 
                                                  J::AbstractArray{Float64},
                                               Jold::AbstractArray{Float64},
@@ -227,9 +231,6 @@ end
 
     # Flux opacity:
     α_F    = Lyα.α_F_Lyα
-
-    # Frequency grid:
-    Δν     = Lyα.Δν
     
     # Arrays for frequency diffusion:
     Fij_kp = Lyα.Fij_kp;   Fij_k = Lyα.Fij_k;   Fij_km = Lyα.Fij_km

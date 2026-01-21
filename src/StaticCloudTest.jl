@@ -271,7 +271,7 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
         Δt     = min(Δt_CFL, tmax - t)
         c̃Δt    = c̃ * Δt
 
-        # 1) Lyα emission & absorption:
+        # 1) Lyα emission & absorption, and radiation pressure:
         LyαEmissionAbsorptionUpdate!( J, H_r, H_Z,
                                       H_r_old, H_Z_old,
                                       ∫dν_js_Lyα, ϕ_ν,
@@ -285,13 +285,6 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
                          T,
                          u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
                          true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top )
-
-        # 3) Lyα absorption/Lyα destruction, and radiation pressure:
-        #LyαAbsorptionUpdate!( J, H_r, H_Z,
-        #                      H_r_old, H_Z_old,
-        #                      Hvoigt, α_Lyα, αc, α_F, pd,
-        #                      Δρu_r, Δρu_Z, Δν,
-        #                      c̃, Δt )
 
         # Update Lyα forces f_Lyα, force multiplier, and M_F:
         LyaState.M_F, LyaState.L_Lyα = Update_f_Lyα_MF_L_Lyα!( LyaState.f_Lyα_r, LyaState.f_Lyα_Z, Δρu_r, Δρu_Z, 

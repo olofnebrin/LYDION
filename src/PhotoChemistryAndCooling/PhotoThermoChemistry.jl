@@ -2373,11 +2373,15 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
             end # End of j-loop 
         end # End of k-loop
         
-        # Lyα emission:
-        LyαEmissionUpdate!( LyaState.J_Lyα, LyaState.∫dν_js_Lyα,
-                            LyaState.ϕ_ν, c̃, Δt_RT )
+        # Lyα emission, absorption (including rad. pressure):
+        LyαEmissionAbsorptionUpdate!( LyaState.J_Lyα, LyaState.H_r_Lyα, LyaState.H_Z_Lyα,
+                                      LyaState.H_r_Lyα_old, LyaState.H_Z_Lyα_old,
+                                      LyaState.∫dν_js_Lyα, LyaState.ϕ_ν,
+                                      LyaState.Hvoigt, LyaState.α_Lyα, LyaState.αc_Lyα, LyaState.α_F_Lyα, LyaState.pd,
+                                      LyaState.Δρu_Lyα_r, LyaState.Δρu_Lyα_Z, LyaState.Δν,
+                                      c̃, Δt_RT )
 
-        # Lyα Advection + Absorption (including rad. pressure) + frequency diffusion & Doppler shift:
+        # Lyα Advection + frequency diffusion & Doppler shift:
         UpdateLyαJandH!( Δt_RT, c̃, LyaState, inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell, T,
                          u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
                          true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top )
