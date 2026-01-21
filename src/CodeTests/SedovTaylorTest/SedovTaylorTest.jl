@@ -25,8 +25,7 @@ export SetupSedovTaylorTest
 function UpdateSedovTest!( Δt_Hydro::Float64,
                          hydrostate::HydrodynamicsState{Float64},
                            geometry::GeometryCylindrical{Float64},
-                          ghostgrid::GhostPaddedGrid{Float64},
-                             rfirst::Bool    = true
+                          ghostgrid::GhostPaddedGrid{Float64}
                           )
 
     # Geometry arrays:
@@ -233,7 +232,6 @@ function SetupSedovTaylorTest( ρ₀::Float64,
 
     t                = 0.0     # Initialize time 
     step             = 1       # Initialize the steps
-    rfirst           = true    # Initialize Strang-split order (1/2 r, Z, 1/2 vs. 1/2 Z, r, 1/2 Z) for hydro 
     Δt_Hydro         = Inf     # Initialize the hydro time-step 
     while t < tmax
 
@@ -245,18 +243,11 @@ function SetupSedovTaylorTest( ρ₀::Float64,
 
         # Update hydro:
         UpdateSedovTest!( Δt_Hydro, hydrostate, geometry,
-                          ghostgrid, rfirst )
+                          ghostgrid )
 
         # Update time & step: 
         t    += Δt_Hydro 
         step += 1
-
-        # Update hydro Strang-split order:
-        if rfirst == true 
-            rfirst = false
-        else
-            rfirst = true 
-        end
 
         # ----------- Decide to save data --------------
         if t ≥ t_next_save  -  save_tol # The last factor is to avoid missing a save because round-off errors 

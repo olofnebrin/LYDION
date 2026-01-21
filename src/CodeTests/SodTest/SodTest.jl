@@ -3,17 +3,21 @@ module SodTest
 
 __precompile__()
 
-include("../../ConstantsAndFunctions.jl")
-include("../../SpatialGrid.jl")
-include("../../Hydrodynamics.jl")
-include("../SaveHDF5Data_HydroTests.jl")
+
+include( "../../Structs.jl" )
+include( "../../ConstantsAndFunctions.jl" )
+using .Structs
 using .ConstantsAndFunctions
-using .SpatialGrid
-using .Hydrodynamics
-using .SaveHDF5Data_HydroTests
+
+include( "../../WENO3.jl" )
+include( "../../SpatialGrid.jl" )
+include( "../../Hydrodynamics.jl" )
+include( "../SaveHDF5Data_HydroTests.jl" )
+
 using  Base.Threads              # For CPU acceleration
 using  ProgressMeter             # To show time step progress
 using  Dates, Printf
+
 
 export SetupSodTest
 
@@ -21,22 +25,16 @@ export SetupSodTest
 
 """ This function performs a hydro time-step Δt_Hydro, for the Sod shock tube test. """
 function UpdateSodTest!( Δt_Hydro::Float64,
-                      hydrostate::HydrodynamicsState{Float64},
-                        geometry::GeometryCartesian{Float64},
-                       ghostgrid::GhostPaddedGrid{Float64},
-                          Xfirst::Bool    = true
+                       hydrostate::HydrodynamicsState{Float64},
+                         geometry::GeometryCartesian{Float64},
+                        ghostgrid::GhostPaddedGrid{Float64}
                           )
 
     # Main geometry arrays:
-    ΔV          = geometry.ΔV
     inv_ΔV      = geometry.inv_ΔV
     A_X         = geometry.A_X
     A_Y         = geometry.A_Y
     inv_r_cell  = geometry.inv_r_cell # Not needed/carries no significance in Cartesian coordinates, except as an argument
-    X           = geometry.X 
-    XCoM        = geometry.XCoM
-    Y           = geometry.Y
-    YCoM        = geometry.YCoM
 
     # Weights for converting between cell center & cell-average values of 
     # conservatives & primitives:
@@ -53,59 +51,10 @@ function UpdateSodTest!( Δt_Hydro::Float64,
     w_plus_j_p1 = geometry.w_plus_j_p1;  w_minus_j_p1 = geometry.w_minus_j_p1
 
     # Hydro state arrays (cell-averaged):
-    ρ_new       = hydrostate.ρ_new;    ρu_X_new    = hydrostate.ρu_X_new 
-    ρu_Y_new    = hydrostate.ρu_Y_new; E_new       = hydrostate.E_new 
     ρ           = hydrostate.ρ;        ρu_X        = hydrostate.ρu_X 
     ρu_Y        = hydrostate.ρu_Y;     E           = hydrostate.E
-    ρ0          = hydrostate.ρ0;       ρu_X0       = hydrostate.ρu_X0 
-    ρu_Y0       = hydrostate.ρu_Y0;    E0          = hydrostate.E0
     u_X         = hydrostate.u_X;      u_Y         = hydrostate.u_Y 
-    P           = hydrostate.P;        e           = hydrostate.e 
-    T           = hydrostate.T;        γad         = hydrostate.γad 
-
-    # Cell center variables:
-    ρc          = hydrostate.ρc;       ρu_Xc       = hydrostate.ρu_Xc
-    ρu_Yc       = hydrostate.ρu_Yc;    Ec          = hydrostate.Ec
-    u_Xc        = hydrostate.u_Xc;     u_Yc        = hydrostate.u_Yc 
-    Pc          = hydrostate.Pc
-
-    # Hydro state arrays for the RK time integration:
-    ρ_stage     = hydrostate.ρ_stage;        ρu_X_stage   = hydrostate.ρu_X_stage 
-    ρu_Y_stage  = hydrostate.ρu_Y_stage;     E_stage      = hydrostate.E_stage
-
-    # X-direction interface hydro state & fluxes:
-    ρ_L_X    = hydrostate.ρ_L_X;    ρ_R_X    = hydrostate.ρ_R_X
-    u_X_L_X  = hydrostate.u_X_L_X;  u_X_R_X  = hydrostate.u_X_R_X 
-    u_Y_L_X  = hydrostate.u_Y_L_X;  u_Y_R_X  = hydrostate.u_Y_R_X 
-    P_L_X    = hydrostate.P_L_X;    P_R_X    = hydrostate.P_R_X 
-    Fρ_X     = hydrostate.F_ρ_X;    FρuX_X   = hydrostate.F_ρu_X_X
-    FρuY_X   = hydrostate.F_ρu_Y_X; FE_X     = hydrostate.F_E_X
-
-    # Y-direction interface hydro state & fluxes:
-    ρ_L_Y    = hydrostate.ρ_L_Y;    ρ_R_Y    = hydrostate.ρ_R_Y
-    u_Y_L_Y  = hydrostate.u_Y_L_Y;  u_Y_R_Y  = hydrostate.u_Y_R_Y
-    u_X_L_Y  = hydrostate.u_X_L_Y;  u_X_R_Y  = hydrostate.u_X_R_Y 
-    P_L_Y    = hydrostate.P_L_Y;    P_R_Y    = hydrostate.P_R_Y 
-    Fρ_Y     = hydrostate.F_ρ_Y;    FρuX_Y   = hydrostate.F_ρu_X_Y 
-    FρuY_Y   = hydrostate.F_ρu_Y_Y; FE_Y     = hydrostate.F_E_Y
-
-    # Contact velocities:
-    u_X_star_X = hydrostate.u_X_star_X
-    u_Y_star_Y = hydrostate.u_Y_star_Y
-
-    # Ghost-padded arrays:
-    ρg_old   = hydrostate.ρg_old;   u_Xg_old = hydrostate.u_Xg_old
-    u_Yg_old = hydrostate.u_Yg_old; Pg_old   = hydrostate.Pg_old 
-    Xg       = ghostgrid.Xg;        XCoMg    = ghostgrid.XCoMg 
-    Yg       = ghostgrid.Yg;        YCoMg    = ghostgrid.YCoMg
-
-    # Shock indicator:
-    Shock    = hydrostate.Shock
-
-    # Boundary conditions:
-    BC_X_left = hydrostate.BC_X_left;  BC_X_right = hydrostate.BC_X_right
-    BC_Y_left = hydrostate.BC_Y_left;  BC_Y_right = hydrostate.BC_Y_right
-
+    P           = hydrostate.P;        γad         = hydrostate.γad 
 
     # Grid size & intervals:
     N_X, N_Y    = size( ρ )
@@ -118,37 +67,15 @@ function UpdateSodTest!( Δt_Hydro::Float64,
     #######                                                 #######
     ###############################################################
 
-    # Update hydro variables by advection:
-    UpdateHydro!( ρ_new,  ρu_X_new, ρu_Y_new, E_new,
-                  ρ,      ρu_X,     ρu_Y,     E,
-                  ρ0,     ρu_X0,    ρu_Y0,    E0,
-                  γad,    u_X,      u_Y,
-                  inv_ΔV, A_X,      A_Y,      Δt_Hydro,
-
-                  ρ_stage,  ρu_X_stage, ρu_Y_stage, E_stage,
-
-                  ρc,     ρu_Xc,    ρu_Yc,    Ec,
-                  u_Xc,   u_Yc,     Pc,
+    # Update hydro variables by advection: 
+    UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, inv_ΔV, A_X, A_Y, 
 
                   w_i_m1_X, w_i_0_X, w_i_p1_X, w_j_m1_Y, w_j_0_Y, w_j_p1_Y, 
                   q_i_m1_X, q_i_0_X, q_i_p1_X, q_j_m1_Y, q_j_0_Y, q_j_p1_Y,  
 
-                  w_plus_i_p1, w_minus_i_p1,   
-                  w_plus_j_p1, w_minus_j_p1, 
+                  w_plus_i_p1, w_minus_i_p1,  w_plus_j_p1, w_minus_j_p1,
 
-                  ρ_L_X, ρ_R_X, u_X_L_X, u_X_R_X, u_Y_L_X, u_Y_R_X, P_L_X, P_R_X,
-                  Fρ_X, FρuX_X, FρuY_X, FE_X,
-                  ρ_L_Y, ρ_R_Y, u_Y_L_Y, u_Y_R_Y, u_X_L_Y, u_X_R_Y, P_L_Y, P_R_Y,
-                  Fρ_Y, FρuX_Y, FρuY_Y, FE_Y,
-                  P, u_X_star_X, u_Y_star_Y,
-                  ρg_old, u_Xg_old, u_Yg_old, 
-                  Pg_old, 
-                  Xg, XCoMg, Yg,  YCoMg, 
-
-                  Val(:Cartesian), inv_r_cell, Xfirst,
-                  Shock,
-                  BC_X_left, BC_X_right,
-                  BC_Y_left, BC_Y_right )  
+                  Val(:Cartesian), inv_r_cell )  
 
     # Update primitives to reflect latest conservatives,
     # so that we can set the CFL time-step for the scalar advection:
@@ -188,7 +115,6 @@ function SetupSodTest( tmax::Float64,
     XCoM     = geometry.XCoM
     Y        = geometry.Y
     YCoM     = geometry.YCoM
-    ΔV       = geometry.ΔV
 
     # Grid intervals:
     N_X      = length( XCoM )
@@ -213,21 +139,27 @@ function SetupSodTest( tmax::Float64,
         print("\r\033[KInitialising hydro arrays..."); flush(stdout)
     end 
 
+    # We have no passive scalars:
+    N_Scalars = 0
+
     # Set up hydro state + ghost grid arrays:
-    hydrostate, ghostgrid = GenerateHydroArrays( X, XCoM, Y, YCoM, 7 / 5,
+    hydrostate, ghostgrid = GenerateHydroArrays( X, XCoM, Y, YCoM, 7 / 5, N_Scalars,
                                                  :Reflect, :Reflect,   # Reflective BCs in X 
                                                  :Reflect, :Reflect    # Reflective BCs in Y 
                                                   )
 
+    # Hydro arrays:
     ρ    = hydrostate.ρ
-    ρu_X = hydrostate.ρu_X 
-    ρu_Y = hydrostate.ρu_Y
     u_X  = hydrostate.u_X 
     u_Y  = hydrostate.u_Y
     E    = hydrostate.E
     P    = hydrostate.P 
-    e    = hydrostate.e 
     γad  = hydrostate.γad
+
+    # Dust arrays (not coupled to gas, but need to be initialized): 
+    ρd   = hydrostate.ρd
+    ud_X = hydrostate.ud_X 
+    ud_Y = hydrostate.ud_Y
 
     # Constants:
     γ   = 7 / 5  # Adiabatic index 
@@ -245,6 +177,9 @@ function SetupSodTest( tmax::Float64,
                 ρ[i,j] = 0.125
                 P[i,j] = 0.1
             end
+
+            # Arbitrary initial dust density (not coupled to gas):
+            ρd[i,j]   = max( 1e-5, ρd_floor )
 
             # Gas energy (no initial kinetic energy):
             E[i,j]    = P[i,j] / (γad[i,j] - 1)  
@@ -277,30 +212,22 @@ function SetupSodTest( tmax::Float64,
 
     t                = 0.0     # Initialize time 
     step             = 1       # Initialize the steps
-    Xfirst           = true    # Initialize Strang-split order (1/2 X, Y, 1/2 X vs. 1/2 Y, X, 1/2 Y) for hydro 
     Δt_Hydro         = Inf     # Initialize the hydro time-step 
     while t < tmax
 
         # Hydro CFL time-step:
-        Δt_CFL = GetCFLTimeStep( X, Y, ρ, P, u_X, u_Y, γad )  
+        Δt_CFL = GetCFLTimeStep( X, Y, ρ, P, u_X, u_Y, ud_X, ud_Y, γad )  
 
         # Set hydro time-step:
         Δt_Hydro = min( 1.25 * Δt_Hydro, Δt_CFL, Δt_Resolve, tmax - t )
 
         # Update hydro:
         UpdateSodTest!( Δt_Hydro, hydrostate, geometry,
-                        ghostgrid, Xfirst )
+                        ghostgrid )
 
         # Update time & step: 
         t    += Δt_Hydro 
         step += 1
-
-        # Update hydro Strang-split order:
-        if Xfirst == true 
-            Xfirst = false
-        else
-            Xfirst = true 
-        end
 
         # ----------- Decide to save data --------------
         if t ≥ t_next_save  -  save_tol # The last factor is to avoid missing a save because round-off errors 
