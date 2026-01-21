@@ -6,6 +6,9 @@
 *_OLD.jl
 Manifest.toml
 
+# Python
+ReadMeAnimation.py
+
 # VS Code
 .vscode/
 
