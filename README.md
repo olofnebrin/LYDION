@@ -46,9 +46,9 @@ Pkg.instantiate()
 
 The file **RunRHDSimulation.jl** contains the basic setup for running an RHD 
 simulation, with or without Lyα feedback. Cloud initial conditions, the 
-mass of the star, physics settings, resolution, etc., can all be changed
-in that file. Running the file will set up the simulation, run it, and 
-continuously save output data to an HDF5 file.
+mass of the star, physics settings, resolution, and so on, can all be changed
+in that file. Running the file will set up the simulation, start the simulation, 
+and continuously save output data to an HDF5 file.
 
 To launch a simulation from the repository root, using 8 CPU threads 
 as an example, do:
@@ -68,4 +68,7 @@ julia --project=. --threads=8 RestartRHDSimulation.jl
 
 # Simulation output 
 
-Simulation results in the HDF5 file can be used for post-simulation analysis.
+Simulation results in the HDF5 file can be used for post-simulation analysis. 
+A variety of data is saved, e.g. the gas density and temperature, dust density,
+chemical abundances, ecsape fractions, force diagnostics (see **SaveHDF5Data_RHD.jl** for a full list). You can analyze this data however you want. Some simple 
+Python code for making simulation animations and plots are included. 
