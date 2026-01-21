@@ -125,8 +125,9 @@ function SetupSedovTaylorTest( ρ₀::Float64,
     dN_Z     = 1:N_Z
 
     # Create file:
-    FileName = @sprintf( "SedovTest_E%.2e_rho%.2g_gamma%.2f_t%.1f_%dx%d.h5",
-                         Eblast, ρ₀, γ, tmax, N_r_lin, N_Z_lin )
+    outdir   = @__DIR__    # .../src/CodeTests/SedovTaylorTest
+    FileName = joinpath( @sprintf( "SedovTest_E%.2e_rho%.2g_gamma%.2f_t%.1f_%dx%d.h5",
+                         Eblast, ρ₀, γ, tmax, N_r_lin, N_Z_lin ) )
     CreateHDF5File( FileName, N_r, N_Z, Nsaved )
     SaveGridHDF5File( FileName, geometry )
 

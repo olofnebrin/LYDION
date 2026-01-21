@@ -123,8 +123,9 @@ function SetupSodTest( tmax::Float64,
     dN_Y     = 1:N_Y
 
     # Create file:
-    FileName = @sprintf( "SodTest_%03dx%03d_t%.2f.h5",
-                         N_X_lin, N_Y_lin, tmax )
+    outdir   = @__DIR__    # .../src/CodeTests/SodTest
+    FileName = joinpath( outdir, @sprintf("SodTest_%03dx%03d_t%.2f.h5",
+                         N_X_lin, N_Y_lin, tmax))
     CreateHDF5File( FileName, N_X, N_Y, Nsaved )
     SaveGridHDF5File( FileName, geometry )
 

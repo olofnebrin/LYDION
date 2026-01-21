@@ -4,7 +4,7 @@ using .SodTest         # The Sod shock tube test setup
 
 
 tmax::Float64                      =  0.2
-N_X::Int                           =  128
+N_X::Int                           =  100
 Nminsteps::Int                     =  300
 Nmaxsteps::Int                     =  100000
 

@@ -5054,9 +5054,7 @@ function GravitySolveAndKick!( Δt::Float64,
 
     # Unpack some hydro & dust variables for convenience:
     ρu_X     = HydroState.ρu_X
-    ρu_X0    = HydroState.ρu_X0 
     ρu_Y     = HydroState.ρu_Y 
-    ρu_Y0    = HydroState.ρu_Y0 
     ρ        = HydroState.ρ       # Latest densities from after hydro advecton step 
     ρ0       = HydroState.ρ0      # Old densities from *before* hydro advecton step 
     E        = HydroState.E
@@ -5078,9 +5076,6 @@ function GravitySolveAndKick!( Δt::Float64,
     # Fill ρ0 with the estimated ρ^(n+1/2), similarly for dust:
     @. ρ0      = 0.5 * ( ρ0  + ρ )
     @. ρd0     = 0.5 * ( ρd0 + ρd )
-    # Similarly, fill ρu_X0 and ρu_Y0 with their estimated values at t^(n+1/2):
-    @. ρu_X0   = 0.5 * ( ρu_X0   + ρu_X )
-    @. ρu_Y0   = 0.5 * ( ρu_Y0   + ρu_Y )
 
     # Check whether we should update Φ or not:
     ShouldWeUpdate = ShouldWeUpdateΦ( GravState.Φ, 
@@ -5131,19 +5126,16 @@ end
 
 """ This function *only* does a gravity kick to the hydro,
     i.e. no Poisson equation solve. It is mainly used for 
-    hydro tests with a fixed potential Φ. """
+    hydro tests with a fixed potential Φ.
+    
+    NOTE: It ignores dust, since we don't want to kick dust 
+          during a hydro test. """
 function GravityKick!( Δt::Float64,
                      ρu_X::AbstractMatrix{Float64}, 
-                    ρu_X0::AbstractMatrix{Float64}, 
                      ρu_Y::AbstractMatrix{Float64},
-                    ρu_Y0::AbstractMatrix{Float64}, 
                         ρ::AbstractMatrix{Float64}, # Latest densities from after hydro advecton step 
                        ρ0::AbstractMatrix{Float64}, # Old densities from *before* hydro advecton step 
                         E::AbstractMatrix{Float64},
-                       ρd::AbstractMatrix{Float64},
-                      ρd0::AbstractMatrix{Float64},
-                   ρdud_X::AbstractMatrix{Float64},
-                   ρdud_Y::AbstractMatrix{Float64},
 
                      ∂Φ∂X::AbstractMatrix{Float64},
                      ∂Φ∂Y::AbstractMatrix{Float64}
@@ -5154,12 +5146,8 @@ function GravityKick!( Δt::Float64,
     dN_X     = 1:N_X
     dN_Y     = 1:N_Y 
 
-    # Fill ρ0 with the estimated ρ^(n+1/2), similarly for dust:
+    # Fill ρ0 with the estimated ρ^(n+1/2):
     @. ρ0    = 0.5 * ( ρ0 + ρ )
-    @. ρd0   = 0.5 * ( ρd0 + ρd )
-    # Similarly, fill ρu_X0 and ρu_Y0 with their estimated values at t^(n+1/2):
-    @. ρu_X0 = 0.5 * ( ρu_X0 + ρu_X )
-    @. ρu_Y0 = 0.5 * ( ρu_Y0 + ρu_Y )
 
     # Finally, we perform a second-order in time gravity kick to the
     # hydro variables:
@@ -5176,10 +5164,6 @@ function GravityKick!( Δt::Float64,
 
             # Update gas energy, ensuring the internal energy remains unchanged:
             E[i,j]       =  e_adv  +  (ρu_X[i,j]^2  +  ρu_Y[i,j]^2) * Inv_2ρ  
-            
-            # Update dust momenta:
-            ρdud_X[i,j] -=  ρd0[i,j] * ∂Φ∂X[i,j] * Δt 
-            ρdud_Y[i,j] -=  ρd0[i,j] * ∂Φ∂Y[i,j] * Δt 
 
         end
     end
