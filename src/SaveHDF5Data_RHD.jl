@@ -240,6 +240,18 @@ function CreateHDF5File( FileName::String,                # File name
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
+        # Create a 3D dataset (r, Z, time) for the silicate grain charge:
+        create_dataset(file, "Zgr_sil_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        # Create a 3D dataset (r, Z, time) for the graphite grain charge:
+        create_dataset(file, "Zgr_C_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
         # Create a 3D dataset (r, Z, time) for the dust density:
         create_dataset(file, "DustDensity_History", Float32,
                        (N_r, N_Z, Nsaved);
@@ -610,6 +622,14 @@ function SaveRHDTimeStepHDF5( FileName::String,
         dset_Td                       = file["Tdust_History"]
         dset_Td[:, :, step]           = dust.Td
 
+        # Save silicate grain charges at current time-step 
+        dset_Zgr_sil                  = file["Zgr_sil_History"]
+        dset_Zgr_sil[:, :, step]      = dust.Zgr_sil
+
+        # Save graphite grain charges at current time-step 
+        dset_Zgr_C                    = file["Zgr_C_History"]
+        dset_Zgr_C[:, :, step]        = dust.Zgr_C
+
         # Save dust density at current time-step:
         dset_ρd                       = file["DustDensity_History"]
         dset_ρd[:, :, step]           = hydrostate.ρd
@@ -840,6 +860,14 @@ function SaveRHDTimeStepHDF5( FileName::String,
         # Save dust temperatures at current time-step:
         dset_Td                       = file["Tdust_History"]
         dset_Td[:, :, step]           = dust.Td
+
+        # Save silicate grain charges at current time-step 
+        dset_Zgr_sil                  = file["Zgr_sil_History"]
+        dset_Zgr_sil[:, :, step]      = dust.Zgr_sil
+
+        # Save graphite grain charges at current time-step 
+        dset_Zgr_C                    = file["Zgr_C_History"]
+        dset_Zgr_C[:, :, step]        = dust.Zgr_C
 
         # Save dust density at current time-step:
         dset_ρd                       = file["DustDensity_History"]

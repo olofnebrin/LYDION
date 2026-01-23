@@ -1652,7 +1652,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
                H_r_IR, H_Z_IR,
                Δρu_r_trial, Δρu_Z_trial,  Δρu_r_IR_trial, Δρu_Z_IR_trial, # Diagnostics for radiation pressure 
                ρu_r_new, ρu_Z_new,  ρdud_r_new, ρdud_Z_new,               # Updated gas & dust momenta 
-               Td_new, js_IR
+               Td_new, js_IR, Zgr_sil, Zgr_C
 
     end
 
@@ -1820,6 +1820,10 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
 
     # Initialize IR emissivity:
     js_IR = 0.0
+
+    # Initialize grain charges:
+    Zgr_sil = 0.0
+    Zgr_C   = 0.0
     
     # Start with the global time-step as an initial guess
     # for the sub-cycle time-step:
@@ -1876,7 +1880,7 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
         Δρu_r_substep, Δρu_Z_substep,  
         Δρu_r_IR_substep, Δρu_Z_IR_substep, 
         ρu_r_new, ρu_Z_new,  ρdud_r_new, ρdud_Z_new,  
-        Td, js_IR  = result
+        Td, js_IR, Zgr_sil, Zgr_C  = result
 
         # Update our current internal energy & abundance fractions:
         e_current        = e_new
@@ -1953,7 +1957,7 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
            H_r_EUV2_current, H_Z_EUV2_current,  H_r_EUV3_current, H_Z_EUV3_current, 
            H_r_IR_current,   H_Z_IR_current, 
            ρu_r_current, ρu_Z_current,  ρdud_r_current, ρdud_Z_current, 
-           Td, js_IR
+           Td, js_IR, Zgr_sil, Zgr_C
 end
 
 
@@ -2254,16 +2258,17 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                 xOI[i,j], xOII[i,j], xCI[i,j], xCII[i,j], xCO[i,j],
                 RT.J_opt[i,j], RT.J_FUV[i,j], RT.J_LW[i,j], RT.J_EUV1[i,j], RT.J_EUV2[i,j], RT.J_EUV3[i,j],
                 RT.J_IR[i,j],
-                RT.H_r_opt[i,j],  RT.H_Z_opt[i,j],
-                RT.H_r_FUV[i,j],  RT.H_Z_FUV[i,j],
-                RT.H_r_LW[i,j],   RT.H_Z_LW[i,j],
-                RT.H_r_EUV1[i,j], RT.H_Z_EUV1[i,j],  
-                RT.H_r_EUV2[i,j], RT.H_Z_EUV2[i,j],
-                RT.H_r_EUV3[i,j], RT.H_Z_EUV3[i,j],
-                RT.H_r_IR[i,j],   RT.H_Z_IR[i,j],
-                ρu_r[i,j],        ρu_Z[i,j],  
-                ρdud_r[i,j],      ρdud_Z[i,j], 
-                Dust.Td[i,j],     RT.js_IR[i,j]  = result 
+                RT.H_r_opt[i,j],   RT.H_Z_opt[i,j],
+                RT.H_r_FUV[i,j],   RT.H_Z_FUV[i,j],
+                RT.H_r_LW[i,j],    RT.H_Z_LW[i,j],
+                RT.H_r_EUV1[i,j],  RT.H_Z_EUV1[i,j],  
+                RT.H_r_EUV2[i,j],  RT.H_Z_EUV2[i,j],
+                RT.H_r_EUV3[i,j],  RT.H_Z_EUV3[i,j],
+                RT.H_r_IR[i,j],    RT.H_Z_IR[i,j],
+                ρu_r[i,j],         ρu_Z[i,j],  
+                ρdud_r[i,j],       ρdud_Z[i,j], 
+                Dust.Td[i,j],      RT.js_IR[i,j],
+                Dust.Zgr_sil[i,j], Dust.Zgr_C[i,j]  = result 
 
                 # Update IR flux opacity (for accurate M1 transport in optically thick regime):
                 RT.α_F_IR[i,j] = ρd[i,j] * κR(Dust, Dust.Td[i,j])

@@ -2,7 +2,7 @@ import h5py
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm, Normalize
 from matplotlib.gridspec import GridSpec
 import matplotlib.patheffects as pe
 from matplotlib.ticker import MultipleLocator  # add this import
@@ -25,19 +25,21 @@ pc  = 3.085677581e18
 
 # --- read data ---
 with h5py.File(filename, "r") as f:
-    t          = f["Times"][:]                          # (Nt,)
-    rho_hist   = f["GasDensity_History"][:]             # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    rhod_hist  = f["DustDensity_History"][:]            # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    T_hist     = f["T_History"][:]                      # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    xH2_hist   = f["xH2_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    xHII_hist  = f["xHII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    xCI_hist   = f["xCI_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    xCII_hist  = f["xCII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    xCO_hist   = f["xCO_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    xOI_hist   = f["xOI_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    xOII_hist  = f["xOII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    r          = f["r"][:]                              # edges, (Nr+1,)
-    Z          = f["Z"][:]                              # edges, (Nz+1,)
+    t             = f["Times"][:]                          # (Nt,)
+    rho_hist      = f["GasDensity_History"][:]             # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    rhod_hist     = f["DustDensity_History"][:]            # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    T_hist        = f["T_History"][:]                      # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xH2_hist      = f["xH2_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xHII_hist     = f["xHII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xCI_hist      = f["xCI_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xCII_hist     = f["xCII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xCO_hist      = f["xCO_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xOI_hist      = f["xOI_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xOII_hist     = f["xOII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    Zgr_sil_hist  = f["Zgr_sil_History"][:]                # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    Zgr_C_hist    = f["Zgr_C_History"][:]                  # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    r             = f["r"][:]                              # edges, (Nr+1,)
+    Z             = f["Z"][:]                              # edges, (Nz+1,)
 
 
 xHI_hist  = 1.0 - 2.0 * xH2_hist - xHII_hist
@@ -125,8 +127,11 @@ norm_nH = LogNorm(vmin=vmin_nH, vmax=vmax_nH)
 vmin_T, vmax_T = 1, 1e5
 norm_T = LogNorm(vmin=vmin_T, vmax=vmax_T)
 
-vmin_DG, vmax_DG = 0.01, 10
-norm_DG = LogNorm(vmin=vmin_DG, vmax=vmax_DG)
+#vmin_DG, vmax_DG = 0.01, 10
+#norm_DG = LogNorm(vmin=vmin_DG, vmax=vmax_DG)
+
+vmin_DG, vmax_DG = -600, 600
+norm_DG = Normalize(vmin=vmin_DG, vmax=vmax_DG)
 
 vmin_x, vmax_x = 1e-8, 1.0
 norm_x = LogNorm(vmin=vmin_x, vmax=vmax_x)
@@ -173,7 +178,7 @@ ax2.text(0.9, 0.9, "T (K)", transform=ax2.transAxes, **panel_label_style)
 
 # --- Dust-to-gas ratio ---
 ax3.tick_params(labelleft=False)
-im_xH2 = ax3.pcolormesh(R, ZZ, np.clip(DG_hist[0].T, vmin_DG, vmax_DG),
+im_xH2 = ax3.pcolormesh(R, ZZ, np.clip(Zgr_sil_hist[0].T, vmin_DG, vmax_DG),
                         norm=norm_DG, shading='auto', cmap='gist_heat')
 
 cb3 = fig.colorbar(im_xH2, ax=ax3, pad=0.02)
@@ -188,7 +193,7 @@ ax4.set_xlabel("r (pc)", labelpad=12)
 ax4.tick_params(labelleft=False)
 im_xHII = ax4.pcolormesh(R, ZZ, np.clip(xH2_hist[0].T, vmin_x, vmax_x),
                          norm=norm_x, shading='auto', cmap='magma')
-cb4 = fig.colorbar(im_xHII, ax=ax4, pad=0.02)
+cb4     = fig.colorbar(im_xHII, ax=ax4, pad=0.02)
 cb4.set_ticks([1e-8, 1e-6, 1e-4, 0.01, 1])
 cb4.set_ticklabels(['10$^{-8}$', '10$^{-6}$', '10$^{-4}$', '0.01', '1'])
 ax4.text(0.9, 0.9, "x$_{HII}$", transform=ax4.transAxes, **panel_label_style)
@@ -206,7 +211,7 @@ def init():
     k0 = frames[0]
     im_nH.set_array(nH_hist[k0].T.ravel())
     im_T.set_array(T_hist[k0].T.ravel())
-    im_xH2.set_array(np.clip(DG_hist[k0].T, vmin_DG, vmax_DG).ravel())
+    im_xH2.set_array(np.clip(Zgr_sil_hist[k0].T, vmin_DG, vmax_DG).ravel())
     im_xHII.set_array(np.clip(xH2_hist[k0].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k0]/kyr:.2f} kyr")
     return im_nH, im_T, im_xH2, im_xHII, txt
@@ -214,7 +219,7 @@ def init():
 def update(k):
     im_nH.set_array(nH_hist[k].T.ravel())
     im_T.set_array(T_hist[k].T.ravel())
-    im_xH2.set_array(np.clip(DG_hist[k].T, vmin_DG, vmax_DG).ravel())
+    im_xH2.set_array(np.clip(Zgr_sil_hist[k].T, vmin_DG, vmax_DG).ravel())
     im_xHII.set_array(np.clip(xH2_hist[k].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k]/kyr:.2f} kyr")
     return im_nH, im_T, im_xH2, im_xHII, txt
