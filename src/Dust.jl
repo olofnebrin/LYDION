@@ -502,6 +502,29 @@ end
                1  +  0.3 * Ang / agr )
 end
 
+
+""" The minimum grain charge, set by field emission. 
+    See Weingartner & Draine (2001), Eq. (24). """
+@inline function Zgr_min( Graphite::Bool = false )  
+
+    if Graphite
+        U_ait   = - ( 3.9  +  0.12 * (agr_C / Ang)  +  2 * (Ang / agr_C) )
+
+        # Most negative allowed charge:
+        Zgr_min = floor( (U_ait / 14.4) * (agr_C / Ang) ) + 1
+    else
+        # For silicate grains:
+        U_ait   = - ( 2.5  +  0.07 * (agr_sil / Ang)  +  8 * (Ang / agr_sil) )
+
+        # Most negative allowed charge:
+        Zgr_min = floor( (U_ait / 14.4) * (agr_sil / Ang) ) + 1
+    end
+
+    return Zgr_min 
+end
+
+const Zgr_min_sil::Float64         = Zgr_min( false )
+const Zgr_min_C::Float64           = Zgr_min( true )
 const Zgr_pe_max_sil::Float64      = Zgr_pe_max( false )
 const Zgr_pe_max_C::Float64        = Zgr_pe_max( true )
 
@@ -545,11 +568,13 @@ function FindGrainCharge( T::Float64,
     if Graphite 
         # Minimum value is expected to be ≈ - 2.5 * agr * kB * T / e²,
         # and maximum value set by photoelectric charging, so make the following bracket:
-        a  = - 3 * agr_C_kB_over_e_squared * T  
-        b  = Zgr_pe_max_C
+        a       = - 3 * agr_C_kB_over_e_squared * T  
+        b       = Zgr_pe_max_C
+        Zgr_Min = Zgr_min_C
     else
-        a  = - 3 * agr_sil_kB_over_e_squared * T      
-        b  = Zgr_pe_max_sil
+        a       = - 3 * agr_sil_kB_over_e_squared * T      
+        b       = Zgr_pe_max_sil
+        Zgr_Min = Zgr_min_sil
     end
     fa     = f(a)
     fb     = f(b)
@@ -588,8 +613,8 @@ function FindGrainCharge( T::Float64,
         fmid      = f(Zgr_new)
 
         if 0.5 * (b - a) < max( atol_Zgr, rtol_Zgr * abs(Zgr_new) )
-            # In this case it has converged, so return Td:
-            return Zgr_new
+            # In this case it has converged, so return Zgr:
+            return max( Zgr_new, Zgr_Min )
         end
 
         if fa * fmid < 0.0
@@ -601,7 +626,7 @@ function FindGrainCharge( T::Float64,
         end
     end
 
-    return 0.5 * (a + b)   
+    return max( 0.5 * (a + b), Zgr_Min )   
 end
 
 
