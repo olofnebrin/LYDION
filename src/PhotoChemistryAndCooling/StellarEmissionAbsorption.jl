@@ -638,29 +638,44 @@ end
 end
 
 
-const Γpe_0::Float64 = 1.3e-24
+const C0_pe::Float64 = 1.84;    const C1_pe::Float64    = 3.81
+const C2_pe::Float64 = 0.08348; const C3_pe::Float64    = 0.00391
+const C4_pe::Float64 = 0.089;   const C5_pe::Float64    = 0.328
+const C6_pe::Float64 = 0.778;   const inv_DGpe::Float64 = 130.0   # Inverse Solar dust-to-gas ratio in the R_V = 5.5 model 
 
 """ Photoelectric heating rate (erg cm⁻³ s⁻¹) from absorptions of stellar photons 
-    in the FUV & LW bands, as well as Lyα photons, by dust. """
+    in the FUV & LW bands, as well as Lyα photons, by dust. Uses the fit for the 
+    R_V = 5.5, B, bC = 3 × 10⁻⁵ model of Weingartner & Draine (2001a). Uses the fit 
+    in Eq. (44) of Weingartner & Draine (2001b), with constants from their table 2.
+    
+    References: Weingartner & Draine (2001a) 'PDust Grain-Size Distributions and Extinction 
+                in the Milky Way, Large Magellanic Cloud, and Small Magellanic Cloud', ApJ,
+                548, 1, 296-309 
+
+                Weingartner & Draine (2001b) 'Photoelectric Emission from Interstellar Dust: 
+                Grain Charging and Gas Heating', ApJS, 134, 2, 263-281
+    
+    """
 @inline function HeatingRate_PhotoElectric( J_FUV::Float64,
                                              J_LW::Float64,
-                                                D::Float64,  # Dust-to-gas ratio
+                                               DG::Float64,  # Dust-to-gas ratio
                                                nH::Float64,
                                                ne::Float64,
                                                 T::Float64,
                                             e_Lyα::Float64 = 0.0
                                               )
+
+    T     =  clamp( T, 10.0, 1e4 )   # Range where fit is valid
+    ne    =  max( ne, 1e-30 )        # Avoid division by zero 
+
     # Compute the charging parameter & G0:
     F_eff =  Four_π * ( J_FUV + J_LW )  +  c * e_Lyα
     G0    =  F_eff / F_Habing    # Flux normalized by Habing value (see ConstantsAndFunctions.jl)
     ψ_FUV =  G0 * sqrt(T) / ne 
 
-    # Efficiency parameter:
-    ϵ     = ( 0.0487 / (1 + 0.004 * (ψ_FUV / 0.5)^0.73) +
-              0.0365 * (T/1e4)^0.7 / (1 + 2e-4 * (ψ_FUV / 0.5)) )
-
     # The heating rate:
-    Γpe   =  Γpe_0 * ( D / 0.01 ) * ϵ * G0 * nH 
+    Γpe   =  1e-26 * (DG * inv_DGpe) * G0 * nH * ( C0_pe + C1_pe * (T^C4_pe) ) / (
+             1 + C2_pe * (ψ_FUV^C5_pe) * ( 1 + C3_pe * (ψ_FUV^C6_pe) ) )
 
     return Γpe
 end

@@ -605,7 +605,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                 E[i,j]      = e[i,j]  +  0.5 * ρ[i,j] * (u_r[i,j]^2 + u_Z[i,j]^2)
 
                 # Dust density:
-                ρd[i,j]     = DG₀ * ρ[i,j]
+                ρd[i,j]     = max( DG₀ * ρ[i,j], 10 * ρd_floor )
 
                 # Dust momentum density (assume same velocity as gas initially):
                 ρdud_r[i,j] = ρd[i,j] * u_r[i,j]
