@@ -241,7 +241,7 @@ function UpdateChemistrySubStep( Δtsub::Float64,
                                  Tnorm::Float64,
                                     Td::Float64, # Dust temperature (K)
                                      ρ::Float64,
-                                    DG::Float64,
+                                    ρd::Float64,
                                xH2_old::Float64,
                               xHII_old::Float64, 
                                xHD_old::Float64,
@@ -298,7 +298,7 @@ function UpdateChemistrySubStep( Δtsub::Float64,
 
     # The following rates appear several times, so 
     # compute them once for convenience/optimization:
-    Kdust_H2    = kdust_H2(T, DG, Td)
+    RdustH2     = R_dustH2(T, ρd, Td)
     KGP_H2      = kGP_H2(T, ne_old, nHI_old, nHII_old, Γpd, z)
     K3B_H2      = k3B_H2(T)
     Kdiss_H2HI  = kdiss_H2HI(T, nHI_old)
@@ -309,7 +309,7 @@ function UpdateChemistrySubStep( Δtsub::Float64,
     Kcollion_HI = kcollion_HI(T)
 
     # Creation rate for H₂ is C_H2_0 × xHI, where: 
-    C_H2_0  = ( Kdust_H2 * nH 
+    C_H2_0  = ( RdustH2 
               + KGP_H2   * ne_old 
               + K3B_H2   * nHI_old * (nHI_old + nH2_old / 8) )
 

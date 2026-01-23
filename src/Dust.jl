@@ -16,8 +16,12 @@ using Printf
 
 const ρgr_sil::Float64       = 3.5            # Density of a silicate grain (g cm⁻³)
 const ρgr_C::Float64         = 2.24           # Density of a graphite grain (g cm⁻³)
+const inv_ρgr_sil::Float64   = 1 / ρgr_sil    # Inverse of ρgr_sil, useful 
+const inv_ρgr_C::Float64     = 1 / ρgr_C      # Inverse of ρgr_C, useful 
 const agr_sil::Float64       = 0.138   * μm   # ⟨a³⟩/⟨a²⟩ for silicate grains 
 const agr_C::Float64         = 0.00617 * μm   # ⟨a³⟩/⟨a²⟩ for graphite/carbonaceous grains 
+const inv_agr_sil::Float64   = 1 / agr_sil    # Inverse of agr_sil, useful 
+const inv_agr_C::Float64     = 1 / agr_C      # Inverse of agr_C, useful 
 const fsil::Float64          = 0.726          # Fraction of total dust mass in silicate grains 
 const OneMinusfsil::Float64  = 1 - fsil       # Fraction of total dust mass in graphite/carbonaceous grains 
 

@@ -18,7 +18,7 @@ Nmaxsteps::Int                     =  100000       # Maximum number of time-step
 mstarZAMS::Float64                 =  35            # Initial mass of the star (M⊙)
 Zstar_Zsun::Float64                =  1.0           # Metallicity of the star in Solar units 
 σstar_cell::Float64                =  4             # Gaussian size of stellar emission region in cell size units (≳ 4 for approximately spherical H II regions)
-Zstar_pos::Float64                 =  1.5 * pc        # Position of star along the cylindrical Z-axis (0 is the lower corner)
+Zstar_pos::Float64                 =  0 * pc        # Position of star along the cylindrical Z-axis (0 is the lower corner)
 
 #########################################################################
 ######  C L O U D  P R O P E R T I E S  &  S P A T I A L  G R I D  ######
@@ -39,14 +39,14 @@ Rmax_lin::Float64                  =  3 * pc        # Uniform/linear grid out to
 Zmax_lin::Float64                  =  3 * pc        # Uniform/linear grid out to cylindrical Z = Zmax_lin 
 Rmax::Float64                      =  3 * pc        # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
 Zmax::Float64                      =  3 * pc        # Logarithmic grid from Zmax_lin to Zmax (typically lower-resolution region)
-N_r_lin::Int                       =  32 
-N_Z_lin::Int                       =  32
+N_r_lin::Int                       =  64
+N_Z_lin::Int                       =  64
 N_r_log::Int                       =  0
 N_Z_log::Int                       =  0
  
 BC_r_right::Symbol                 =  :Outflow      # BCs at outer r-boundary (:Outflow or :Reflect)
-BC_Z_left::Symbol                  =  :Outflow      # BCs at lower Z-boundary (:Outflow or :Reflect)
-BC_Z_right::Symbol                 =  :Outflow      # BCs at upper Z-boundary (:Outflow or :Reflect) 
+BC_Z_bot::Symbol                   =  :Reflect      # BCs at lower Z-boundary (:Outflow or :Reflect)
+BC_Z_top::Symbol                   =  :Outflow      # BCs at upper Z-boundary (:Outflow or :Reflect) 
 
 ######################################################################
 ######  C H E M I S T R Y  I N I T I A L  C O N D I T I O N S  #######
@@ -57,7 +57,7 @@ BC_Z_right::Symbol                 =  :Outflow      # BCs at upper Z-boundary (:
 # they must all add up to 1, e.g. xHI + xHII + 2 * xH2 = 1 (xHI is determined by conservation below).
 
 xHII₀::Float64                     =  1e-4         # Initial H II fraction inside cloud               (≤ 1)
-xH2₀::Float64                      =  0.4          # Initial H₂ fraction inside cloud                 (≤ 0.5)
+xH2₀::Float64                      =  0.0          # Initial H₂ fraction inside cloud                 (≤ 0.5)
 xHeII₀::Float64                    =  0.0          # Initial He II fraction (nHeII/nHe) inside cloud  (≤ 1)
 xHeIII₀::Float64                   =  0.0          # Initial He III fraction inside cloud             (≤ 1)
 xDII₀::Float64                     =  0.0          # Initial D II fraction (nDII/nD) inside cloud     (≤ 1)
@@ -86,7 +86,7 @@ xOII_ext::Float64                  =  0.0
 
 Hydro::Bool                        =  true       # Hydrodynamics                    (on if true, off if false)
 Gravity::Bool                      =  true       # Self-gravity                     (on if true, off if false)
-Lyα::Bool                          =  true       # Lyα RT/RHD                       (on if true, off if false)
+Lyα::Bool                          =  false      # Lyα RT/RHD                       (on if true, off if false)
 Recoil::Bool                       =  true       # Atomic recoil for Lyα RT         (on if true, off if false)
 LyαDestruction::Bool               =  true       # Lyα destruction (pd > 0)         (on if true, off if false)
 RadPressure::Bool                  =  true       # Radiation pressure feedback      (on if true, off if false - NOTE: Lyα feedback is only on if Lyα RT is on)
@@ -142,6 +142,6 @@ SetupRHDsimulation( mstarZAMS, Zstar_Zsun, DG₀, nH₀, nH_ext, Rcl, Zcl_pos, Z
                     xCI_ext, xCII_ext, xCO_ext, xOI_ext, xOII_ext, Zgas_Zsun,
                     z, Hydro, Lyα, Recoil, LyαDestruction, Gravity,
                     RadPressure, IRfeedback, OTS, u_RMSturb, N_r_lin, N_Z_lin, N_r_log, N_Z_log,
-                    N_ν_coarse, N_ν_fine, BC_r_right, BC_Z_left, BC_Z_right,
+                    N_ν_coarse, N_ν_fine, BC_r_right, BC_Z_bot, BC_Z_top,
                     SaveData, Nminsteps, Nmaxsteps, Nsaved,
                     print_info, FileName, FileDescription )

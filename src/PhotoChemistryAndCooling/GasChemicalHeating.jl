@@ -24,7 +24,7 @@ function HeatingRate_H2chemical( T::Float64,
                                nH2::Float64,
                               nHII::Float64,
                                 ne::Float64, 
-                                DG::Float64, 
+                                ρd::Float64, 
                                Γpd::Float64 = 0.0,
                                  z::Float64 = 0.0 )
 
@@ -47,7 +47,7 @@ function HeatingRate_H2chemical( T::Float64,
 
     # Chemical heating from H₂ formation on dust grains (0.2 eV into thermal energy of H₂
     # leaving grain, 4.2 eV from vibrational & rotational excitation of the H₂ molecule):
-    Γgr      = kdust_H2(T, DG, Td) * nH * nHI * ( E_H2_gr_th  +  E_H2_gr_vib * f_exc_heat )
+    Γgr      = R_dustH2(T, ρd, Td) * nHI * ( E_H2_gr_th  +  E_H2_gr_vib * f_exc_heat )
 
     # Chemical heating from H₂ formation via H⁻ (3.53 eV is excitation energy initially, of which a 
     # fraction f_exc_heat goes into heat):

@@ -160,7 +160,6 @@ function FindRSL_LyαRT_TODO( c̃_Lyα::Float64,                   # Old reduced
 end
 
 
-
 """ This function estimates the Lyα RSL needed for sufficiently accurate RHD 
     simulations. """
 function FindRSL_LyαRT( c̃_Lyα::Float64,                   # Old reduced speed of light
@@ -250,8 +249,10 @@ function HeatingRate_total( J_opt::Float64,
                          nHeI_old::Float64,
                         nHeII_old::Float64,
                     SelfShielding::Float64,
-                               DG::Float64 = 0.0,
+                               DG::Float64,
+                               ρd::Float64 = 0.0,
                               Γpd::Float64 = 0.0, # H⁻ photodetachment rate 
+                                z::Float64 = 0.0, # Redshift 
                             e_Lyα::Float64 = 0.0
                              )
 
@@ -261,7 +262,7 @@ function HeatingRate_total( J_opt::Float64,
     +  HeatingRate_EUV2( J_EUV2, nHI_old, nH2_old, nHeI_old ) 
     +  HeatingRate_EUV3( J_EUV3, nHI_old, nH2_old, nHeI_old, nHeII_old )
     +  HeatingRate_PhotoElectric( J_FUV, J_LW, DG, nH_old, ne_old, T_old, e_Lyα )
-    +  HeatingRate_H2chemical( T_old, Td_old, nH_old, nHI_old, nH2_old, nHII_old, ne_old, DG, Γpd )  )
+    +  HeatingRate_H2chemical( T_old, Td_old, nH_old, nHI_old, nH2_old, nHII_old, ne_old, ρd, Γpd, z )  )
 
 end
 
@@ -983,6 +984,7 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
                                      ne::Float64,
                               Zgas_Zsun::Float64,
                                      DG::Float64,
+                                     ρd::Float64,
                                     xCI::Float64, 
                                    xCII::Float64, 
                                     xCO::Float64, 
@@ -1008,7 +1010,7 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
     # photo-ionizations/dissociations, UV pumping, and cosmic ray heating):
     HeatingRate = HeatingRate_total( J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
                                      T_old, Td, ne, nH, nHI, nH2, nHII, nHeI, nHeII, 
-                                     SelfShielding, DG, Γpd ) 
+                                     SelfShielding, DG, ρd, Γpd, z ) 
 
     # Compute the cooling rate at e_old (inluding dust-gas collisions):
     CoolingRate = Λ( T_old, nHI, nHII, nHeI, nHeII, nHeIII, ne,
@@ -1057,19 +1059,19 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
     # Next, compute ∂Γ/∂e using a 4th-order central difference approximation: 
     HeatingRate_p2 = HeatingRate_total( J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
                                         T_p2, Td, ne, nH, nHI, nH2, nHII, nHeI, nHeII, 
-                                        SelfShielding, DG, Γpd )
+                                        SelfShielding, DG, ρd, Γpd, z )
 
     HeatingRate_p1 = HeatingRate_total( J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
                                         T_p1, Td, ne, nH, nHI, nH2, nHII, nHeI, nHeII, 
-                                        SelfShielding, DG, Γpd )
+                                        SelfShielding, DG, ρd, Γpd, z )
 
     HeatingRate_m1 = HeatingRate_total( J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
                                         T_m1, Td, ne, nH, nHI, nH2, nHII, nHeI, nHeII, 
-                                        SelfShielding, DG, Γpd )
+                                        SelfShielding, DG, ρd, Γpd, z )
 
     HeatingRate_m2 = HeatingRate_total( J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
                                         T_m2, Td, ne, nH, nHI, nH2, nHII, nHeI, nHeII, 
-                                        SelfShielding, DG, Γpd )
+                                        SelfShielding, DG, ρd, Γpd, z )
 
     # Put it all together to get ∂Γ/∂e:
     ∂HeatingRate∂T = ( - HeatingRate_p2  +  8 * HeatingRate_p1  -  8 * HeatingRate_m1  
@@ -1101,7 +1103,7 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
     # Heating rate at would-be new temperature:
     HeatingRate_new  = HeatingRate_total( J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
                                           T_new, Td, ne, nH, nHI, nH2, nHII, nHeI, nHeII, 
-                                          SelfShielding, DG, Γpd )
+                                          SelfShielding, DG, ρd, Γpd, z )
         
     # Cooling rate at would-be new temperature:
     CoolingRate_new  = Λ( T_new, nHI, nHII, nHeI, nHeII, nHeIII, ne,
@@ -1571,7 +1573,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         REDO_HEATINGCOOLING, e_new, 
         Δe, Δt_e = HeatingCoolingStep( Δtsub, e_old, Td_new, γad, 
                                        n, nH_old, nHI_old, nH2_old, nHII_old, nHeI_old, nHeII_old,
-                                       nHeIII_old, nHD_old, ne_old,  Zgas_Zsun, DG,
+                                       nHeIII_old, nHD_old, ne_old,  Zgas_Zsun, DG, ρd_old,
                                        xCI_old, xCII_old, xCO_old, xOI_old, N_CO,
                                        J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, 
                                        SelfShielding, z, Γpd, OTS, e_floor )
@@ -1610,7 +1612,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
           xHeI_new, xHeII_new, xHeIII_new,
           xOI_new, xOII_new, xCI_new, xCII_new, xCO_new, ConvergedCarbonOxygen,
           ne_new, Δne ) =
-          UpdateChemistrySubStep( Δtsub, Tnorm, Td_new, ρ, DG, xH2_old, xHII_old, xHD_old, xDII_old, xHeII_old, xHeIII_old,
+          UpdateChemistrySubStep( Δtsub, Tnorm, Td_new, ρ, ρd_old, xH2_old, xHII_old, xHD_old, xDII_old, xHeII_old, xHeIII_old,
                                   xOI_old, xOII_old, xCI_old, xCII_old, xCO_old, Zgas_Zsun,
                                   ΓionHI, ΓionH2, ΓionDI, ΓionHeI, ΓionHeII, Γ_LW, Γpd, Γ_LW_HD, 
                                   ΓionOI, ΓionCI, ΓdissCO, ΓdissOHx, ΓdissCHx,

@@ -42,7 +42,7 @@ using .ConstantsAndFunctions  # Needed constants
 
 export krecHII_1, krecHII, krecHeII_1, krecHeII, krecHeIII_1, krecHeIII, 
        kcollion_HI, kcollion_HeI, kcollion_HeII,
-       kdust_H2, kGP_H2, k3B_H2, kdiss_H2HI, kdiss_H2H2, kdiss_H2e, kdiss_H2HII,
+       R_dustH2, kGP_H2, k3B_H2, kdiss_H2HI, kdiss_H2H2, kdiss_H2e, kdiss_H2HII,
        k50_D, k51_D, k52_D, k53_D, k54_D, k55_D, kCIe, kOIe, kCIIe, kOIIe, kCIIH2_1,
        kCIIH2_2, kHIIOI, kOIIHI, kOIIH2_1, kOIIH2_2, kCHxOI, kCHxHI, kOHxCI, kOHxOI,
        kCIH3plus, kOIH3plus, kH3pluse
@@ -205,36 +205,39 @@ end
 
 const Tdust_crit_H2::Float64 = 600.0
 
-""" The H₂ formation efficiency (assumed equal to sticking coefficient),
-    as a function of the gas temperature T (K) and dust temperature Td (K). 
+""" The combination S_{HI} × ϵ_{H₂}, i.e. the sticking coefficient times 
+    the H₂ formation efficiency on dust grains, as a function of the gas 
+    temperature T (K) and dust temperature Td (K). 
     From Hollenbach & McKee (1979). """
-@inline function S_H( T::Float64, Td::Float64 )
+@inline function S_HI_ϵ_H2( T::Float64, Td::Float64 )
 
-    # Formation efficiency:
-    S_H     =  1 / ( ( 1  +  0.04 * (T + Td)^0.5  +  0.002 * T  +  8e-6 * (T^2) ) 
-                   * ( 1  +  1e4 * exp( - Tdust_crit_H2 / Td ) ) )
-
-    return S_H
+    return  1 / ( ( 1  +  0.04 * (T + Td)^0.5  +  0.002 * T  +  8e-6 * (T^2) ) 
+                * ( 1  +  1e4 * exp( - Tdust_crit_H2 / Td ) ) )
 end
 
 
-const inv_DGnorm_kdust_H2::Float64 = 100.0 # Dust-to-gas ratio is normalized by 0.01 in the rate
+const Const_vth_HI::Float64 = sqrt( 8 * kB / (π * mH) )  # Pre-factor for vth 
 
-""" The H₂ formation rate on dust (cm³ s⁻¹) as a function of
-    temperature T (K). See e.g. Hollenbach & McKee (1979) 
-    and Hopkins et al. (2023). """
-function kdust_H2( T::Float64, 
-                  DG::Float64,
-                  Td::Float64 = 30.0
-                  )
+""" The H₂ formation rate coefficient for dust (s⁻¹) as a function of
+    temperature T (K):
+
+    R_{dust,H₂} = (3/8) ∑_j (ρdj / ρgrj) × (1 / āgrj) × sqrt( 8 kB T / π mH ) × S_{HI} × ϵ_{H₂}
+    
+    See e.g. Hollenbach & McKee (1979) and Draine (2011). Uses pre-computed grain 
+    properties for silicate and graphite dust. """
+@inline function R_dustH2( T::Float64, ρd::Float64, Td::Float64 = 30.0 )
 
     # Clamp temperature (just for numerical reasons):
-    T        = clamp( T, 0.0, 1e9 )  
+    T   = clamp( T, 0.0, 1e9 )  
 
-    # H₂ formation rate on dust :
-    kdust_H2 = 3e-18 * (DG * inv_DGnorm_kdust_H2) * sqrt(T) * S_H( T, Td )
+    # Get vth = sqrt( 8 kB T / π mH ):
+    vth = Const_vth_HI * sqrt( T )
 
-    return kdust_H2
+    # Get S_{HI} × ϵ_{H₂}:
+    Sϵ  = S_HI_ϵ_H2( T, Td )
+
+    return ThreeEights * ρd * vth * Sϵ * ( inv_agr_sil * fsil         * inv_ρgr_sil  
+                                         + inv_agr_C   * OneMinusfsil * inv_ρgr_C   )
 end
 
 

@@ -9,7 +9,7 @@ from matplotlib.ticker import MultipleLocator  # add this import
 
 
 # ---------------- user inputs ----------------
-filename = "RHDSim_NoLya_400x400_2026-01-20.h5"       
+filename = "RHDSim_NoLya_64x64_2026-01-23.h5"       
 frameskip = 1                 
 save_mp4 = True               
 outname = "density_T.mp4"
@@ -186,7 +186,7 @@ ax3.text(0.9, 0.9, "D/D$_{\odot}$", transform=ax3.transAxes, **panel_label_style
 # --- xHII ---
 ax4.set_xlabel("r (pc)", labelpad=12)
 ax4.tick_params(labelleft=False)
-im_xHII = ax4.pcolormesh(R, ZZ, np.clip(xOII_hist[0].T, vmin_x, vmax_x),
+im_xHII = ax4.pcolormesh(R, ZZ, np.clip(xH2_hist[0].T, vmin_x, vmax_x),
                          norm=norm_x, shading='auto', cmap='magma')
 cb4 = fig.colorbar(im_xHII, ax=ax4, pad=0.02)
 cb4.set_ticks([1e-8, 1e-6, 1e-4, 0.01, 1])
@@ -207,7 +207,7 @@ def init():
     im_nH.set_array(nH_hist[k0].T.ravel())
     im_T.set_array(T_hist[k0].T.ravel())
     im_xH2.set_array(np.clip(DG_hist[k0].T, vmin_DG, vmax_DG).ravel())
-    im_xHII.set_array(np.clip(xOII_hist[k0].T, vmin_x, vmax_x).ravel())
+    im_xHII.set_array(np.clip(xH2_hist[k0].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k0]/kyr:.2f} kyr")
     return im_nH, im_T, im_xH2, im_xHII, txt
 
@@ -215,7 +215,7 @@ def update(k):
     im_nH.set_array(nH_hist[k].T.ravel())
     im_T.set_array(T_hist[k].T.ravel())
     im_xH2.set_array(np.clip(DG_hist[k].T, vmin_DG, vmax_DG).ravel())
-    im_xHII.set_array(np.clip(xOII_hist[k].T, vmin_x, vmax_x).ravel())
+    im_xHII.set_array(np.clip(xH2_hist[k].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k]/kyr:.2f} kyr")
     return im_nH, im_T, im_xH2, im_xHII, txt
 
