@@ -28,7 +28,7 @@ with h5py.File(filename, "r") as f:
     t             = f["Times"][:]                          # (Nt,)
     rho_hist      = f["GasDensity_History"][:]             # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     rhod_hist     = f["DustDensity_History"][:]            # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    T_hist        = f["T_History"][:]                      # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    T_hist        = f["Tdust_History"][:]                      # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xH2_hist      = f["xH2_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xHII_hist     = f["xHII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xCI_hist      = f["xCI_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
@@ -127,11 +127,8 @@ norm_nH = LogNorm(vmin=vmin_nH, vmax=vmax_nH)
 vmin_T, vmax_T = 1, 1e5
 norm_T = LogNorm(vmin=vmin_T, vmax=vmax_T)
 
-#vmin_DG, vmax_DG = 0.01, 10
-#norm_DG = LogNorm(vmin=vmin_DG, vmax=vmax_DG)
-
-vmin_DG, vmax_DG = -600, 600
-norm_DG = Normalize(vmin=vmin_DG, vmax=vmax_DG)
+vmin_DG, vmax_DG = 0.01, 10
+norm_DG = LogNorm(vmin=vmin_DG, vmax=vmax_DG)
 
 vmin_x, vmax_x = 1e-8, 1.0
 norm_x = LogNorm(vmin=vmin_x, vmax=vmax_x)
@@ -178,7 +175,7 @@ ax2.text(0.9, 0.9, "T (K)", transform=ax2.transAxes, **panel_label_style)
 
 # --- Dust-to-gas ratio ---
 ax3.tick_params(labelleft=False)
-im_xH2 = ax3.pcolormesh(R, ZZ, np.clip(Zgr_sil_hist[0].T, vmin_DG, vmax_DG),
+im_xH2 = ax3.pcolormesh(R, ZZ, np.clip(DG_hist[0].T, vmin_DG, vmax_DG),
                         norm=norm_DG, shading='auto', cmap='gist_heat')
 
 cb3 = fig.colorbar(im_xH2, ax=ax3, pad=0.02)
@@ -211,7 +208,7 @@ def init():
     k0 = frames[0]
     im_nH.set_array(nH_hist[k0].T.ravel())
     im_T.set_array(T_hist[k0].T.ravel())
-    im_xH2.set_array(np.clip(Zgr_sil_hist[k0].T, vmin_DG, vmax_DG).ravel())
+    im_xH2.set_array(np.clip(DG_hist[k0].T, vmin_DG, vmax_DG).ravel())
     im_xHII.set_array(np.clip(xH2_hist[k0].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k0]/kyr:.2f} kyr")
     return im_nH, im_T, im_xH2, im_xHII, txt
@@ -219,7 +216,7 @@ def init():
 def update(k):
     im_nH.set_array(nH_hist[k].T.ravel())
     im_T.set_array(T_hist[k].T.ravel())
-    im_xH2.set_array(np.clip(Zgr_sil_hist[k].T, vmin_DG, vmax_DG).ravel())
+    im_xH2.set_array(np.clip(DG_hist[k].T, vmin_DG, vmax_DG).ravel())
     im_xHII.set_array(np.clip(xH2_hist[k].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k]/kyr:.2f} kyr")
     return im_nH, im_T, im_xH2, im_xHII, txt

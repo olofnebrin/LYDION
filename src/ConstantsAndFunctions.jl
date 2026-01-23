@@ -21,7 +21,7 @@ export LyαArrays, GenerateLyαArrays, H, Htophat, b, a, σ0,
        Update_∇u_RHD!, D_colon_∇u_Cylindrical, 
        eLyα_sphere_point, eLyα_sphere_uni,
        D_colon_∇u_Cartesian, Compute_f_esc_Cylindrical, Compute_f_esc_Lyα_Cylindrical,
-       GetHydrogenDensities, GetHeliumDensities, GetElectronDensity,
+       vth_H, GetHydrogenDensities, GetHeliumDensities, GetElectronDensity,
        GetElectronDensityFromFracs, MinMod, MonCen, PrintLYDIONLogo
 
 
@@ -98,6 +98,7 @@ const Fe_H_ratio::Float64 = 3.47e-5               # Iron-to-hydrogen abundance n
 ####### CONVENIENT CONSTANTS ##############
 const OneThird::Float64      = 1 / 3
 const ThreeEights::Float64   = 3 / 8
+const ThreeFourths::Float64  = 3 / 4 
 const Four_π::Float64        = 4 * π 
 const inv_Four_π::Float64    = 1 / Four_π
 const Two_π::Float64         = 2 * π
@@ -134,7 +135,8 @@ export c, h, G, kB, mH, mH2, me, mHe, mC, mCO, e, q_e, q_HII, q_HeII, q_HeIII,
        ALyα, A_2γ, A_2p2s, A_2s2p, f_lu_Lyα, σT, X, Y, DGsun, TCMB0, D_H_ratio, C_H_ratio, N_H_ratio, O_H_ratio,
        Ne_H_ratio, Mg_H_ratio, Si_H_ratio, S_H_ratio, Fe_H_ratio,
        Lsun, Msun, AU, pc, Mpc, Gpc, kms, day, yr, Myr, Gyr, eV, Ang, nm, μm, F_Habing,
-       OneThird, ThreeEights, Four_π, inv_Four_π, Two_π, Sqrt_π, Sqrt_2, Four_π_over_c, inv_c, X_over_mH, Y_over_mHe,
+       OneThird, ThreeEights, ThreeFourths, Four_π, inv_Four_π, Two_π, Sqrt_π, Sqrt_2,
+       Four_π_over_c, inv_c, X_over_mH, Y_over_mHe,
        E_opt, E_FUV, E_LW, E_EUV1, E_EUV2, E_EUV3,
        inv_E_opt, inv_E_FUV, inv_E_LW, inv_E_EUV1, inv_E_EUV2, inv_E_EUV3
 
@@ -926,6 +928,14 @@ end
 #######            M I S C E L L A N E O U S            #######
 #######                                                 #######
 ###############################################################
+
+
+const vth_H_prefact::Float64 = sqrt( 8 * kB / (π * mH) )
+
+""" The thermal velocity for hydrogen, sqrt( 8 kB T / π mH) """
+function vth_H( T::Float64 )
+    return vth_H_prefact * sqrt( T )
+end
 
 """ This function computes the H I, H II, and H₂ number densities,
     given the fractional abundances of H II and H₂, and the gas density ρ. """

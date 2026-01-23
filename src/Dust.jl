@@ -1,8 +1,8 @@
 
 """ FILE:        Dust.jl
 
-    PURPOSE:     Contains the code for computing dust properties (e.g. dyst temperature, opacities),
-                 and setting up the corresponding dust struct.
+    PURPOSE:     Contains the code for computing dust properties (e.g. dust temperature, charges,
+                 opacities), and setting up the corresponding dust struct.
 
 """
 
@@ -52,34 +52,36 @@ export Λdg, ComputeTd, FindGrainCharge, SetupDustState, κP, κR
 #######                                                             #######
 ###########################################################################
 
-
-const Λdg_0::Float64          = 1.356e-33 
-const inv_DGnorm_Λdg::Float64 = 1 / 0.01   # Normalization of the dust-to-gas ratio 
+# Useful constants: 
+const Two_kB::Float64    = 2 * kB 
+const Λdg_const::Float64 = ( fsil         * inv_agr_sil * inv_ρgr_sil
+                           + OneMinusfsil * inv_agr_C   * inv_ρgr_C ) 
 
 """ Dust collisional heating (if > 0) or cooling (< 0) rate Λdg(T,Td) (in erg s⁻¹ cm⁻³).
     Equivalently, it is the cooling rate of the gas if > 0, and heating rate if < 0.
-    See Kannan et al. (2020)."""
-@inline function Λdg( T::Float64, Td::Float64, DG::Float64, nH::Float64 )
-    Λdg_0 * (DG * inv_DGnorm_Λdg) * sqrt(T) * (T - Td) * (nH^2)
+    See Draine (2011)."""
+@inline function Λdg( T::Float64, Td::Float64, ρd::Float64, nH::Float64 )
+
+    # Factor 0.5 from assumed accomodation factor:
+    Stuff = ThreeFourths * nH * vth_H(T) * 0.5 * Two_kB * ( T - Td )
+
+    Λdg   = Stuff * ρd * Λdg_const
+
+    return Λdg
 end
 
 
 """ Λdg / ρd, useful for the dust temperature solver. """
 @inline function Λdg_over_ρd( T::Float64, 
                              Td::Float64,  
-                             nH::Float64, 
-                              ρ::Float64 )
-    
-    # Assume arbitrary dust density, since it cancels anyway.
-    # With DG = 1, we get:                          
-    ρd_arbitrary = ρ
+                             nH::Float64 ) 
 
-    # Return Λdg / ρd, again assuming DG = 1 for consistency:
-    if ρ > 0.0
-        return Λdg( T, Td, 1.0, nH ) / ρd_arbitrary
-    else
-        return 0.0
-    end
+    # Factor 0.5 from assumed accomodation factor:
+    Stuff        = ThreeFourths * nH * vth_H(T) * 0.5 * Two_kB * ( T - Td )
+
+    Λdg_over_ρd  = Stuff * Λdg_const
+
+    return Λdg_over_ρd
 end
 
 
@@ -122,7 +124,6 @@ function ComputeTd( J_IR::Float64,
                     TCMB::Float64,
                        T::Float64,
                       nH::Float64,
-                       ρ::Float64,
                    e_Lyα::Float64 = 0.0
                      )
 
@@ -143,7 +144,7 @@ function ComputeTd( J_IR::Float64,
               + HeatLyα
               + κP(Dust, Td) * Four_π_JIR
               + HeatCMB
-              + Λdg_over_ρd( T, Td, nH, ρ ) 
+              + Λdg_over_ρd( T, Td, nH ) 
 
               - 4 * κP(Dust, Td) * σSB * Td^4 )
 

@@ -881,8 +881,7 @@ function AbsorptionStep( Δt::Float64,
                  + Dust.κd_abs_EUV2 * J_EUV2  +  Dust.κd_abs_EUV3 * J_EUV3 )
 
     # IR emissivity & corresponding rate of change in J_IR:
-    DG        =  ρd / ρ  
-    js_IR     =  ρd * κabsB_JB  +  Λdg(T_old, Td_old, DG, nH) * inv_Four_π
+    js_IR     =  ρd * κabsB_JB  +  Λdg(T_old, Td_old, ρd, nH) * inv_Four_π
     dJ_IRdt   =  js_IR * c̃
 
     # Update J_IR:
@@ -890,7 +889,7 @@ function AbsorptionStep( Δt::Float64,
 
     # Update dust temperature, using the new J_IR and J_{B ≠ IR} bands:
     Td_new    = ComputeTd( J_IR, J_opt, J_FUV, J_LW, J_EUV1, 
-                           J_EUV2, J_EUV3, Dust, TCMB, T_old, nH, ρ, e_Lyα )
+                           J_EUV2, J_EUV3, Dust, TCMB, T_old, nH, e_Lyα )
 
     # Get IR flux opacity (at the new dust temperature):
     α_F_IR_dust =  ρd * κR(Dust, Td_new)       # Dust flux opacity  (for H_IR)
@@ -1015,7 +1014,7 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
     # Compute the cooling rate at e_old (inluding dust-gas collisions):
     CoolingRate = Λ( T_old, nHI, nHII, nHeI, nHeII, nHeIII, ne,
                      nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
-                     z, OTS ) + Λdg( T_old, Td, DG, nH )
+                     z, OTS ) + Λdg( T_old, Td, ρd, nH )
 
     # Tolerance cooling/heating time-scale for accuracy purposes:
     Δt_e = min( tol_HeatCool * e_old / abs( HeatingRate - CoolingRate ), Δt_e_max )
@@ -1036,19 +1035,19 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
 
     CoolingRate_p2 = Λ( T_p2, nHI, nHII, nHeI, nHeII, nHeIII, ne,
                         nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
-                        z, OTS ) + Λdg( T_p2, Td, DG, nH )
+                        z, OTS ) + Λdg( T_p2, Td, ρd, nH )
 
     CoolingRate_p1 = Λ( T_p1, nHI, nHII, nHeI, nHeII, nHeIII, ne,
                         nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
-                        z, OTS ) + Λdg( T_p1, Td, DG, nH )
+                        z, OTS ) + Λdg( T_p1, Td, ρd, nH )
 
     CoolingRate_m1 = Λ( T_m1, nHI, nHII, nHeI, nHeII, nHeIII, ne,
                         nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
-                        z, OTS ) + Λdg( T_m1, Td, DG, nH )
+                        z, OTS ) + Λdg( T_m1, Td, ρd, nH )
 
     CoolingRate_m2 = Λ( T_m2, nHI, nHII, nHeI, nHeII, nHeIII, ne,
                         nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
-                        z, OTS ) + Λdg( T_m2, Td, DG, nH )
+                        z, OTS ) + Λdg( T_m2, Td, ρd, nH )
 
     # Put it all together to get ∂Λ/∂e:
     ∂CoolingRate∂T = ( - CoolingRate_p2  +  8 * CoolingRate_p1  -  8 * CoolingRate_m1  
@@ -1108,7 +1107,7 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
     # Cooling rate at would-be new temperature:
     CoolingRate_new  = Λ( T_new, nHI, nHII, nHeI, nHeII, nHeIII, ne,
                           nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
-                          z, OTS ) + Λdg( T_new, Td, DG, nH )
+                          z, OTS ) + Λdg( T_new, Td, ρd, nH )
 
     # Relative residual checking |(e_old + (Γ - Λ(e_new)*Δtsub) - e_new)| / |e_new - e_old| :
     Res_e            = abs( e_old  +  ( HeatingRate_new  -  CoolingRate_new ) * Δt  -  e_new ) / max( abs( e_new - e_old ), e_floor ) 
@@ -1337,7 +1336,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
     # --------- Get dust temperature ------------------------------------------------------------
     TCMB              =   TCMB0 * (1 + z)
     Td                =   ComputeTd( J_IR_old, J_opt_old, J_FUV_old, J_LW_old, J_EUV1_old, 
-                                     J_EUV2_old, J_EUV3_old, Dust, TCMB, T_old, nH_old, ρ  )
+                                     J_EUV2_old, J_EUV3_old, Dust, TCMB, T_old, nH_old  )
 
     # --------- Recombination photons (if OTS is not used) ------------------------------------
     if !OTS 
