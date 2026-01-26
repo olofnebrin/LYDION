@@ -18,7 +18,6 @@ Nmaxsteps::Int                     =  100000       # Maximum number of time-step
 mstarZAMS::Float64                 =  35            # Initial mass of the star (M⊙)
 Zstar_Zsun::Float64                =  1.0           # Metallicity of the star in Solar units 
 σstar_cell::Float64                =  4             # Gaussian size of stellar emission region in cell size units (≳ 4 for approximately spherical H II regions)
-Zstar_pos::Float64                 =  0 * pc        # Position of star along the cylindrical Z-axis (0 is the lower corner)
 
 #########################################################################
 ######  C L O U D  P R O P E R T I E S  &  S P A T I A L  G R I D  ######
@@ -33,19 +32,25 @@ T₀::Float64                        =  500           # Initial cloud temperatur
 T_ext::Float64                     =  500           # Temperature outside the cloud 
 Rcl::Float64                       =  2 * pc        # Radius of cloud (i.e. high-density region)
 u_RMSturb::Float64                 =  3 * kms       # Initial RMS turbulence velocity 
-Zcl_pos::Float64                   =  Zstar_pos     # Initial position of cloud along Z-axis 
+
+# Grid settings below. If BC_Z_bot = :Reflect (Case 1), there is assumed symmetry at Z = 0. If 
+# BC_Z_bot = :Outflow, there is no assumed symmetry, and the star + cloud is instead centered at Z = Zmax / 2.
+# For Case 1, you can use either only a uniform grid (set N_r_log = N_Z_log_side = 0), or include a logarithmic 
+# grid stretching from r = Rmax_lin to r = Rmax, and from Z = LZ_uniform to Zmax. For Case 2, the same holds 
+# for the r-logarithmic grid (if used), but the Z-logarithmic grid (if used) stretches in both directions, with 
+# N_Z_log_side cells per side (upper logarithmic region, and lower logarithmic region).
 
 Rmax_lin::Float64                  =  3 * pc        # Uniform/linear grid out to cylindrical r = Rmax_lin 
-Zmax_lin::Float64                  =  3 * pc        # Uniform/linear grid out to cylindrical Z = Zmax_lin 
-Rmax::Float64                      =  3 * pc        # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
-Zmax::Float64                      =  3 * pc        # Logarithmic grid from Zmax_lin to Zmax (typically lower-resolution region)
-N_r_lin::Int                       =  64
-N_Z_lin::Int                       =  64 
-N_r_log::Int                       =  0
-N_Z_log::Int                       =  0
+LZ_uniform::Float64                =  6 * pc        # Total extent of uniform grid along the Z-axis.  
+Rmax::Float64                      =  10 * pc       # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
+Zmax::Float64                      =  10 * pc       # Maximum extent along Z-axis. Should be ≥ LZ_uniform.
+N_r_lin::Int                       =  64            # Number of cells along r-direction in the uniform grid section 
+N_Z_lin::Int                       =  64            # Number of cells along Z-direction in the uniform grid section 
+N_r_log::Int                       =  0             # Number of cells along r-direction in the logarithmic grid section 
+N_Z_log_side::Int                  =  0             # Number of cells along Z-direction (per side if BC_Z_bot = :Outflow) in the logarithmic grid section  
  
 BC_r_right::Symbol                 =  :Outflow      # BCs at outer r-boundary (:Outflow or :Reflect)
-BC_Z_bot::Symbol                   =  :Reflect      # BCs at lower Z-boundary (:Outflow or :Reflect)
+BC_Z_bot::Symbol                   =  :Outflow      # BCs at lower Z-boundary (:Outflow or :Reflect)
 BC_Z_top::Symbol                   =  :Outflow      # BCs at upper Z-boundary (:Outflow or :Reflect) 
 
 ######################################################################
@@ -109,7 +114,12 @@ date = Dates.format(now(), "yyyy-mm-dd")
 
 # Get resolution:
 N_r = N_r_lin + N_r_log
-N_Z = N_Z_lin + N_Z_log
+
+if BC_Z_bot == :Reflect
+    N_Z = N_Z_lin + N_Z_log_side
+else
+    N_Z = N_Z_lin + N_Z_log_side + N_Z_log_side
+end
 
 if Lyα
     if RadPressure
@@ -135,15 +145,15 @@ end
 
 print_info = true 
 
-SetupRHDsimulation( mstarZAMS, Zstar_Zsun, DG₀, nH₀, nH_ext, Rcl, Zcl_pos, Zstar_pos, 
-                    σstar_cell, Rmax_lin, Zmax_lin, Rmax, Zmax,
+SetupRHDsimulation( mstarZAMS, Zstar_Zsun, DG₀, nH₀, nH_ext, Rcl, 
+                    σstar_cell, Rmax_lin, LZ_uniform, Rmax, Zmax,
                     T₀, T_ext, tmax, 
                     xHII₀, xH2₀, xHeII₀, xHeIII₀, xDII₀, xHD₀, xCI₀, xCII₀, xCO₀, xOI₀, xOII₀,
                     xHII_ext, xH2_ext, xHeII_ext, xHeIII_ext, xDII_ext, xHD_ext, 
                     xCI_ext, xCII_ext, xCO_ext, xOI_ext, xOII_ext, Zgas_Zsun,
                     z, Hydro, Lyα, Recoil, LyαDestruction, Gravity,
                     RadPressure, IRfeedback, DustGrowthDestruction, OTS, 
-                    u_RMSturb, N_r_lin, N_Z_lin, N_r_log, N_Z_log,
+                    u_RMSturb, N_r_lin, N_Z_lin, N_r_log, N_Z_log_side,
                     N_ν_coarse, N_ν_fine, BC_r_right, BC_Z_bot, BC_Z_top,
                     SaveData, Nminsteps, Nmaxsteps, Nsaved,
                     print_info, FileName, FileDescription )

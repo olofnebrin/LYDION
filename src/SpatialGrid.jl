@@ -9,6 +9,7 @@
 
 using .Structs: GeometryCylindrical, GeometryCartesian
 using  StaticArrays, LinearAlgebra  # For some matrix algebra to determine some WENO3 coefficients 
+using  Roots                        # Needed for root-finding in the logarithmic cylindrical grid setup 
 
 export SetupCylindricalGrid, SetupCylindricalGrid_FromSaved, SetupCartesianGrid
 
@@ -507,23 +508,45 @@ end
 """ This function creates a cylindrical grid,
     for r ∈ [0, rmax], Z ∈ [0, Zmax]. 
 
-    A linear N_r_lin × N_Z_lin grid is used for 
-    r < rmax_lin, and Z < Zmax_lin. A logarithmic 
-    grid is used outside this region, stretching to 
-    rmax and Zmax, and with N_r_log × N_Z_log cells. """
-function SetupCylindricalGrid( rmax::T,     rmax_lin::T,
-                               Zmax::T,     Zmax_lin::T,
+    A uniform r-grid (N_r_lin) is used for r < rmax_lin.
+    A logarithmic r-grid (N_r_log) is used for larger r, stretching to rmax.
+
+    For reflective BCs at Z = 0: 
+    
+    A uniform Z-grid (N_Z_lin) is used covering a length LZ_uniform,
+    and logarithmic Z-grid (N_Z_side) is used for larger Z, stretching to 
+    Zmax. 
+
+    For outflow BCs at Z = 0:
+
+    A uniform Z-grid (N_Z_lin) is used covering the central region of length LZ_uniform,
+    and logarithmic grids (2 × N_Z_log_side) are used to extend it up and down, so the 
+    whole grid goes from Z = 0 to Z = Zmax. """
+function SetupCylindricalGrid( rmax::T,      rmax_lin::T,
+                               Zmax::T,      LZ_uniform::T,
                             N_r_lin::Int64,  N_r_log::Int64,
-                            N_Z_lin::Int64,  N_Z_log::Int64
+                            N_Z_lin::Int64,  N_Z_log_side::Int64,
+                           BC_Z_bot::Symbol = :Reflect
                               ) where {T<:AbstractFloat}
 
     N_r = N_r_lin + N_r_log
-    N_Z = N_Z_lin + N_Z_log
 
-    @assert rmax > 0.0 "We must have rmax > 0.0."
-    @assert Zmax > 0.0 "We must have Zmax > 0.0."
-    @assert N_r  ≥ 3   "We need N_r ≥ 3"
-    @assert N_Z  ≥ 3   "We need N_Z ≥ 3"
+    if BC_Z_bot == :Outflow
+        N_Z = N_Z_lin  +  2 * N_Z_log_side
+    elseif BC_Z_bot == :Reflect
+        N_Z = N_Z_lin  +  N_Z_log_side
+    else
+        error("Unknown BC_Z_bot = $BC_Z_bot")
+    end
+
+
+    @assert rmax > 0.0         "We must have rmax > 0.0."
+    @assert Zmax > 0.0         "We must have Zmax > 0.0."
+    @assert LZ_uniform > 0.0   "We must have LZ_uniform > 0.0."
+    @assert rmax_lin > 0.0     "We must have rmax_lin > 0.0."
+    @assert LZ_uniform ≤ Zmax  "We must have LZ_uniform ≤ Zmax."
+    @assert N_r  ≥ 3           "We need N_r ≥ 3"
+    @assert N_Z  ≥ 3           "We need N_Z ≥ 3"
 
     # Initialize arrays:
     ΔV           = zeros( T, N_r, N_Z )      # Cell volumes 
@@ -558,29 +581,182 @@ function SetupCylindricalGrid( rmax::T,     rmax_lin::T,
     w_plus_j_p1  = zeros( T, N_Z )
     w_minus_j_p1 = zeros( T, N_Z )
 
-    # Create linear and logarithmic grid: 
+
+    if BC_Z_bot == :Outflow
+        # In this case we want log, then uniform, then log grid for the Z-axis. 
+
+        # Range for linear Z-grid:
+        Zmin_lin    = 0.5 * ( Zmax - LZ_uniform )
+        Zmax_lin    = 0.5 * ( Zmax + LZ_uniform )
+
+        # Linear Z-grid & spacing:
+        Z_lin       = LinRange( Zmin_lin, Zmax_lin, N_Z_lin + 1 )
+        ΔZ_uniform  = Z_lin[2] - Z_lin[1]
+
+        if N_Z_log_side ≥ 2
+
+            # Extent of lower logarithmic grid:
+            L_lower    = Zmin_lin          # Since grid starts at Z = 0
+
+            # Extent of upper logarithmic grid:
+            L_upper    = Zmax - Zmax_lin 
+
+            @assert isapprox( L_lower, L_upper, rtol = 1e-12, atol = 0.0 )
+
+            if isapprox( L_upper, N_Z_log_side * ΔZ_uniform, rtol = 1e-12, atol = 0.0 )
+                # If L_upper can be captured by a nearly uniform grid, do so rather than 
+                # doing the elaborate root-solving:
+
+                Z_log_upper = [ Zmax_lin  +  k * ΔZ_uniform for k in 1:(N_Z_log_side - 1) ]
+                Z_log_lower = [ Zmin_lin  -  k * ΔZ_uniform for k in (N_Z_log_side - 1):-1:1 ]
+
+            else
+                @assert L_upper ≥ N_Z_log_side * ΔZ_uniform "Can't find consistent Z-logarithmic grid, use larger range, or uniform grid."
+
+                # We want ΔZₖ = ΔZ_{uniform} × qᵏ. For the upper logarithmic grid, we 
+                # then want to find q such that f(q) = 0, where:
+                f = q -> L_upper - ΔZ_uniform * ( q^N_Z_log_side  -  1 ) / ( q  -  1 )
+
+                # Next, solve for q using a bisection method. Initial bracket guess:
+                q_low  = 1.0 + 1e-14
+                q_high = 2.0
+
+                # Ensure upper limit has f(q_high) < 0.0:
+                while f(q_high) > 0.0 
+                    q_high *= 2
+                    
+                    if q_high > 1e12
+                        error( "Failed to bracket q to create the logarithmic Z-grid" )
+                    end
+                end
+
+                # Solve for q:
+                q_Z  = find_zero( f, (q_low, q_high), Bisection() )
+
+                # Get upper logarithmic grid:
+                Z_log_upper = [ Zmax_lin  +  ΔZ_uniform * (q_Z^k - 1) / (q_Z - 1) for k in 1:(N_Z_log_side - 1) ]
+
+                # Lower logarithmic grid is basically a mirror of this:
+                Z_log_lower = [ Zmin_lin  -  ΔZ_uniform * (q_Z^k - 1) / (q_Z - 1) for k in (N_Z_log_side - 1):-1:1 ]
+            end
+
+            # We now have a logarithmic grid, and need to stitch it to a uniform grid:
+            Z  .= vcat( [0.0], Z_log_lower, Z_lin, Z_log_upper, [Zmax] )
+
+            @assert Z[1] == 0.0
+            @assert isapprox( Z[end], Zmax, rtol = 1e-14, atol = 0.0 )
+            @assert all(diff(Z) .> 0.0)
+        else
+            # If we don't have a logarithmic grid:
+            Z  .= LinRange( 0.0, Zmax, N_Z_lin + 1 )
+
+            @assert Z[1] == 0.0
+            @assert isapprox( Z[end], Zmax, rtol = 1e-14, atol = 0.0 )
+            @assert all(diff(Z) .> 0.0)
+        end
+    
+    elseif BC_Z_bot == :Reflect 
+
+        # Linear Z-grid & spacing:
+        Zmax_lin    = LZ_uniform
+        Z_lin       = LinRange( 0.0, Zmax_lin, N_Z_lin + 1 )  # Linear grid starts at Z = 0
+        ΔZ_uniform  = Z_lin[2] - Z_lin[1]
+
+        if N_Z_log_side ≥ 2
+            # In this case we want uniform, then log grid for the Z-axis. 
+
+            L_upper = Zmax - Zmax_lin
+
+            if isapprox( L_upper, N_Z_log_side * ΔZ_uniform, rtol = 1e-12, atol = 0.0 )
+                # In this case we have a nearly uniform grid in the "logarithmic" region, 
+                # so skip root finding:
+                Z_log_upper = [ Zmax_lin  +  k * ΔZ_uniform for k in 1:(N_Z_log_side - 1) ]
+            else
+                # We want ΔZₖ = ΔZ_{uniform} × qᵏ. For the upper logarithmic grid, we 
+                # then want to find q such that f(q) = 0, where: 
+                f = q -> L_upper - ΔZ_uniform * (q^N_Z_log_side - 1) / (q - 1)
+
+                @assert L_upper ≥ N_Z_log_side * ΔZ_uniform "Can't find consistent Z-logarithmic grid, use larger range, or uniform grid."
+                
+                # Next, solve for q using a bisection method. Initial bracket guess:
+                q_low  = 1.0 + 1e-14
+                q_high = 2.0
+
+                # Ensure upper limit has f(q_high) < 0.0:
+                while f(q_high) > 0.0
+                    q_high *= 2
+
+                    if q_high > 1e12
+                        error( "Failed to bracket q to create the logarithmic Z-grid" )
+                    end
+                end
+                
+                q_Z         = find_zero( f, (q_low, q_high), Bisection() )
+                Z_log_upper = [ Zmax_lin  +  ΔZ_uniform * (q_Z^k - 1) / (q_Z - 1) for k in 1:(N_Z_log_side - 1) ]
+            end
+            
+            # We now have a logarithmic grid, and need to stitch it to a uniform grid:
+            Z .= vcat(Z_lin, Z_log_upper, [Zmax]) 
+        
+            @assert Z[1] == 0.0
+            @assert isapprox( Z[end], Zmax, rtol = 1e-14, atol = 0.0 )
+            @assert all(diff(Z) .> 0.0)
+        else
+            # If we don't have a logarithmic grid:
+            Z .= LinRange( 0.0, Zmax, N_Z_lin + 1 )
+
+            @assert Z[1] == 0.0
+            @assert isapprox( Z[end], Zmax, rtol = 1e-14, atol = 0.0 )
+            @assert all(diff(Z) .> 0.0)
+        end
+    end
+
+    # Create linear grid: 
     r_lin        = LinRange( 0.0, rmax_lin, N_r_lin + 1 )
-    Z_lin        = LinRange( 0.0, Zmax_lin, N_Z_lin + 1 )
 
+    # Get grid spacing in the fine/uniform part:
+    Δr_uniform   = r_lin[2] - r_lin[1]
+    
     if N_r_log ≥ 2
-        q_r          = (rmax / rmax_lin)^( 1 / N_r_log )          # Geometric factor 
-        r_log        = [ rmax_lin * q_r^(i) for i in 0:N_r_log ]  # N_r_log + 1 interfaces, starting at r = rmax_lin
-    end
-    if N_Z_log ≥ 2
-        q_Z          = (Zmax / Zmax_lin)^( 1 / N_Z_log )          # Geometric factor 
-        Z_log        = [ Zmax_lin * q_Z^(i) for i in 0:N_Z_log ]  # N_Z_log + 1 interfaces, starting at Z = Zmax_lin
-    end
+        
+        # Extent of logarithmic region:
+        L_outer = rmax - rmax_lin
+        
+        if isapprox( L_outer, N_r_log * Δr_uniform, rtol = 1e-12, atol = 0.0 )
+            # In this case we have a nearly uniform grid in the "logarithmic" region, 
+            # so skip root finding:
+            r_log = [ rmax_lin  +  k * Δr_uniform for k in 1:(N_r_log - 1) ]
+        
+        else
+            # We want Δrₖ = Δr_{uniform} × qᵏ. For the upper logarithmic grid, we 
+            # then want to find q such that f(q) = 0, where:
+            f = q -> L_outer - Δr_uniform * (q^N_r_log - 1) / (q - 1)
 
-    # Fill interface values:
-    if N_r_log ≥ 2
-        r  .= vcat( r_lin, r_log[2:end] )
+            @assert L_outer ≥ N_r_log * Δr_uniform "Can't find consistent r-logarithmic grid, use larger range, or uniform grid."
+            
+            # Next, solve for q using a bisection method. Initial bracket guess:
+            q_low  = 1.0 + 1e-14
+            q_high = 2.0
+            
+            # Ensure upper limit has f(q_high) < 0.0:
+            while f(q_high) > 0.0
+                q_high *= 2
+                
+                if q_high > 1e12
+                    error("Failed to bracket q for r-grid")
+                end
+            end
+
+            q_r   = find_zero( f, (q_low, q_high), Bisection() )
+            r_log = [ rmax_lin  +  Δr_uniform * (q_r^k - 1) / (q_r - 1) for k in 1:(N_r_log - 1) ]
+        end
+
+        # Stitch together uniform & non-uniform grids:
+        r .= vcat( r_lin, r_log, [rmax] )
+    
     else
-        r  .= r_lin
-    end
-    if N_Z_log ≥ 2
-        Z  .= vcat( Z_lin, Z_log[2:end] )
-    else
-        Z  .= Z_lin
+        # In this case we only use a uniform grid:
+        r .= LinRange( 0.0, rmax, N_r_lin + 1 )
     end
 
     # Get rCoM, ZCoM, ΔV, A_r, A_Z, inv_r_cell ≡ ⟨1/r⟩, and WENO3 weights:

@@ -372,11 +372,9 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                                    nH₀::Float64,  # H density (cm⁻³) inside cloud 
                                 nH_ext::Float64,  # H density (cm⁻³) far outside cloud 
                                    Rcl::Float64,  # Radius of 'cloud', i.e. higher density region
-                               Zcl_pos::Float64,  # Initial central position of the cloud along the Z-axis 
-                             Zstar_pos::Float64,  # Central position of the star along the Z-axis 
                             σstar_cell::Float64,  # Gaussian σ (in units of cell size) that determines extent of spatially smeared star
                               Rmax_lin::Float64,
-                              Zmax_lin::Float64,
+                            LZ_uniform::Float64,
                                   Rmax::Float64,
                                   Zmax::Float64,
                                     T₀::Float64,  # Temperature within cloud 
@@ -419,7 +417,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                                N_r_lin::Int     = 64,
                                N_Z_lin::Int     = 64,
                                N_r_log::Int     = 64,
-                               N_Z_log::Int     = 64,
+                          N_Z_log_side::Int     = 64,
                             N_ν_coarse::Int     = 200,
                               N_ν_fine::Int     = 100,
                             BC_r_right::Symbol  = :Outflow,
@@ -437,24 +435,37 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     PrintLYDIONLogo()
 
     # Initialize the RSL for M1 stellar & Lyα RT (will be updated adaptively each time-step)
-    c̃        = 300 * kms  
+    c̃          = 300 * kms  
 
     # Setup uniform cylindrical grid:
-    geometry = SetupCylindricalGrid( Rmax, Rmax_lin, Zmax, Zmax_lin, 
-                                     N_r_lin, N_r_log, 
-                                     N_Z_lin, N_Z_log )
+    LZ_uniform = min( LZ_uniform, Zmax )
+    geometry   = SetupCylindricalGrid( Rmax, Rmax_lin, Zmax, LZ_uniform, 
+                                       N_r_lin, N_r_log, 
+                                       N_Z_lin, N_Z_log_side,
+                                       BC_Z_left )
 
-    r        = geometry.r
-    rCoM     = geometry.rCoM
-    Z        = geometry.Z
-    ZCoM     = geometry.ZCoM
-    ΔV       = geometry.ΔV
+    r          = geometry.r
+    rCoM       = geometry.rCoM
+    Z          = geometry.Z
+    ZCoM       = geometry.ZCoM
+    ΔV         = geometry.ΔV
 
     # Grid intervals:
-    N_r      = length( rCoM )
-    N_Z      = length( ZCoM )
-    dN_r     = 1:N_r 
-    dN_Z     = 1:N_Z
+    N_r        = length( rCoM )
+    N_Z        = length( ZCoM )
+    dN_r       = 1:N_r 
+    dN_Z       = 1:N_Z
+
+    # Center star & cloud appropriately:
+    if BC_Z_left == :Reflect
+        # In this case there is symmetry around Z = 0, so we place the star & cloud at Z = 0:
+        Zcl_pos   = 0.0
+        Zstar_pos = 0.0
+    else
+        # Otherwise, we center the star & cloud:
+        Zcl_pos   = Z[end] / 2
+        Zstar_pos = Zcl_pos
+    end
 
 
     if print_info
@@ -469,7 +480,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                   dust-to-gas ratio D/D⊙ = $(DG₀/DGsun). Initial turbulent RMS velocity 
                   is $(u_RMSturb/1e5) km s⁻¹.
 
-                  SPATIAL RESOLUTION: $(N_r_lin + N_r_log) × $(N_Z_lin + N_Z_log)
+                  SPATIAL RESOLUTION: $(N_r) × $(N_Z)
                   
                   PHYSICS SETTINGS:
                   
@@ -528,9 +539,9 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     chemstate = InitializeChemistryArrays( N_r, N_Z, Zgas_Zsun )
 
     # Cloud density properties:
-    ρcl  = max( nH₀ * mH / X,  10 * ρ_floor )                     # Density within cloud 
-    ρext = max( nH_ext * mH / X,  10 * ρ_floor )                  # Density far outside the cloud
-    δr   = max( 2 * max( r[2] - r[1], Z[2] - Z[1] ), 0.05 * Rcl ) # Determines fall-off in density outside cloud
+    ρcl  = max( nH₀ * mH / X,  10 * ρ_floor )                               # Density within cloud 
+    ρext = max( nH_ext * mH / X,  10 * ρ_floor )                            # Density far outside the cloud
+    δr   = max( 2 * max( minimum(diff(r)), minimum(diff(Z)) ), 0.05 * Rcl ) # Determines fall-off in density outside cloud
 
     if ρcl < 1e3 * ρ_floor 
         @warn "The initial cloud density ρcl is only $(ρcl/ρ_floor) times the density floor. Consider making 

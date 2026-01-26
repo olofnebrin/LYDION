@@ -2665,8 +2665,8 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
     
     # Compute weight factors f_ij that determine the emissivity 
     # and stellar mass in a given cell (i,j):
-    σstar = σstar_cell * max( r[2] - r[1], Z[2] - Z[1] )   # σ determining the Gaussian size of the smeared 'star'
-    ComputeStellar_fij!( fstar_ij, r, Z, Zstar_pos, σstar )
+    σstar = σstar_cell * max( minimum(diff(r)), minimum(diff(Z)) )   # σ determining the Gaussian size of the smeared 'star' 
+    ComputeStellar_fij!( fstar_ij, r, Z, Zstar_pos, σstar )          # (minimum of diff, to ensure we take cell widths from uniform grid region)
 
     # Get emissivities in all bands, for all cells. Weighted 
     # so that the total luminosity over all (infinite) space is 
