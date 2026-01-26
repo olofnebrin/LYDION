@@ -14,7 +14,9 @@ export CreateHDF5File, SaveGridHDF5File, SaveLyαFreqGridHDF5File, SaveRHDTimeSt
 function CreateHDF5File( FileName::String,                # File name 
                               N_r::Int,                   # Number of cells along r-axis  
                               N_Z::Int,                   # Number of cells along Z-axis 
-                           Nsaved::Int, 
+                        Nminsteps::Int,                   # Minimum number of time-steps in the simulation (sets largest Δt)
+                        Nmaxsteps::Int,                   # Maximum number of time-steps in the simulation 
+                           Nsaved::Int,                   # Number of target saved time-steps 
                           Gravity::Bool,                  # Whether to add storage for gravity & gravity is on/off
                               Lyα::Bool,                  # Whether to add storage for Lyα arrays & Lyα RT is on/off  
                            Recoil::Bool,                  # Whether atomic recoil is on/off (relevant only if Lyα is on)
@@ -123,6 +125,11 @@ function CreateHDF5File( FileName::String,                # File name
 
         # Save dust growth/destruction setting (on/off):
         attrs(settings)["DustGrowth/Destruction"]  = string(DustGrowthDestruction)
+
+        # Minimum & maximum number of time-steps:
+        attrs(settings)["Nminsteps"] = Nminsteps
+        attrs(settings)["Nmaxsteps"] = Nmaxsteps
+
 
         ############################# RESTART AT CHECKPOINT ######################
 

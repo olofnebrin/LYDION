@@ -689,7 +689,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
         end
 
         # Create save file:
-        CreateHDF5File( FileName, N_r, N_Z, Nsaved, Gravity, 
+        CreateHDF5File( FileName, N_r, N_Z, Nminsteps, Nmaxsteps, Nsaved, Gravity, 
                         Lyα, Recoil, LyαDestruction, RadPressure, IRfeedback,
                         DustGrowthDestruction, OTS, z, 
                         N_ν,
@@ -839,7 +839,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
         # Update the bar progress value
         update!( prog, Int(round(100 * progress_frac)) )
 
-        if step > Nmaxsteps 
+        if step ≥ Nmaxsteps 
             println("\nSimulation stopped: Reached maximum number of global time-steps ($(Nmaxsteps)).")
             break
         end
@@ -906,6 +906,10 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
     # Open HDF5 file, get needed data for ICs, then restart simulation:
     h5open(FileName, "r") do file 
 
+        # Get desired number of saved time-steps:
+        Nsaved = length(file["Times"])
+
+        # Next, get settings & checkpoint data:
         haskey(file, "Settings")   || error("RestartRHDsimulation: missing group /Settings in $FileName.")
         haskey(file, "Checkpoint") || error("RestartRHDsimulation: missing group /Checkpoint in $FileName.")
 
@@ -947,6 +951,10 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         else
             error("RestartRHDsimulation: missing Settings attribute \"tmax\" in $FileName")
         end
+
+        # Get minimum and maximum allowed number of time-steps:
+        Nminsteps = parse_i(get_attr(Settings, "Nminsteps")) 
+        Nmaxsteps = parse_i(get_attr(Settings, "Nmaxsteps"))
 
         ###############################################################
         #######                                                 #######
@@ -1319,7 +1327,7 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         # Update the bar progress value
         update!( prog, Int(round(100 * progress_frac)) )
 
-        if step > Nmaxsteps 
+        if step ≥ Nmaxsteps 
             println("\nSimulation stopped: Reached maximum number of global time-steps ($(Nmaxsteps)).")
             break
         end
