@@ -27,7 +27,7 @@ const scratch_ν = Ref{Vector{NTuple{7, Vector{Float64}}}}(Vector{NTuple{7, Vect
 """ This function initializes scratch arrays, needed to be able to 
     do the frequency update in an efficient and thread-safe manner. """
 function Initialize_ν_Scratch2D!( N_ν::Int64 )
-    nthreads = Threads.nthreads()
+    nthreads = Threads.maxthreadid()
     scratch_ν[] = [
         ( Vector{Float64}(undef, N_ν-2),  # A
           Vector{Float64}(undef, N_ν-2),  # B
@@ -246,7 +246,7 @@ end
 
     # Make sure the scratch arrays for interface fluxes & Kϕϕ have the correct size:
     if DEBUG_Lyα
-        nthreads = Threads.nthreads()
+        nthreads = Threads.maxthreadid()
         @assert size( K_ϕϕ_iphalf, 3 ) == nthreads
         @assert size( K_ϕϕ_imhalf, 3 ) == nthreads
         @assert size( F_r, 3 )         == nthreads
@@ -283,13 +283,10 @@ end
     H_r_old .= H_r 
     H_Z_old .= H_Z
 
-    #t0 = time_ns()
     @threads :static for k in kmin:kmax
+        # Get thread ID for the interface flux & Kϕϕ scratch arrays:
+        tid = Threads.threadid() 
         @inbounds begin
-
-            # Get thread ID for the interface flux & Kϕϕ scratch arrays:
-            tid = Threads.threadid() 
-
 
             # Spatial advection of J & H, and absorption of H (flux-absorption)
             # for every frequency bin:
@@ -330,7 +327,7 @@ end
 
     # Initialize the scratch arrays on the very first call 
     # (or if the thread count changed):
-    if isempty(scratch_ν[]) || length(scratch_ν[]) != Threads.nthreads() || length(scratch_ν[][1][1]) != N_ν-2
+    if isempty(scratch_ν[]) || length(scratch_ν[]) != Threads.maxthreadid() || length(scratch_ν[][1][1]) != N_ν-2
         Initialize_ν_Scratch2D!( N_ν )
     end
     local_scratch = scratch_ν[]

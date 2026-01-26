@@ -359,6 +359,9 @@ function UpdateRHD!( Δt_Hydro::Float64,
         end # End of i-loop 
     end # End of j-loop 
 
+    # Update gas velocity dispersions (useful diagnostic):
+    UpdateGasVelocityDispersion!( hydrostate, ΔV )
+
     return nothing
 end
 
@@ -410,6 +413,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                                Gravity::Bool    = true,
                            RadPressure::Bool    = true,
                             IRfeedback::Bool    = true,
+                 DustGrowthDestruction::Bool    = true,     # Dust growth & destruction (on if true, off if false)
                                    OTS::Bool    = false,    # On-the-spot approximation (on if true, off if false)
                              u_RMSturb::Float64 = 0.0,      # Initial turbulent RMS velocity 
                                N_r_lin::Int     = 64,
@@ -517,7 +521,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     ud_Z   = hydrostate.ud_Y
 
     # Initialize turbulent velocity fluctuations:
-    SetupTurbulence!( u_RMSturb, Rcl, Zcl_pos, u_r, u_Z, r, Z, rCoM, ZCoM, ΔV )
+    SetupTurbulence!( u_RMSturb, Rcl, Zcl_pos, u_r, u_Z, r, Z, rCoM, ZCoM, ΔV, BC_Z_left )
 
     # Set up chemistry state struct, containing arrays for all species tracked,
     # e.g. xHII, xH2 etc. :
@@ -625,13 +629,10 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     #######                                                 #######
     ###############################################################
 
-    # Initialize struct for dust, and initialize the dust density 
-    # as ρd = DG₀ × ρ:
-
-    Teff      = 4.8e4 
+    # Initialize struct for dust properties/settings:
     Td₀       = 30.0
-    duststate = SetupDustState( N_r, N_Z, Teff, Td₀, "DustData.txt", 
-                                "DustIRData.txt", false )
+    duststate = SetupDustState( DustGrowthDestruction, N_r, N_Z, Td₀, "DustData.txt", 
+                                "DustIRData.txt", true )
 
     # Sanity/safety check:
     @assert size( duststate.Td ) == size( ρ ) "Dust temperature Td should have the same size 
@@ -690,7 +691,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
         # Create save file:
         CreateHDF5File( FileName, N_r, N_Z, Nsaved, Gravity, 
                         Lyα, Recoil, LyαDestruction, RadPressure, IRfeedback,
-                        OTS, z, 
+                        DustGrowthDestruction, OTS, z, 
                         N_ν,
                         tmax, mstarZAMS, Zstar_Zsun, σstar_cell, 
                         Zstar_pos,
@@ -860,7 +861,7 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
     # Initialize various variables and settings that will be needed after
     # we close the h5 open:
     Gravity = false; Lyα = false; Recoil = false; RadPressure = false; IRfeedback = false; Hydro = true
-    LyαDestruction = true
+    LyαDestruction = true; DustGrowthDestruction = true
     z = 0.0; tmax = 0.0
     t = 0.0; step = 0; Δt_Hydro = 0.0
     c̃_saved = 0.0
@@ -912,15 +913,16 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         CheckPoint = file["Checkpoint"]
 
         # Get settings:
-        Gravity        = parse_bool(get_attr(Settings, "Gravity"))
-        Lyα            = parse_bool(get_attr(Settings, "Lya"))  
-        Recoil         = parse_bool(get_attr(Settings, "Recoil"))
-        RadPressure    = parse_bool(get_attr(Settings, "RadPressure"))
-        IRfeedback     = parse_bool(get_attr(Settings, "IRfeedback"))
-        OTS            = parse_bool(get_attr(Settings, "OTS"))
-        LyαDestruction = haskey(attrs(Settings), "Lya_pd_on") ? parse_bool(get_attr(Settings, "Lya_pd_on")) : true
-        Hydro          = haskey(attrs(Settings), "Hydro")     ? parse_bool(get_attr(Settings, "Hydro"))     : true
-        z              = haskey(attrs(Settings), "z")         ? parse_f64(get_attr(Settings, "z"))          : 0.0
+        Gravity                = parse_bool(get_attr(Settings, "Gravity"))
+        Lyα                    = parse_bool(get_attr(Settings, "Lya"))  
+        Recoil                 = parse_bool(get_attr(Settings, "Recoil"))
+        RadPressure            = parse_bool(get_attr(Settings, "RadPressure"))
+        IRfeedback             = parse_bool(get_attr(Settings, "IRfeedback"))
+        DustGrowthDestruction  = parse_bool(get_attr(Settings, "DustGrowth/Destruction"))
+        OTS                    = parse_bool(get_attr(Settings, "OTS"))
+        LyαDestruction         = haskey(attrs(Settings), "Lya_pd_on") ? parse_bool(get_attr(Settings, "Lya_pd_on")) : true
+        Hydro                  = haskey(attrs(Settings), "Hydro")     ? parse_bool(get_attr(Settings, "Hydro"))     : true
+        z                      = haskey(attrs(Settings), "z")         ? parse_f64(get_attr(Settings, "z"))          : 0.0
 
         # Boundary conditions in cylindrical coordinates:
         BC_r_right     = parse_sym(get_attr(Settings, "BC_r_right"))
@@ -1000,9 +1002,9 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         chemstate.xOII    .=  CheckPoint["xOII"][:, :]
 
         # Set up dust state struct, containing dust properties:
-        Teff      = 4.8e4 
         Td₀       = 30.0
-        duststate = SetupDustState( N_r, N_Z, Teff, Td0 )
+        duststate = SetupDustState( DustGrowthDestruction, N_r, N_Z, Td₀, "DustData.txt", 
+                                   "DustIRData.txt", true )
 
         # Setup hydro state (not initialized to right values yet) + ghost grid arrays:
         N_scalars::Int        = 17

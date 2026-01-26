@@ -123,7 +123,7 @@ function InitializeScratchArrays!( N_r::Int,
                                    N_Z::Int
                                   )
     # Number of threads:
-    nthreads = Threads.nthreads()
+    nthreads = Threads.maxthreadid()
 
     # For the r-sweep:
     scratch_r[] = [
@@ -394,7 +394,7 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
 
     # Initialize the scratch arrays on the very first call 
     # (or if the thread count changed):
-    if isempty(scratch_r[]) || length(scratch_r[]) != Threads.nthreads()
+    if isempty(scratch_r[]) || length(scratch_r[]) != Threads.maxthreadid()
         InitializeScratchArrays!( N_r, N_Z )
     end
     scratch_r_local = scratch_r[]

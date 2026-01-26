@@ -321,6 +321,9 @@ end
     optical properties (opacities etc.) for all bands. """
 mutable struct DustState{ITP_P, ITP_R}
 
+    # Dust growth/destruction setting (on if true, off if false):
+    DustGrowthDestruction::Bool
+
     # Dust temperature for every cell:
     Td::Array{Float64, 2}
 
@@ -511,8 +514,14 @@ mutable struct HydrodynamicsState{T<:AbstractFloat}
     # Strang split order:
     rfirst_Hydro::Bool
 
-    # Total mass (g) in simulation volume:
+    # Total gas & dust mass (g) in simulation volume:
     M_simvol::T
+    Md_simvol::T
+
+    # Velocity dispersion diagnostics (cm s⁻¹):
+    σ_X::T 
+    σ_Y::T 
+    σ::T 
 end
 
 

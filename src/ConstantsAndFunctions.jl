@@ -21,8 +21,10 @@ export LyαArrays, GenerateLyαArrays, H, Htophat, b, a, σ0,
        Update_∇u_RHD!, D_colon_∇u_Cylindrical, 
        eLyα_sphere_point, eLyα_sphere_uni,
        D_colon_∇u_Cartesian, Compute_f_esc_Cylindrical, Compute_f_esc_Lyα_Cylindrical,
-       vth_H, GetHydrogenDensities, GetHeliumDensities, GetElectronDensity,
-       GetElectronDensityFromFracs, MinMod, MonCen, PrintLYDIONLogo
+       vth_H, GetHydrogenDensities, GetHeliumDensities, GetDeuteriumDensities, 
+       GetCarbonDensities, GetOxygenDensities, GetElectronDensity,
+       GetElectronDensityFromFracs, GetAllNumberDensities, 
+       MinMod, MonCen, PrintLYDIONLogo
 
 
 ###############################################################
@@ -56,12 +58,33 @@ const c::Float64          = 2.99792458e10         # Speed of light (cm/s)
 const h::Float64          = 6.626069573e-27       # Planck's constant (erg s)
 const G::Float64          = 6.6743e-8             # The gravitational constant (dyn cm² g⁻²)
 const kB::Float64         = 1.380648813e-16       # Boltzmann constant (erg/K)
-const mH::Float64         = 1.6735327e-24         # Mass of hydrogen atom (g)
+
+const mu::Float64         = 1.660539069e-24       # Atomic mass unit (g)
+const mH::Float64         = 1.0080 * mu           # Mass of hydrogen atom (g)
 const mH2::Float64        = 2 * mH                # Mass of H₂ molecule (g)
+const mD::Float64         = 2.014  * mu           # Mass of deuterium atom (g) 
 const me::Float64         = 9.109382917e-28       # Mass of electron (g)
-const mHe::Float64        = 4 * mH                # Mass of helium atom (g)
-const mC::Float64         = 12 * mH               # Mass of carbon atom (g)
-const mCO::Float64        = (12 + 16) * mH        # Mass of CO molecule (g)
+const mHe::Float64        = 4.0026 * mu           # Mass of helium atom (g)
+const mC::Float64         = 12.011 * mu           # Mass of carbon atom (g)
+const mO::Float64         = 15.999 * mu           # Mass of oxygen atom (g)
+const mCO::Float64        = mC  +  mO             # Mass of CO molecule (g)
+const mN::Float64         = 14.007 * mu           # Mass of nitrogen atom (g)
+const mNe::Float64        = 20.180 * mu           # Mass of neon atom (g)
+const mMg::Float64        = 24.305 * mu           # Mass of magnesium atom (g)
+const mSi::Float64        = 28.086 * mu           # Mass of silicon atom (g)
+const mS::Float64         = 32.065 * mu           # Mass of sulfur atom (g)
+const mFe::Float64        = 55.845 * mu           # Mass of iron atom (g)
+
+const inv_mD::Float64     = 1 / mD 
+const inv_mC::Float64     = 1 / mC 
+const inv_mO::Float64     = 1 / mO 
+const inv_mN::Float64     = 1 / mN 
+const inv_mNe::Float64    = 1 / mNe
+const inv_mMg::Float64    = 1 / mMg
+const inv_mSi::Float64    = 1 / mSi
+const inv_mS::Float64     = 1 / mS
+const inv_mFe::Float64    = 1 / mFe
+
 const e::Float64          = 4.80320451e-10        # Electron charge (esu)
 const q_e::Float64        = - e                   # Charge of electron (esu)
 const q_HII::Float64      = - e                   # Charge of proton (esu)
@@ -81,19 +104,27 @@ const f_lu_Lyα::Float64   = 0.41641               # Oscillator strength for Ly�
 const σT::Float64         = 6.6524587321e-25      # Thomson scattering cross-section (cm²)
 
 ####### PARAMETERS ########################
-const Y::Float64          = 0.247                 # Helium mass fraction 
-const X::Float64          = 1 - Y                 # Hydrogen mass fraction
-const DGsun::Float64      = 1 / 162               # Solar dust-to-gas ratio
-const TCMB0::Float64      = 2.726                 # CMB temperature at redshift z = 0
-const D_H_ratio::Float64  = 2.53e-5               # Deuterium-to-hydrogen abundance nD/nH  (Cooke et al. 2018)
-const C_H_ratio::Float64  = 2.95e-4               # Carbon-to-hydrogen abundance nC/nH     (Asplund et al. 2009)
-const N_H_ratio::Float64  = 7.41e-5               # Nitrogen-to-hydrogen abundance nN/nH   (Asplund et al. 2009)
-const O_H_ratio::Float64  = 5.37e-4               # Oxygen-to-hydrogen abundance nC/nH     (Asplund et al. 2009)
-const Ne_H_ratio::Float64 = 9.33e-5               # Neon-to-hydrogen abundance nNe/nH      (Asplund et al. 2009)
-const Mg_H_ratio::Float64 = 4.37e-5               # Magnesium-to-hydrogen abundance nMg/nH (Asplund et al. 2009)
-const Si_H_ratio::Float64 = 3.55e-5               # Silicon-to-hydrogen abundance nSi/nH   (Asplund et al. 2009)
-const S_H_ratio::Float64  = 1.45e-5               # Sulfur-to-hydrogen abundance nSi/nH    (Asplund et al. 2009)
-const Fe_H_ratio::Float64 = 3.47e-5               # Iron-to-hydrogen abundance nSi/nH      (Asplund et al. 2009)
+const Y::Float64          = 0.247                          # Helium mass fraction (of pristine gas)
+const D_H_ratio::Float64  = 2.53e-5                        # Deuterium-to-hydrogen abundance nD/nH        (Cooke et al. 2018)
+const X_D::Float64        = D_H_ratio * (1 - Y) * mD / mH  # Deuterium mass fraction (of pristine gas)
+const X::Float64          = 1 - Y - X_D                    # Hydrogen mass fraction (of pristine gas), corrected slightly for deuterium 
+
+const Zsun::Float64       = 0.0142                         # Solar metallicity M_Z / (M_H + M_He + M_Z)   (Asplund et al. 2009)
+const MZ_over_MH::Float64 = 0.0199                         # M_Z / M_H                                    (Asplund et al. 2009)
+const fCarbon::Float64    = 3.54e-3 / MZ_over_MH           # Fraction of metal mass in carbon             (Asplund et al. 2009)
+const fNitrogen::Float64  = 1.04e-3 / MZ_over_MH           # Fraction of metal mass in nitrogen           (Asplund et al. 2009)
+const fOxygen::Float64    = 8.59e-3 / MZ_over_MH           # Fraction of metal mass in oxygen             (Asplund et al. 2009)
+const fNeon::Float64      = 1.88e-3 / MZ_over_MH           # Fraction of metal mass in neon               (Asplund et al. 2009)
+const fMagnesium::Float64 = 1.06e-3 / MZ_over_MH           # Fraction of metal mass in magnesium          (Asplund et al. 2009)
+const fSilicon::Float64   = 9.07e-4 / MZ_over_MH           # Fraction of metal mass in silicon            (Asplund et al. 2009) 
+const fSulfur::Float64    = 4.63e-4 / MZ_over_MH           # Fraction of metal mass in sulfur             (Asplund et al. 2009)
+const fIron::Float64      = 1.94e-3 / MZ_over_MH           # Fraction of metal mass in iron               (Asplund et al. 2009)
+
+# nC / nO:
+const C_over_O::Float64   = fCarbon * inv_mC / ( fOxygen * inv_mO )  
+
+const DGsun::Float64      = 1 / 162                        # Solar dust-to-gas ratio
+const TCMB0::Float64      = 2.726                          # CMB temperature at redshift z = 0
 
 ####### CONVENIENT CONSTANTS ##############
 const OneThird::Float64      = 1 / 3
@@ -108,6 +139,8 @@ const Four_π_over_c::Float64 = Four_π / c
 const inv_c::Float64         = 1 / c   
 const X_over_mH::Float64     = X / mH    
 const Y_over_mHe::Float64    = Y / mHe   
+const X_D_over_mD::Float64   = X_D / mD
+const inv_Zsun::Float64      = 1 / Zsun
 
 
 ####### BAND ENERGIES ####################
@@ -130,13 +163,18 @@ const inv_E_EUV2::Float64 = 1 / E_EUV2
 const inv_E_EUV3::Float64 = 1 / E_EUV3
 
 # Export constants:
-export c, h, G, kB, mH, mH2, me, mHe, mC, mCO, e, q_e, q_HII, q_HeII, q_HeIII,
+export c, h, G, kB, e, q_e, q_HII, q_HeII, q_HeIII,
        σSB, νLyα, νLyC, ELyα, ELyC, inv_ELyα, 
-       ALyα, A_2γ, A_2p2s, A_2s2p, f_lu_Lyα, σT, X, Y, DGsun, TCMB0, D_H_ratio, C_H_ratio, N_H_ratio, O_H_ratio,
-       Ne_H_ratio, Mg_H_ratio, Si_H_ratio, S_H_ratio, Fe_H_ratio,
+       ALyα, A_2γ, A_2p2s, A_2s2p, f_lu_Lyα, σT, X, Y, X_D, Zsun, DGsun, TCMB0, inv_Zsun,
+
+       fCarbon, fNitrogen, fOxygen, fNeon, fMagnesium, fSilicon, fSulfur, fIron, C_over_O,
+       mH, mH2, mD, me, mHe, mC, mCO, 
+       inv_mN, inv_mNe, inv_mMg, inv_mSi, inv_mS, inv_mFe,
+
        Lsun, Msun, AU, pc, Mpc, Gpc, kms, day, yr, Myr, Gyr, eV, Ang, nm, μm, F_Habing,
        OneThird, ThreeEights, ThreeFourths, Four_π, inv_Four_π, Two_π, Sqrt_π, Sqrt_2,
-       Four_π_over_c, inv_c, X_over_mH, Y_over_mHe,
+       Four_π_over_c, inv_c, X_over_mH, Y_over_mHe, 
+
        E_opt, E_FUV, E_LW, E_EUV1, E_EUV2, E_EUV3,
        inv_E_opt, inv_E_FUV, inv_E_LW, inv_E_EUV1, inv_E_EUV2, inv_E_EUV3
 
@@ -938,23 +976,25 @@ function vth_H( T::Float64 )
 end
 
 """ This function computes the H I, H II, and H₂ number densities,
-    given the fractional abundances of H II and H₂, and the gas density ρ. """
+    given the fractional abundances of H II and H₂, and the (primordial)
+    gas density ρ. """
 @inline @fastmath function GetHydrogenDensities( xHII::Float64, 
                                                   xH2::Float64,
                                                     ρ::Float64 )
 
     nH    =   ρ * X_over_mH
     xHI   =   max( 1 - xHII - 2 * xH2, 0.0 )
-    nHI   =   xHI    * nH
-    nHII  =   xHII   * nH 
-    nH2   =   xH2    * nH
+    nHI   =   xHI  * nH
+    nHII  =   xHII * nH 
+    nH2   =   xH2  * nH
 
-    return nHI, nHII, nH2
+    return nHI, nHII, nH2, nH
 end
 
 
 """ This function computes the He I, He II, and He III number densities,
-    given the fractional abundances of He II and He III, and the gas density ρ. """
+    given the fractional abundances of He II and He III, and the (primordial)
+    gas density ρ. """
 @inline @fastmath function GetHeliumDensities( xHeII::Float64, 
                                               xHeIII::Float64,
                                                    ρ::Float64 )
@@ -965,7 +1005,67 @@ end
     nHeII   =   xHeII  * nHe
     nHeIII  =   xHeIII * nHe
 
-    return nHeI, nHeII, nHeIII
+    return nHeI, nHeII, nHeIII, nHe
+end
+
+
+""" This function computes the D I, D II, and HD number densities,
+    given the fractional abundances of HD and D II, and the (primordial)
+    gas density ρ. """
+@inline @fastmath function GetDeuteriumDensities( xHD::Float64, 
+                                                 xDII::Float64,
+                                                    ρ::Float64 )
+
+    # Total deuterium number density:
+    nD    =   ρ * X_D_over_mD 
+
+    # Get number densities 
+    nDI   =   max( 1 - xDII  - xHD, 0.0 ) * nD
+    nDII  =   xDII * nD
+    nHD   =   xHD  * nD    
+
+    return nDI, nDII, nHD, nD
+end
+
+
+""" This function computes the C I, C II, CO, and CHₓ number densities,
+    given the fractional abundances of C I, C II, and CO, and the carbon
+    gas density ρCarbon. """
+@inline @fastmath function GetCarbonDensities( xCI::Float64, 
+                                              xCII::Float64, 
+                                               xCO::Float64, 
+                                           ρCarbon::Float64 )
+
+    # Get carbon number density:
+    nC   = ρCarbon * inv_mC 
+
+    # Get number densities of all species:
+    nCI  = xCI  * nC 
+    nCII = xCII * nC 
+    nCO  = xCO  * nC
+    nCHx = max( 1 - xCI - xCII - xCO, 0.0 ) * nC 
+
+    return nCI, nCII, nCO, nCHx, nC
+end
+
+
+""" This function computes the O I, O II, and OHₓ number densities,
+    given the fractional abundances of O I, O II, and the number density 
+    of CO, and the oxygen density ρOxygen. """
+@inline @fastmath function GetOxygenDensities( xOI::Float64, 
+                                              xOII::Float64, 
+                                               nCO::Float64, 
+                                           ρOxygen::Float64 )
+
+    # Get oxygen number density:
+    nO   = ρOxygen * inv_mO 
+
+    # Get number densities of all species:
+    nOI  = xOI  * nO 
+    nOII = xOII * nO 
+    nOHx = clamp( nO - nOI - nOII - nCO, 0.0, nO )
+
+    return nOI, nOII, nOHx, nO
 end
 
 
@@ -973,27 +1073,114 @@ end
     from the number densities of H II, He II, and He III. """
 @inline @fastmath function GetElectronDensity( nHII::Float64, 
                                               nHeII::Float64, 
-                                             nHeIII::Float64
+                                             nHeIII::Float64,
+                                               nDII::Float64,
+                                               nCII::Float64,
+                                               nOII::Float64
                                               )
 
-    return nHII  +  nHeII  +  2 * nHeIII
+    return nHII  +  nHeII  +  2 * nHeIII  +  nDII  +  nCII  +  nOII 
 end
 
 
+const fCarbon_over_mC::Float64 = fCarbon * inv_mC 
+const fOxygen_over_mO::Float64 = fOxygen * inv_mO
+
 """ This function computes the electron number density 
-    from the abundance fractions of H II, He II, and He III. """
+    from the abundance fractions of H II, He II, He III,
+    D II, C II, and O II. """
 @inline @fastmath function GetElectronDensityFromFracs( xHII::Float64, 
                                                        xHeII::Float64, 
                                                       xHeIII::Float64,
-                                                           ρ::Float64
+                                                        xDII::Float64,
+                                                        xCII::Float64,
+                                                        xOII::Float64,
+                                                           ρ::Float64,
+                                                   Zgas_Zsun::Float64
                                                         )
 
-    nHII   = xHII * ρ * X_over_mH
-    nHe    = ρ * Y_over_mHe
-    nHeII  = xHeII  * nHe 
-    nHeIII = xHeIII * nHe 
+    # Get metal density:
+    Z          = clamp( Zgas_Zsun * Zsun, 0.0, 1.0 )
+    ρZ         = Z * ρ 
 
-    return nHII  +  nHeII  +  2 * nHeIII
+    # Get pristine (H + He + D) gas density:
+    ρ_pristine = max( (1 - Z), 0.0 ) * ρ
+
+    # Get nHII:
+    nHII       = xHII * ρ_pristine * X_over_mH
+
+    # Get nHeII and nHeIII:
+    nHe        = ρ_pristine * Y_over_mHe
+    nHeII      = xHeII  * nHe 
+    nHeIII     = xHeIII * nHe 
+
+    # Get nDII:
+    nD         = ρ_pristine * X_D_over_mD
+    nDII       = xDII * nD 
+
+    # Get nCII:
+    nC         = fCarbon_over_mC * ρZ 
+    nCII       = xCII * nC 
+
+    # Get nOII:
+    nO         = fOxygen_over_mO * ρZ 
+    nOII       = xOII * nO
+
+    # Get electron density:
+    ne         = GetElectronDensity( nHII, nHeII, nHeIII, nDII, nCII, nOII )
+
+    return ne
+end
+
+
+""" This function recovers all gas number densities. """
+function GetAllNumberDensities( xH2::Float64,
+                               xHII::Float64, 
+                              xHeII::Float64, 
+                             xHeIII::Float64,
+                                xHD::Float64,
+                               xDII::Float64,
+                                xCI::Float64,
+                               xCII::Float64,
+                                xCO::Float64,
+                                xOI::Float64,
+                               xOII::Float64,
+                                  ρ::Float64,
+                          Zgas_Zsun::Float64 )
+
+    # Get metal density:
+    Z          = clamp( Zgas_Zsun * Zsun, 0.0, 1.0 )
+    ρZ         = Z * ρ 
+
+    # Get pristine (H + He + D) gas density:
+    ρ_pristine = max( (1 - Z), 0.0 ) * ρ
+
+    # Get hydrogen densities:
+    nHI, nHII, nH2, nH        = GetHydrogenDensities( xHII, xH2, ρ_pristine )
+
+    # Get helium densities:
+    nHeI, nHeII, nHeIII, nHe  = GetHeliumDensities( xHeII, xHeIII, ρ_pristine )
+
+    # Get deuterium densities:
+    nDI, nDII, nHD, nD        = GetDeuteriumDensities( xHD, xDII, ρ_pristine )
+
+    # Get carbon species densities:
+    ρCarbon                   = fCarbon * ρZ 
+    nCI, nCII, nCO, nCHx, nC  = GetCarbonDensities( xCI, xCII, xCO, ρCarbon )
+
+    # Get oxygen species densities:
+    ρOxygen                   = fOxygen * ρZ 
+    nOI, nOII, nOHx, nO       = GetOxygenDensities( xOI, xOII, nCO, ρOxygen )
+
+    # Get electron density:
+    ne                        = GetElectronDensity( nHII, nHeII, nHeIII, nDII, nCII, nOII )
+
+    # Get total number density (that would e.g. enter the pressure P = n kB T):
+    n  = ( nHI + nHII + nH2 + nHeI + nHeII + nHeIII + nDI + nDII + nHD
+         + nCI + nCII + nCO + nCHx + nOI + nOII + nOHx + ne )
+
+    return nHI, nHII, nH2, nHeI, nHeII, nHeIII, nDI, nDII, nHD, 
+           nCI, nCII, nCO, nCHx, nOI, nOII, nOHx, ne, n, nH, nHe, nD, nC, nO
 end
 
 

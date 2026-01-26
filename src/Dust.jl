@@ -868,11 +868,22 @@ end
     ∂ρd/∂t = ρd * [1 - ρd / (ρd + ρZ)] / tgr0  -  ρd / tdest ,
     
     for a given (zero-dust depletion) accretion growth time-scale tgr0,
-    and destruction time-scale tdest. """
+    and destruction time-scale tdest. After writing a BDF1 update, one 
+    obtains the quadratic formula:
+    
+    x² + Ax - B = 0
+    
+    where x = ρd_new, and:
+    
+    A = (ρd + ρZ) * [tgr0 * (1/Δtsub + 1/tdest) - 1]
+    B = ρd_old * tgr0 * (ρd + ρZ) / Δtsub .
+    
+    This is used to solve for ρd_new. """
 @inline function ρd_Update_BDF1( ρd_old::Float64, 
                                  ρZ_old::Float64,
                                    tgr0::Float64, 
-                                  tdest::Float64
+                                  tdest::Float64,
+                                  Δtsub::Float64
                                  )
 
     # Convenient variables:
@@ -881,17 +892,17 @@ end
     inv_Δtsub = 1 / Δtsub
 
     # Define A and B that enter the BDF1 update:
-    A         = ρdplusZ * tgr0 * ( inv_Δtsub  +  inv_tdest )  
-    A_over_2  = 0.5 * A 
+    A         = ρdplusZ * ( tgr0 * ( inv_Δtsub  +  inv_tdest )  -  1.0 )
     B         = ρd_old * ρdplusZ * tgr0 * inv_Δtsub    
 
-    # Put it all together:
-    A_over_2_squared = A_over_2 * A_over_2
-    if B > 1e-5 * A_over_2_squared
-        ρd_new = - A_over_2 + sqrt( A_over_2^2 + B )
-    else
-        # For small B, use Taylor expansion:
-        ρd_new = B / A
+    if A ≥ 0.0
+        # In this case, simplify the quadratic solution to avoid 
+        # dangerous cancellations:
+        ρd_new = 2 * B / ( A + sqrt( A^2  +  4 * B ) )
+    elseif A < 0.0
+        # Otherwise, use original version of formula:
+        A_over_2 = 0.5 * A  
+        ρd_new   = - A_over_2 + sqrt( A_over_2^2  +  B ) 
     end
 
     # Get updated gas phase metal density:
@@ -901,32 +912,37 @@ end
 end
 
 
-const Stick_CII::Float64       = 1.0 
+const Td_Boisson24       = [ 50.0, 100.0, 150.0, 250.0, 500.0, 750.0, 1000.0, 1250.0, 1500.0, 1750.0, 2000.0, 2250.0 ]
+const Stick_CI_Boisson24 = [ 0.276, 0.116, 0.064, 0.092, 0.166, 0.231, 0.247, 0.295, 0.299, 0.335, 0.347, 0.380 ]
+
+const itp_Stick_CI_Boisson24 = extrapolate( interpolate( (Td_Boisson24,), Stick_CI_Boisson24, Gridded(Linear())),
+                                            Flat() )
+
+""" The estimated chemisorption sticking coefficient of C I on amorphous carbon grains,
+    as computed by Boisson et al. (2024). """
+@inline function Stick_CI( Td::Float64 )
+    itp_Stick_CI_Boisson24( Td )
+end                                           
+                                        
+
 const agr_C_over_01::Float64   = agr_C   / (0.1 * μm)
 const agr_sil_over_01::Float64 = agr_sil / (0.1 * μm)
-const J̃_CI::Float64            = 1.0                    # Since C I is neutral, we can compute J̃ to be 1 always 
-const τ_CII0::Float64          = agr_C * kB / ((- e)^2) 
-const ν_CII0::Float64          = - 1.0                  # e / q_CII = 1 / (-1) = -1
 
 """ This function computes the dust gas accretion time-scale (sec)
     tgr0 (in the low-depletion limit). """
 @inline function Compute_tgr0( nH::Float64,
                                 T::Float64,
+                               Td::Float64,
                               xCI::Float64,
-                             xCII::Float64,
-                            Zgr_C::Float64
+                        Ztot_Zsun::Float64
                               )
 
     # Convenient variable:
     Stuff    = (1 / Ztot_Zsun) * (1 / nH) * 1 / sqrt(T)
 
-    # Needed constants (τ ≡ a_gr * kB * T / q²,  ν ≡ Z_gr * e / q):
-    τ_CII    = τ_CII0 * T 
-    ν_CII    = ν_CII0 * Zgr_C
-
-    # Sticking coefficient for carbon species (CO doesn't chemisorb):
-    J̃_CII    = J̃(τ_CII, ν_CII)
-    Stick_C  = Stick_CI * xCI * J̃_CI  +  Stick_CII * xCII * J̃_CII
+    # Sticking coefficient for carbon species (CO doesn't chemisorb, 
+    # and C II would just recombine and enter the gas-phase again):
+    Stick_C  = Stick_CI( Td ) * xCI 
 
     # Sticking coefficient for Si on silicate grains is not really known, 
     # but silicate grain accretion will generally be slower than the growth of
@@ -940,7 +956,7 @@ const ν_CII0::Float64          = - 1.0                  # e / q_CII = 1 / (-1) 
     # Overall dust growth time-scale:
     tgr0     = 1.0 / ( fsil / tgr0_sil  +  OneMinusfsil / tgr0_C )
 
-    return tgr0 
+    return max( tgr0, 0.1 * yr ) 
 end
 
 
@@ -967,28 +983,130 @@ const tsubl_C_0::Float64       = 1.36 / 3     # Pre-factor for graphite/carbonac
 
     # Return time-scale, and limit it to avoid way too short time-steps in the 
     # sub-cycling:
-    return max( tsubl, 0.01 * yr ) 
+    return max( tsubl, 0.1 * yr ) 
+end
+
+
+const ρ_sputter::Float64            = 1e-27 
+const T_sputter::Float64            = 2e6 
+const ω_sputter::Float64            = 2.5
+const agr_sputter_norm_sil::Float64 = agr_sil / (0.1 * μm)
+const agr_sputter_norm_C::Float64   = agr_C   / (0.1 * μm)
+const tsputter_th_prefact::Float64  = OneThird * 0.17 * Gyr  # Factor 1/3 to convert to *mass* sputtering time
+
+""" Destruction time-scale (s) from thermal sputtering. """
+@inline function Compute_tsputter_thermal( ρ::Float64, 
+                                           T::Float64,
+                                    Graphite::Bool )
+
+    if T ≤ 1e5
+        # Ignore sputtering below 10⁵ K, where the fit breaks down anyway.
+        return Inf64
+    else
+        if Graphite
+            anorm = agr_sputter_norm_C
+        else
+            anorm = agr_sputter_norm_sil
+        end
+
+        # The sputtering time-scale agr / 3 |d(agr)/dt| for the grain radius:
+        t_sputter = tsputter_th_prefact * anorm * (ρ_sputter/ρ) * ( (T_sputter/T)^ω_sputter + 1 )
+
+        return max( t_sputter, 0.1 * yr )
+    end
+end
+
+
+const asput0_sil::Float64 = - 32.4;  const asput1_sil::Float64 = 28.6
+const asput2_sil::Float64 = - 11.6;  const asput3_sil::Float64 = 2.23
+const asput4_sil::Float64 = - 0.208; const asput5_sil::Float64 = 0.00736
+
+const asput0_C::Float64 = - 48.7;  const asput1_C::Float64 = 55.7
+const asput2_C::Float64 = - 28.8;  const asput3_C::Float64 = 7.44
+const asput4_C::Float64 = - 0.965; const asput5_C::Float64 = 0.005
+
+const t_sputter_nonthermal_0_sil::Float64 = 0.33 * Myr * ( agr_sil / μm )
+const t_sputter_nonthermal_0_C::Float64   = 0.33 * Myr * ( agr_C   / μm )
+
+""" The non-thermal sputtering time for grains moving 
+    at velocity urel (cm s⁻¹) relative to gas of density nH (cm⁻³).
+    Uses fits from Hu et al. (2019). """
+function Compute_tsputter_nonthermal( nH::Float64,
+                                    urel::Float64,
+                                Graphite::Bool
+                                     )
+
+    urel = min( abs( urel ), 1e5 * kms )
+
+    # Non-thermal sputtering is only important at very high velocities:
+    if urel ≥ 30.0 * kms
+        if Graphite
+            a0 = asput0_C;   a1 = asput1_C
+            a2 = asput2_C;   a3 = asput3_C
+            a4 = asput4_C;   a5 = asput5_C
+
+            t_sputter0 = t_sputter_nonthermal_0_sil
+        else
+            a0 = asput0_sil; a1 = asput1_sil
+            a2 = asput2_sil; a3 = asput3_sil
+            a4 = asput4_sil; a5 = asput5_sil
+
+            t_sputter0 = t_sputter_nonthermal_0_C
+        end
+
+        x    = log10(urel / kms); x2 = x^2; x3 = x2*x; x4 = x3*x; x5 = x4*x 
+        y    = a0 + a1*x + a2*x2 + a3*x3 + a4*x4 + a5*x5 
+        Ytot = max( 10^y, 0.0 )  
+
+        # The non-thermal sputtering time:
+        t_sputter = t_sputter0 * ( 1 / nH ) * ( 1 / Ytot )
+
+        return t_sputter
+    else
+        # Ignore non-thermal sputtering at very low relative velocities:
+        t_sputter = Inf64
+
+        return max( t_sputter, 0.1 * yr )
+    end
 end
 
 
 """ This function updates the dust and gas metal density, considering 
-    dust growth by accretion, and destruction by sublimation + sputtering. """
+    dust growth by accretion, and destruction by sublimation, thermal
+    sputtering, and non-thermal sputtering. """
 @inline function DustGrowthDestruction_Update( ρd_old::Float64, 
                                                ρZ_old::Float64,  
+                                                ρ_old::Float64,
                                                    nH::Float64, 
                                                     T::Float64, 
                                                    Td::Float64,
-                                                Zgr_C::Float64
+                                                 urel::Float64,
+                                                  xCI::Float64,
+                                            Ztot_Zsun::Float64,
+                                                Δtsub::Float64
                                                )
 
     # Gas accretion dust growth time-scale:
-    tgr0  = Compute_tgr0( nH, T, xCI, xCII, Zgr_C )
+    tgr0  = Compute_tgr0( nH, T, Td, xCI, Ztot_Zsun )
 
-    # Gas dust destruction time-scale:
-    tdest = Compute_tsubl( Td )
+    # Sublimation time-sale:
+    tdest_subl          = Compute_tsubl( Td )
+
+    # Thermal sputtering time-scale:
+    tdest_sputt_th_sil  = Compute_tsputter_thermal( ρ_old, T, false )
+    tdest_sputt_th_C    = Compute_tsputter_thermal( ρ_old, T, true )
+    tdest_sputt_th      = 1 / ( (fsil / tdest_sputt_th_sil)  +  (OneMinusfsil / tdest_sputt_th_C) )
+
+    # Non-thermal sputtering time-scale:
+    tdest_sputt_nth_sil = Compute_tsputter_nonthermal( nH, urel, false )
+    tdest_sputt_nth_C   = Compute_tsputter_nonthermal( nH, urel, true )
+    tdest_sputt_nth     = 1 / ( (fsil / tdest_sputt_nth_sil)  +  (OneMinusfsil / tdest_sputt_nth_C) )
+
+    # Get dust destruction time-scale, considering all processes:
+    tdest = 1 / ( (1 / tdest_subl) + (1 / tdest_sputt_th) + (1 / tdest_sputt_nth) )
 
     # Get updated dust & metal density:
-    ρd_new, ρZ_new = ρd_Update_BDF1( ρd_old, ρZ_old, tgr0, tdest )
+    ρd_new, ρZ_new = ρd_Update_BDF1( ρd_old, ρZ_old, tgr0, tdest, Δtsub )
 
     return ρd_new, ρZ_new
 end 
@@ -1313,18 +1431,20 @@ end
 end
 
 
+const Teff_SetupDustState::Float64 = 4.8e4 # Assume a fixed black-body temperature for the band-averaging
+
 """ This function sets up a dust struct containing needed dust optical 
     properties. """
-function SetupDustState(  N_r::Int     = 128, 
-                          N_Z::Int     = 128,
-                         Teff::Float64 = 4.8e4, 
-                          Td0::Float64 = 30.0,
-              DustOpacityFile::String  = joinpath(@__DIR__, "DustData.txt"),
-              DustIRMeansFile::String  = joinpath(@__DIR__, "DustIRData.txt"),
-           RecomputeDustFiles::Bool    = false,
-                      Tmin_IR::Float64 = 1.0,
-                      Tmax_IR::Float64 = 2.0e3,
-                        NT_IR::Int     = 300 )
+function SetupDustState( DustGrowthDestruction::Bool,
+                                           N_r::Int     = 128, 
+                                           N_Z::Int     = 128,
+                                           Td0::Float64 = 30.0,
+                               DustOpacityFile::String  = joinpath(@__DIR__, "DustData.txt"),
+                               DustIRMeansFile::String  = joinpath(@__DIR__, "DustIRData.txt"),
+                            RecomputeDustFiles::Bool    = true,
+                                       Tmin_IR::Float64 = 1.0,
+                                       Tmax_IR::Float64 = 2.0e3,
+                                         NT_IR::Int     = 300 )
 
     # Dust temperature for every cell:
     Td            = zeros( Float64, N_r, N_Z )
@@ -1336,7 +1456,7 @@ function SetupDustState(  N_r::Int     = 128,
 
     # Make sure the saved dust files exist (or rebuild)
     if RecomputeDustFiles || !isfile( DustOpacityFile )
-        SaveDustOpacities( DustOpacityFile, Teff )
+        SaveDustOpacities( DustOpacityFile, Teff_SetupDustState )
     end
 
     if RecomputeDustFiles || !isfile( DustIRMeansFile )
@@ -1358,7 +1478,9 @@ function SetupDustState(  N_r::Int     = 128,
     # Set up interpolations of Planck & Rosseland-mean opacities:
     logκP_itp, logκR_itp = LoadκMeansInterpolations( DustIRMeansFile )
 
-    return DustState( 
+    return DustState( # Dust growth/destruction setting:
+                      DustGrowthDestruction,
+
                       # Dust temperature for every cell:
                       Td, 
 

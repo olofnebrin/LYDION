@@ -31,7 +31,7 @@ nH₀::Float64                       =  3e3           # Initial cloud density (c
 nH_ext::Float64                    =  1e-7 * nH₀    # Initial density far outside the cloud (cm⁻³)
 T₀::Float64                        =  500           # Initial cloud temperature (K)
 T_ext::Float64                     =  500           # Temperature outside the cloud 
-Rcl::Float64                       =  1 * pc        # Radius of cloud (i.e. high-density region)
+Rcl::Float64                       =  2 * pc        # Radius of cloud (i.e. high-density region)
 u_RMSturb::Float64                 =  3 * kms       # Initial RMS turbulence velocity 
 Zcl_pos::Float64                   =  Zstar_pos     # Initial position of cloud along Z-axis 
 
@@ -40,7 +40,7 @@ Zmax_lin::Float64                  =  3 * pc        # Uniform/linear grid out to
 Rmax::Float64                      =  3 * pc        # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
 Zmax::Float64                      =  3 * pc        # Logarithmic grid from Zmax_lin to Zmax (typically lower-resolution region)
 N_r_lin::Int                       =  64
-N_Z_lin::Int                       =  64
+N_Z_lin::Int                       =  64 
 N_r_log::Int                       =  0
 N_Z_log::Int                       =  0
  
@@ -91,6 +91,7 @@ Recoil::Bool                       =  true       # Atomic recoil for Lyα RT    
 LyαDestruction::Bool               =  true       # Lyα destruction (pd > 0)         (on if true, off if false)
 RadPressure::Bool                  =  true       # Radiation pressure feedback      (on if true, off if false - NOTE: Lyα feedback is only on if Lyα RT is on)
 IRfeedback::Bool                   =  true       # IR radiation pressure feedback   (on if true, off if false - NOTE: Is only on if also RadPressure = true)
+DustGrowthDestruction::Bool        =  true       # Dust growth & destruction        (on if true, off if false)
 OTS::Bool                          =  false      # On-the-spot/Case B approximation (on if true, off if false - NOTE: If off, recombination radiation is modelled self-consistently)
 
 # Number of coarse & fine Lyα frequency grid bins (only relevant if Lyα RT is on)
@@ -141,7 +142,8 @@ SetupRHDsimulation( mstarZAMS, Zstar_Zsun, DG₀, nH₀, nH_ext, Rcl, Zcl_pos, Z
                     xHII_ext, xH2_ext, xHeII_ext, xHeIII_ext, xDII_ext, xHD_ext, 
                     xCI_ext, xCII_ext, xCO_ext, xOI_ext, xOII_ext, Zgas_Zsun,
                     z, Hydro, Lyα, Recoil, LyαDestruction, Gravity,
-                    RadPressure, IRfeedback, OTS, u_RMSturb, N_r_lin, N_Z_lin, N_r_log, N_Z_log,
+                    RadPressure, IRfeedback, DustGrowthDestruction, OTS, 
+                    u_RMSturb, N_r_lin, N_Z_lin, N_r_log, N_Z_log,
                     N_ν_coarse, N_ν_fine, BC_r_right, BC_Z_bot, BC_Z_top,
                     SaveData, Nminsteps, Nmaxsteps, Nsaved,
                     print_info, FileName, FileDescription )

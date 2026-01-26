@@ -45,12 +45,8 @@ function CarbonOxygenChemistry( xOI_old::Float64,
                                   Δtsub::Float64 
                                 )
 
-    # Convenient conversion factor:
-    C_over_O    = nC / nO
-
     # Get old CHₓ fraction (for nCHx_old):
     xCHx_old    = max( 1 - xCI_old - xCII_old - xCO_old, 0.0 )
-    xOHx_old    = max( 1 - xOI_old - xOII_old - C_over_O * xCO_old, 0.0 )
 
     # Densities:
     nCI_old     = xCI_old  * nC         
@@ -242,6 +238,13 @@ function UpdateChemistrySubStep( Δtsub::Float64,
                                     Td::Float64, # Dust temperature (K)
                                      ρ::Float64,
                                     ρd::Float64,
+                                    nH::Float64,
+                                    nC::Float64,
+                                    nO::Float64,
+                               nHI_old::Float64,
+                               nH2_old::Float64,
+                              nHII_old::Float64,
+                                ne_old::Float64,
                                xH2_old::Float64,
                               xHII_old::Float64, 
                                xHD_old::Float64,
@@ -270,21 +273,9 @@ function UpdateChemistrySubStep( Δtsub::Float64,
                                      z::Float64 = 0.0,
                                  CaseB::Bool = true
                                  )
-    # Get initial abundance fractions and needed densities:
-    xHI_old    = max( 1 - xHII_old - 2 * xH2_old, 0.0 )
-    xDI_old    = max( 1 - xDII_old  - xHD_old,    0.0 )
-    xHeI_old   = max( 1 - xHeII_old - xHeIII_old, 0.0 )
 
-    nH         = X_over_mH  * ρ  
-    nHe        = Y_over_mHe * ρ 
-    nC         = Zgas_Zsun  * C_H_ratio * nH  
-    nO         = Zgas_Zsun  * O_H_ratio * nH  
-    nHI_old    = xHI_old    * nH
-    nHII_old   = xHII_old   * nH 
-    nH2_old    = xH2_old    * nH 
-    nHeII_old  = xHeII_old  * nHe 
-    nHeIII_old = xHeIII_old * nHe 
-    ne_old     = GetElectronDensity( nHII_old, nHeII_old, nHeIII_old )
+    # Get xDI_old, needed for the deuterium update:
+    xDI_old = max( 1 - xDII_old - xHD_old, 0.0 )
 
     # Get temperature by computing μ and then using 
     # T = μ × (γad - 1) × Tnorm (where Tnorm ≡ T/[μ(γad - 1)]) :
@@ -367,15 +358,17 @@ function UpdateChemistrySubStep( Δtsub::Float64,
     # We also update the temperature (for use in helium
     # chemistry step) using the known value of Tnorm 
     # and the new μ and γ (computed below):
-    μ      = Getμ( xHII_new, xH2_new, xHeII_old, xHeIII_old )
-    γad    = Getγad( xHII_new, xH2_new, xHeII_old, xHeIII_old ) 
-    T      = μ * (γad - 1) * Tnorm 
+    μ       = Getμ( xHII_new, xH2_new, xHeII_old, xHeIII_old )
+    γad     = Getγad( xHII_new, xH2_new, xHeII_old, xHeIII_old ) 
+    T       = μ * (γad - 1) * Tnorm 
 
     # Update the electron number density:
-    ne_new = GetElectronDensityFromFracs( xHII_new, xHeII_old, xHeIII_old, ρ )
+    ne_new1 = GetElectronDensityFromFracs( xHII_new, xHeII_old, xHeIII_old, 
+                                           xDII_old, xCII_old,  xOII_old, 
+                                           ρ, Zgas_Zsun )
 
     # Get change in ne during the H update (for accuracy checking):
-    Δne_H  = abs( ne_new - ne_old )
+    Δne_H   = abs( ne_new1 - ne_old )
 
     #########################################################                      
     ######      STEP 2: UPDATE He I, He II, He III     ######
@@ -392,8 +385,8 @@ function UpdateChemistrySubStep( Δtsub::Float64,
     # (ẋ_HeII)_(+) = C_HeII_0 × xHeI  +  C_HeII_1 × xHeIII ,
     #
     # where: 
-    C_HeII_0 =  Kcollion_HeI * ne_new  +  ΓionHeI 
-    C_HeII_1 =  KrecHeIII * ne_new 
+    C_HeII_0 =  Kcollion_HeI * ne_new1  +  ΓionHeI 
+    C_HeII_1 =  KrecHeIII * ne_new1 
 
     # Destruction rate for He II (from coll. ionization, recombinations, photoionization) 
     # is:
@@ -401,21 +394,21 @@ function UpdateChemistrySubStep( Δtsub::Float64,
     # (ẋ_HeII)_(-) = - D_HeII × xHeII ,
     #
     # where:
-    D_HeII   =  ( KrecHeII + Kcollion_HeII ) * ne_new  +  ΓionHeII  
+    D_HeII   =  ( KrecHeII + Kcollion_HeII ) * ne_new1  +  ΓionHeII  
 
     # Creation rate for He III (coll. ionization & photoionization of He II) is:
     #
     # (ẋ_HeIII)_(+) = C_HeIII × xHeII ,
     #
     # where:
-    C_HeIII  =  Kcollion_HeII * ne_new  +  ΓionHeII  
+    C_HeIII  =  Kcollion_HeII * ne_new1  +  ΓionHeII  
 
     # Destruction rate for He III (from recombinations) is:
     #
     # (ẋ_HeIII)_(-) = - D_HeIII × xHeIII ,
     #
     # where:
-    D_HeIII  =  KrecHeIII * ne_new
+    D_HeIII  =  KrecHeIII * ne_new1
 
     # Next we set up 2 × 2 system for (He II, He III) and solve, 
     # and get He I from conservation.
@@ -440,14 +433,13 @@ function UpdateChemistrySubStep( Δtsub::Float64,
     xHeIII_new  = max( xHeIII_new, 0.0)
     xHeI_new    = max( 1 - xHeII_new - xHeIII_new, 0.0 )
 
-    # Get a final update of the electron number density:
-    ne_final    = GetElectronDensityFromFracs( xHII_new, xHeII_new, xHeIII_new, ρ )
+    # Get updated electron number density:
+    ne_new2     = GetElectronDensityFromFracs( xHII_new, xHeII_new, xHeIII_new, 
+                                               xDII_old, xCII_old,  xOII_old, 
+                                               ρ, Zgas_Zsun )
 
     # Get change in ne during the He update (for accuracy checking):
-    Δne_He      = abs( ne_final - ne_new )
-
-    # Get change in ne since the very start:
-    Δne_tot     = abs( ne_final - ne_old )
+    Δne_He      = abs( ne_new2 - ne_new1 )
 
     # We also update the temperature (for use in deuterium
     # chemistry step) using the known value of Tnorm 
@@ -479,12 +471,12 @@ function UpdateChemistrySubStep( Δtsub::Float64,
     K55_D       = k55_D(T)          # H + HD  → D + H₂
 
     # Matrix elements:
-    A11 = - (ΓionDI  +  Kcollion_HI * ne_final  +  K50_D * nHII_new  +  K54_D * nH2_new)
-    A12 = KrecHII * ne_final  +  K51_D * nHI_new 
+    A11 = - (ΓionDI  +  Kcollion_HI * ne_new2  +  K50_D * nHII_new  +  K54_D * nH2_new)
+    A12 = KrecHII * ne_new2  +  K51_D * nHI_new 
     A13 = K55_D * nHI_new  +  Γ_LW_HD
 
-    A21 = ΓionDI  +  Kcollion_HI * ne_final  +  K50_D * nHII_new 
-    A22 = - (KrecHII * ne_final  +  K51_D * nHI_new  +  K52_D * nH2_new )
+    A21 = ΓionDI  +  Kcollion_HI * ne_new2  +  K50_D * nHII_new 
+    A22 = - (KrecHII * ne_new2  +  K51_D * nHI_new  +  K52_D * nH2_new )
     A23 = K53_D * nHII_new 
 
     A31 = K54_D * nH2_new 
@@ -516,6 +508,14 @@ function UpdateChemistrySubStep( Δtsub::Float64,
         xHD_new   = max( xHD_new - Δf_D, 0.0 ) 
     end 
 
+    # Get updated electron number density:
+    ne_new3 = GetElectronDensityFromFracs( xHII_new, xHeII_new, xHeIII_new, 
+                                           xDII_new, xCII_old,  xOII_old, 
+                                           ρ, Zgas_Zsun )
+
+    # Get change in ne during the D update (for accuracy checking):
+    Δne_D   = abs( ne_new3 - ne_new2 )
+
     ########################################################################                      
     ######  STEP 4: UPDATE O I, O II, O III, OHₓ, CO, C I, C II, CHₓ  ######
     ########################################################################
@@ -525,7 +525,7 @@ function UpdateChemistrySubStep( Δtsub::Float64,
         xOI_new, xOII_new, xCI_new, xCII_new, xCO_new, ConvergedCarbonOxygen = 
         CarbonOxygenChemistry( xOI_old, xOII_old, xCI_old, xCII_old,
                                xCO_old, nC, nO, nHI_new, nHII_new,
-                               nH2_new, ne_final, ΓionH2, ΓionOI, ΓionCI,
+                               nH2_new, ne_new3, ΓionH2, ΓionOI, ΓionCI,
                                ΓdissCO, ΓdissOHx, ΓdissCHx,
                                T, Δtsub )
     else 
@@ -539,10 +539,21 @@ function UpdateChemistrySubStep( Δtsub::Float64,
         ConvergedCarbonOxygen = true
     end
 
+    # Get final electron number density:
+    ne_final    = GetElectronDensityFromFracs( xHII_new, xHeII_new, xHeIII_new, 
+                                               xDII_new, xCII_new,  xOII_new, 
+                                               ρ, Zgas_Zsun )
+
+    # Get change in ne during the C/O update (for accuracy checking):
+    Δne_CarbOxy = abs( ne_final - ne_new3 )
+
+    # Get change in ne since the very start:
+    Δne_tot     = abs( ne_final - ne_old )
+
     # Now we have updated every species. ✓
 
     # Get maximum change in electron number density during each sub-update:
-    Δne = max( Δne_H, Δne_He, Δne_tot )
+    Δne         = max( Δne_H, Δne_He, Δne_D, Δne_CarbOxy, Δne_tot )
 
     return xH2_new, xHI_new, xHII_new, xHD_new, xDI_new, xDII_new,
            xHeI_new, xHeII_new, xHeIII_new, 

@@ -27,6 +27,7 @@ function SetupTurbulence!( u_RMSturb::Float64,
                                 rCoM::AbstractArray{Float64, 1}, 
                                 ZCoM::AbstractArray{Float64, 1}, 
                                   ΔV::AbstractArray{Float64, 2},
+                            BC_Z_bot::Symbol  = :Reflect,
                                    p::Float64 = 2.0,
                                   R0::Float64 = 0.5 * Rcl
                            )
@@ -86,8 +87,26 @@ function SetupTurbulence!( u_RMSturb::Float64,
     @inbounds for j in 2:(N_Z-1)
         for i in 2:(N_r-1)
             # Central difference derivatives of ψ:
-            ∂ψ∂r = ( ψ[i+1,j] - ψ[i-1,j] ) / ( rCoM[i+1] - rCoM[i-1] )
-            ∂ψ∂Z = ( ψ[i,j+1] - ψ[i,j-1] ) / ( ZCoM[j+1] - ZCoM[j-1] )
+            #∂ψ∂r = ( ψ[i+1,j] - ψ[i-1,j] ) / ( rCoM[i+1] - rCoM[i-1] )
+            #∂ψ∂Z = ( ψ[i,j+1] - ψ[i,j-1] ) / ( ZCoM[j+1] - ZCoM[j-1] )
+
+            # Coefficients for the second-order central difference 
+            # approximation to derivatives of ψ, valid on non-uniform grids:
+            Δm_r  = rCoM[i]   - rCoM[i-1]
+            Δp_r  = rCoM[i+1] - rCoM[i]
+            am_r  = - Δp_r / (Δm_r * (Δm_r + Δp_r))
+            a0_r  = ( Δp_r - Δm_r ) / (Δm_r * Δp_r)
+            ap_r  = Δm_r / (Δp_r * (Δm_r + Δp_r))
+
+            Δm_Z  = ZCoM[j]   - ZCoM[j-1]
+            Δp_Z  = ZCoM[j+1] - ZCoM[j]
+            am_Z  = - Δp_Z / (Δm_Z * (Δm_Z + Δp_Z))
+            a0_Z  = ( Δp_Z - Δm_Z ) / (Δm_Z * Δp_Z)
+            ap_Z  = Δm_Z / (Δp_Z * (Δm_Z + Δp_Z))
+                
+            # Central difference derivatives of ψ:
+            ∂ψ∂r = ap_r * ψ[i+1,j]  +  a0_r * ψ[i,j]  +  am_r * ψ[i-1,j]
+            ∂ψ∂Z = ap_Z * ψ[i,j+1]  +  a0_Z * ψ[i,j]  +  am_Z * ψ[i,j-1]
 
             # Velocity fluctuations (not normalized yet):
             inv_rCoM  =   1 / rCoM[i]
@@ -111,7 +130,12 @@ function SetupTurbulence!( u_RMSturb::Float64,
     @inbounds for i in dN_r
         # Velocity at j = 1:
         δu_r[i, 1] = δu_r[i, 2] # Extrapolate 
-        δu_Z[i, 1] = 0.0        # Mirror 
+
+        if BC_Z_bot == :Reflect
+            δu_Z[i, 1] = 0.0        # Mirror 
+        else
+            δu_Z[i, 1] = δu_Z[i, 2] # Extrapolate
+        end
     end
     
     @inbounds for j in dN_Z

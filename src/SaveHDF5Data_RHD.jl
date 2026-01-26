@@ -21,6 +21,7 @@ function CreateHDF5File( FileName::String,                # File name
                    LyαDestruction::Bool,                  # Whether Lyα destruction (pd > 0) is on/off (relevant only if Lyα is on)
                       RadPressure::Bool,                  # Whether radiation pressure feedback is on/off
                        IRfeedback::Bool,                  # Whether in addition to stellar radiation pressure feedback, IR feedback is on/off
+            DustGrowthDestruction::Bool,                  # Whether dust/growth destruction is on/off
                               OTS::Bool,                  # Whether the on-the-spot approximation is on/off
                                 z::Float64,               # Redshift 
                               N_ν::Int = 0,               # Number of Lyα frequency bins 
@@ -120,6 +121,9 @@ function CreateHDF5File( FileName::String,                # File name
         # Save on-the-spot approximation setting (on/off):
         attrs(settings)["OTS"]         = string(OTS)
 
+        # Save dust growth/destruction setting (on/off):
+        attrs(settings)["DustGrowth/Destruction"]  = string(DustGrowthDestruction)
+
         ############################# RESTART AT CHECKPOINT ######################
 
         # We also store needed arrays for re-starting a simulation:
@@ -130,7 +134,6 @@ function CreateHDF5File( FileName::String,                # File name
         attrs(CheckPoint)["t_current"]  = 0.0
         attrs(CheckPoint)["dt"]         = 0.0
         attrs(CheckPoint)["step"]       = 0
-
 
         # Hydro CheckPoint (Float64)
         attrs(CheckPoint)["rfirst_Hydro"] = true  
@@ -336,6 +339,12 @@ function CreateHDF5File( FileName::String,                # File name
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
+        # Create a 3D dataset (r, Z, time) for the optical intensity:
+        create_dataset(file, "J_opt_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
         # Create a 3D dataset (r, Z, time) for the LW intensity:
         create_dataset(file, "J_LW_History", Float32,
                        (N_r, N_Z, Nsaved);
@@ -413,6 +422,30 @@ function CreateHDF5File( FileName::String,                # File name
         create_dataset(file, "L_IR_History", Float64,
                        (Nsaved,),
                        chunk = (1,))
+
+        # r-direction mass-weighted velocity dispersion, per saved time:
+        create_dataset(file, "rVelocityDispersion_History", Float64,
+                      (Nsaved,),
+                      chunk = (1,))
+
+        # Z-direction mass-weighted velocity dispersion, per saved time:
+        create_dataset(file, "ZVelocityDispersion_History", Float64,
+                      (Nsaved,),
+                      chunk = (1,))
+
+        # Total mass-weighted velocity dispersion, per saved time:
+        create_dataset(file, "VelocityDispersion_History", Float64,
+                      (Nsaved,),
+                      chunk = (1,))
+
+        # Total gas & dust mass in simulation volume:
+        create_dataset(file, "TotalGasMass_History", Float64,
+                      (Nsaved,),
+                      chunk = (1,))
+
+        create_dataset(file, "TotalDustMass_History", Float64,
+                      (Nsaved,),
+                      chunk = (1,))
 
         if Gravity
             # Create a 3D dataset (r, Z, time) for the gravitational force per unit volume:
@@ -686,6 +719,10 @@ function SaveRHDTimeStepHDF5( FileName::String,
         dset_xOII                     = file["xOII_History"]
         dset_xOII[:, :, step]         = chemstate.xOII
 
+        # Save optical intensity at current time-step:
+        dset_J_opt                    = file["J_opt_History"]
+        dset_J_opt[:, :, step]        = RT.J_opt
+
         # Save LW intensity at current time-step:
         dset_J_LW                     = file["J_LW_History"]
         dset_J_LW[:, :, step]         = RT.J_LW
@@ -734,6 +771,24 @@ function SaveRHDTimeStepHDF5( FileName::String,
         # Save IR luminosity:
         dset_L_IR                     = file["L_IR_History"]
         dset_L_IR[step]               = RT.Lum_IR
+
+        # Save mass-weighted velocity dispersion components & 
+        # total velocity dispersion:
+        dset_σ_r                      = file["rVelocityDispersion_History"]
+        dset_σ_r[step]                = hydrostate.σ_X
+
+        dset_σ_Z                      = file["ZVelocityDispersion_History"]
+        dset_σ_Z[step]                = hydrostate.σ_Y 
+
+        dset_σ                        = file["VelocityDispersion_History"]
+        dset_σ[step]                  = hydrostate.σ
+
+        # Save total gas & dust mass in simulation volume:
+        dset_M_simvol                 = file["TotalGasMass_History"]
+        dset_M_simvol[step]           = hydrostate.M_simvol
+
+        dset_Md_simvol                = file["TotalDustMass_History"]
+        dset_Md_simvol[step]          = hydrostate.Md_simvol
 
         if Gravity
             # Save gravitational forces per unit volume:
@@ -925,6 +980,10 @@ function SaveRHDTimeStepHDF5( FileName::String,
         dset_xOII                     = file["xOII_History"]
         dset_xOII[:, :, step]         = chemstate.xOII
 
+        # Save optical intensity at current time-step:
+        dset_J_opt                    = file["J_opt_History"]
+        dset_J_opt[:, :, step]        = RT.J_opt
+
         # Save LW intensity at current time-step:
         dset_J_LW                     = file["J_LW_History"]
         dset_J_LW[:, :, step]         = RT.J_LW
@@ -974,6 +1033,23 @@ function SaveRHDTimeStepHDF5( FileName::String,
         dset_L_IR                     = file["L_IR_History"]
         dset_L_IR[step]               = RT.Lum_IR
 
+        # Save mass-weighted velocity dispersion components & 
+        # total velocity dispersion:
+        dset_σ_r                      = file["rVelocityDispersion_History"]
+        dset_σ_r[step]                = hydrostate.σ_X
+
+        dset_σ_Z                      = file["ZVelocityDispersion_History"]
+        dset_σ_Z[step]                = hydrostate.σ_Y 
+
+        dset_σ                        = file["VelocityDispersion_History"]
+        dset_σ[step]                  = hydrostate.σ
+
+        # Save total gas & dust mass in simulation volume:
+        dset_M_simvol                 = file["TotalGasMass_History"]
+        dset_M_simvol[step]           = hydrostate.M_simvol
+
+        dset_Md_simvol                = file["TotalDustMass_History"]
+        dset_Md_simvol[step]          = hydrostate.Md_simvol
 
         if Gravity
             # Save gravitational forces per unit volume:

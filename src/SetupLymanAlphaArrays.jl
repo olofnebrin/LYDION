@@ -92,7 +92,7 @@ function GenerateLyαArrays( c_Lyα::Float64,
 
     # Get number of threads, for determining the size of the scratch 
     # arrays for the interface fluxes:
-    nthreads   = Threads.nthreads()
+    nthreads   = Threads.maxthreadid()
 
     # Convenient arrays: 
     zeros_c()  = zeros( Float64, N_r,   N_Z,   N_ν )
@@ -222,7 +222,7 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
 
     # Get number of threads, for determining the size of the scratch 
     # arrays for the interface fluxes:
-    nthreads   = Threads.nthreads()
+    nthreads   = Threads.maxthreadid()
 
     # Convenient arrays: 
     zeros_c()  = zeros( Float64, N_r,   N_Z,   N_ν )

@@ -9,7 +9,7 @@ yr   = 3.1556926e7
 kyr  = 1e3 * yr
 kms  = 1e5
 
-filename_Lya =  "RHDSim_Lya_32x32_2026-01-21.h5"
+filename_Lya =  "RHDSim_Lya_64x64_2026-01-25.h5"
 #filename_Lya =  "StaticCloudTest.h5"
 #filename_Lya =  "RHDSim_Lya_2025-12-23.h5"
 
@@ -121,7 +121,7 @@ pos_Lyatext = min( 0.5 * np.max(L_Lya[0:last_idx]) / (1e4*Lsun), 1e5 )
 pos_fescLya = 0.3
 pos_fescLyC = 0.1
 
-ax.text(10, pos_MFtext, "Lyα force multiplier: M$_{F}$ (solid), M$_{F,antigrav}$ (dashed)", color = "crimson", fontsize = 24)
+ax.text(10, pos_MFtext, "Lyα force multiplier: M$_{F}$ (dashed), M$_{F,antigrav}$ (solid)", color = "crimson", fontsize = 24)
 ax.text(10, pos_Lyatext, "Lyα luminosity L$_{Lyα}$/10$^{4}$ L$_{\odot}$ ", color = "black", fontsize = 24)
 ax.text(30, pos_fescLya, "f$_{esc,Lyα}$", color = "dodgerblue", fontsize = 28)
 ax.text(130, pos_fescLyC, "f$_{esc,LyC}$", color = "orangered", fontsize = 28)

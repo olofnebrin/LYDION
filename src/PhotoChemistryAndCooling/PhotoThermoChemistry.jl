@@ -973,6 +973,8 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
                                     γad::Float64,
                                       n::Float64,
                                      nH::Float64,
+                                     nC::Float64, 
+                                     nO::Float64,
                                     nHI::Float64,
                                     nH2::Float64,
                                    nHII::Float64,
@@ -980,14 +982,15 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
                                   nHeII::Float64,
                                  nHeIII::Float64,
                                     nHD::Float64,
+                                    nCI::Float64,
+                                    nCO::Float64,
+                                   nCII::Float64,
+                                    nOI::Float64,
                                      ne::Float64,
+                                     ρZ::Float64,
                               Zgas_Zsun::Float64,
                                      DG::Float64,
-                                     ρd::Float64,
-                                    xCI::Float64, 
-                                   xCII::Float64, 
-                                    xCO::Float64, 
-                                    xOI::Float64, 
+                                     ρd::Float64, 
                                    N_CO::Float64,
                                   J_opt::Float64,
                                   J_FUV::Float64,
@@ -1012,9 +1015,8 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
                                      SelfShielding, DG, ρd, Γpd, z ) 
 
     # Compute the cooling rate at e_old (inluding dust-gas collisions):
-    CoolingRate = Λ( T_old, nHI, nHII, nHeI, nHeII, nHeIII, ne,
-                     nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
-                     z, OTS ) + Λdg( T_old, Td, ρd, nH )
+    CoolingRate = Λ( T_old, nHI, nH2, nHII, nHeI, nHeII, nHeIII, nHD, nCI, nCO, nCII, 
+                     nOI, ne, nH, nC, nO, ρZ, Zgas_Zsun, N_CO, z, OTS ) + Λdg( T_old, Td, ρd, nH )
 
     # Tolerance cooling/heating time-scale for accuracy purposes:
     Δt_e = min( tol_HeatCool * e_old / abs( HeatingRate - CoolingRate ), Δt_e_max )
@@ -1033,21 +1035,17 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
     T_m2     = T_old  -  2 * ΔT  
     inv_12ΔT = 1 / ( 12 * ΔT )     # Used twice below for the central difference derivatives 
 
-    CoolingRate_p2 = Λ( T_p2, nHI, nHII, nHeI, nHeII, nHeIII, ne,
-                        nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
-                        z, OTS ) + Λdg( T_p2, Td, ρd, nH )
+    CoolingRate_p2 = Λ( T_p2, nHI, nH2, nHII, nHeI, nHeII, nHeIII, nHD, nCI, nCO, nCII, 
+                        nOI, ne, nH, nC, nO, ρZ, Zgas_Zsun, N_CO, z, OTS ) + Λdg( T_p2, Td, ρd, nH )
 
-    CoolingRate_p1 = Λ( T_p1, nHI, nHII, nHeI, nHeII, nHeIII, ne,
-                        nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
-                        z, OTS ) + Λdg( T_p1, Td, ρd, nH )
+    CoolingRate_p1 = Λ( T_p1, nHI, nH2, nHII, nHeI, nHeII, nHeIII, nHD, nCI, nCO, nCII, 
+                        nOI, ne, nH, nC, nO, ρZ, Zgas_Zsun, N_CO, z, OTS ) + Λdg( T_p1, Td, ρd, nH )
 
-    CoolingRate_m1 = Λ( T_m1, nHI, nHII, nHeI, nHeII, nHeIII, ne,
-                        nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
-                        z, OTS ) + Λdg( T_m1, Td, ρd, nH )
+    CoolingRate_m1 = Λ( T_m1, nHI, nH2, nHII, nHeI, nHeII, nHeIII, nHD, nCI, nCO, nCII, 
+                        nOI, ne, nH, nC, nO, ρZ, Zgas_Zsun, N_CO, z, OTS ) + Λdg( T_m1, Td, ρd, nH )
 
-    CoolingRate_m2 = Λ( T_m2, nHI, nHII, nHeI, nHeII, nHeIII, ne,
-                        nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
-                        z, OTS ) + Λdg( T_m2, Td, ρd, nH )
+    CoolingRate_m2 = Λ( T_m2, nHI, nH2, nHII, nHeI, nHeII, nHeIII, nHD, nCI, nCO, nCII, 
+                        nOI, ne, nH, nC, nO, ρZ, Zgas_Zsun, N_CO, z, OTS ) + Λdg( T_m2, Td, ρd, nH )
 
     # Put it all together to get ∂Λ/∂e:
     ∂CoolingRate∂T = ( - CoolingRate_p2  +  8 * CoolingRate_p1  -  8 * CoolingRate_m1  
@@ -1105,9 +1103,8 @@ const Δt_e_max::Float64           = 1e7 * yr   # Maximum time-step to consider 
                                           SelfShielding, DG, ρd, Γpd, z )
         
     # Cooling rate at would-be new temperature:
-    CoolingRate_new  = Λ( T_new, nHI, nHII, nHeI, nHeII, nHeIII, ne,
-                          nH2, nHD, Zgas_Zsun, xCI, xCII, xCO, xOI, N_CO,
-                          z, OTS ) + Λdg( T_new, Td, ρd, nH )
+    CoolingRate_new  = Λ( T_new, nHI, nH2, nHII, nHeI, nHeII, nHeIII, nHD, nCI, nCO, nCII, 
+                          nOI, ne, nH, nC, nO, ρZ, Zgas_Zsun, N_CO, z, OTS ) + Λdg( T_new, Td, ρd, nH )
 
     # Relative residual checking |(e_old + (Γ - Λ(e_new)*Δtsub) - e_new)| / |e_new - e_old| :
     Res_e            = abs( e_old  +  ( HeatingRate_new  -  CoolingRate_new ) * Δt  -  e_new ) / max( abs( e_new - e_old ), e_floor ) 
@@ -1133,11 +1130,13 @@ const J_floor::Float64             = 1e-10           # Maximum stellar J below w
 const H_floor::Float64             = 1e-10           # Maximum stellar H below which we don't care about the 10% rule 
 const xmin::Float64                = 1e-10           # Minimum abundance fraction below which we don't care about the 10% rule for primordial species 
 const xmax::Float64                = 1 + xmin        # Abundances should add up to 1, to within a margin xmin 
+const DG_th_subcycling::Float64    = 1e-5 * DGsun    # Ignore 10% rule for the dust density, if the dust-to-gas ratio is < DG_th_subcycling
+const tol_DustDensity::Float64     = tol_Chem        # Maximum relative change tolerance per sub-cycle time-step for the dust density 
 const max_iter::Int                = 100             # Maximum number of adaptive refinements of sub-cycle time-step 
 const kB_T_floor::Float64          = kB * T_floor    # Convenient constant 
 const kB_T_ceil::Float64           = kB * T_ceiling  # Convenient constant 
 const uth_DustGas::Float64         = 0.01 * kms      # Minimum change in gas & dust velocity below which we don't care about the 10% rule 
-const tol_DustGasCoupling::Float64 = 1e-4            # Maximum relative change tolerance per sub-cycle time-step for the dust-gas coupling 
+const tol_DustGasCoupling::Float64 = 1e-4            # Dust-gas coupling update considered converged if the relative change in ud & u is below this 
 
 """ This functions does a single sub-cycle time-step update of
     photon (J and H) absorption, temperature (or rather e),
@@ -1152,8 +1151,8 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
                                    Δtsubguess::Float64,              # First guess of sub-cycle time-step
                                             c̃::Float64,              # Reduced speed of light for stellar RT
                                         e_old::Float64,              # Gas internal energy density from previous sub-step 
-                                            ρ::Float64,              # Gas density 
-                                           ∇ρ::Float64,              # Estimated magnitude of density gradient 
+                                        ρ_old::Float64,              # Gas density 
+                                         Lsob::Float64,              # ρ / ∇ρ
                                       xH2_old::Float64,              # H₂ fraction from previous sub-step 
                                      xHII_old::Float64,              # H II fraction from previous sub-step 
                                       xHD_old::Float64,              # HD fraction from previous sub-step 
@@ -1165,7 +1164,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
                                       xCO_old::Float64,
                                       xOI_old::Float64,
                                      xOII_old::Float64,
-                                    Zgas_Zsun::Float64,
+                                Zgas_Zsun_old::Float64,
                                        ρd_old::Float64,              # Dust density  
                                    ρdud_r_old::Float64,              # Dust r-momentum 
                                    ρdud_Z_old::Float64,              # Dust Z-momentum 
@@ -1223,14 +1222,14 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
                                           OTS::Bool    = true,   # On-the-spot approximation
                                   RadPressure::Bool    = true,   # Radiation pressure feedback on gas & dust (on if true, off if false)
                                         L_box::Float64 = ΔL_max, # Box size, to limit column densities 
-                               CoolingHeating::Bool    = true
+                               CoolingHeating::Bool    = true,
+                        DustGrowthDestruction::Bool    = true,   # Dust growth & destruction (on if true, off if false)
                                       )
 
     # Safety checks:
     if DEBUG_PhotoThermoChemistry
-        @assert isfinite(ρ) && ρ > 0.0 "ρ = $(ρ) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(e_old)        "e_old = $(e_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
-        @assert isfinite(∇ρ) && ∇ρ ≥ 0 "∇ρ = $(∇ρ) in cell (i,j)=($(icell),$(jcell))"
+        @assert isfinite(ρ_old) && ρ_old > 0.0 "ρ_old = $(ρ_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
+        @assert isfinite(e_old)                "e_old = $(e_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
 
         @assert isfinite(J_opt_old) && J_opt_old ≥ 0.0 "J_opt_old = $(J_opt_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
         @assert isfinite(H_r_opt_old)                  "H_r_opt_old = $(H_r_opt_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
@@ -1274,64 +1273,50 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         @assert xOI_old + xOII_old ≤ xmax               "xOI_old + xOII_old = $(xOI_old + xOII_old) in cell (i,j) = ($(icell), $(jcell)). Cannot proceed!"
     end
 
-    # --------- Get gas phase metal density -----------------------------------------------------
-    #ρZ_old            =   Zgas_old * ρ
+    # --------- Get gas-phase metal density -----------------------------------------------------
+    ρZ_old            =   Zgas_Zsun_old * Zsun * ρ_old
+    ρd_th_subcycling  =   DG_th_subcycling * ρ_old 
 
     # --------- Get dust & gas velocities -------------------------------------------------------
-    inv_ρ             =   1 / ρ
+    inv_ρ             =   1 / ρ_old
     inv_ρd            =   1 / max( ρd_old, ρd_floor ) 
     ud_r_old          =   ( ρd_old > ρd_floor ) ? ρdud_r_old * inv_ρd : 0.0
     ud_Z_old          =   ( ρd_old > ρd_floor ) ? ρdud_Z_old * inv_ρd : 0.0
-    u_r_old           =   ρu_r_old   * inv_ρ
-    u_Z_old           =   ρu_Z_old   * inv_ρ
+    u_r_old           =   ρu_r_old * inv_ρ
+    u_Z_old           =   ρu_Z_old * inv_ρ
 
     # --------- Dust-to-gas ratio ---------------------------------------------------------------
-    DG                =   ρd_old * inv_ρ
+    DG_old            =   ρd_old * inv_ρ
+
+    # --------- Total (dust + gas-phase metal) metallicity --------------------------------------
+    # This enters the dust growth rate from accretion:
+    Ztot_Zsun         =   ( ( ρd_old + ρZ_old ) / ρ_old ) * inv_Zsun
 
     # --------- Get relevant number densities & abundance fractions  ----------------------------
-    nH_old            =   X_over_mH * ρ
-    nD_old            =   D_H_ratio * nH_old
-    nHe_old           =   Y_over_mHe * ρ
-    nC_old            =   Zgas_Zsun * C_H_ratio * nH_old
-    nO_old            =   Zgas_Zsun * O_H_ratio * nH_old
-    xHI_old           =   max( 1 - xHII_old - 2 * xH2_old, 0.0 )
-    xDI_old           =   max( 1 - xDII_old  - xHD_old,    0.0 )
-    xHeI_old          =   max( 1 - xHeII_old - xHeIII_old, 0.0 )
-    
-    nHI_old           =   xHI_old    * nH_old
-    nHII_old          =   xHII_old   * nH_old 
-    nH2_old           =   xH2_old    * nH_old
-    nDI_old           =   xDI_old    * nD_old
-    nHD_old           =   xHD_old    * nD_old    # Enters the cooling rate
-    nHeI_old          =   xHeI_old   * nHe_old
-    nHeII_old         =   xHeII_old  * nHe_old
-    nHeIII_old        =   xHeIII_old * nHe_old
-    nCI_old           =   xCI_old    * nC_old
-    nCII_old          =   xCII_old   * nC_old
-    nOI_old           =   xOI_old    * nO_old
-    nOII_old          =   xOII_old   * nO_old
-    nCO_old           =   xCO_old    * nC_old
-    nCHx_old          =   max( (1 - xCI_old  - xCII_old - xCO_old), 0.0 ) * nC_old 
-    CO_over_O         =   (nO_old > 0.0) ? (nCO_old / nO_old) : 0.0                # Be careful to avoid division by zero
-    nOHx_old          =   max( 1 - xOI_old - xOII_old - CO_over_O, 0.0 ) * nO_old
-    ne_old            =   GetElectronDensity( nHII_old, nHeII_old, nHeIII_old ) 
-    n                 =   nH_old  +  nHe_old  +  ne_old 
+    nHI_old, nHII_old, nH2_old, nHeI_old, nHeII_old, 
+    nHeIII_old, nDI_old, nDII_old, nHD_old, 
+    nCI_old, nCII_old, nCO_old, nCHx_old, nOI_old, nOII_old, nOHx_old, 
+    ne_old, n_old, nH_old, nHe_old, nD_old, 
+    nC_old, nO_old = GetAllNumberDensities( xH2_old, xHII_old, 
+                                            xHeII_old, xHeIII_old, 
+                                            xHD_old, xDII_old,
+                                            xCI_old, xCII_old, xCO_old,
+                                            xOI_old, xOII_old, ρ_old, Zgas_Zsun_old )
                                
     # --------- Get adiabatic index for old state ---------------------------------------------
     γad               =   Getγad( xHII_old, xH2_old, xHeII_old, xHeIII_old )
 
     # --------- Convenient constants (avoid re-computing) -------------------------------------
-    mH_inv_kBρ        =   mH / ( kB * ρ )
     inv_xH2_old       =   1  / max( xH2_old,  xmin )             # Used in 10% rule check 
     inv_xHII_old      =   1  / max( xHII_old, xmin )             # Used in 10% rule check 
     inv_ne_old        =   1  / max( ne_old,   xmin * nH_old )    # Used in 10% rule check
     inv_γ_minus_1     =   1  / ( γad - 1 )
-    e_floor           =   n * kB_T_floor * inv_γ_minus_1         # Used in limiting updated e
-    e_ceiling         =   n * kB_T_ceil  * inv_γ_minus_1         # Used in limiting updated e
+    e_floor           =   n_old * kB_T_floor * inv_γ_minus_1     # Used in limiting updated e
+    e_ceiling         =   n_old * kB_T_ceil  * inv_γ_minus_1     # Used in limiting updated e
 
     # --------- Clamp e_old and get T_old -----------------------------------------------------
     e_old             =   min( max( e_old,  e_floor ), e_ceiling )
-    T_old             =   ( γad - 1 ) * e_old  / ( n * kB )
+    T_old             =   ( γad - 1 ) * e_old  / ( n_old * kB )
 
     # --------- Get dust temperature ------------------------------------------------------------
     TCMB              =   TCMB0 * (1 + z)
@@ -1352,8 +1337,8 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
 
     # Sobolev-type column length estimate ~ cell width + density variation scale (following 
     # e.g. Hopkins+ 2023, for FIRE-3). We limit ΔL to ≤ min( ΔL_max, L_box)
-    # to avoid infinities if ∇ρ ~ 0:
-    ΔL   = min( min( Δr, ΔZ )  +  ρ  / abs(∇ρ),  ΔL_max, L_box )
+    # to avoid unphysical values if ∇ρ ~ 0:
+    ΔL   = min( min( Δr, ΔZ )  +  Lsob,  ΔL_max, L_box )
 
     # Estimated H₂, HD, and CO column densities:
     N_H2 = nH2_old * ΔL 
@@ -1407,7 +1392,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         H_Z_opt_trial, H_Z_FUV_trial, H_Z_LW_trial, H_Z_EUV1_trial, H_Z_EUV2_trial, H_Z_EUV3_trial, H_Z_IR_trial,
         Δρu_r_trial_Abs, Δρu_Z_trial_Abs,  Δρu_r_IR_trial_Abs, Δρu_Z_IR_trial_Abs,
         Δρu_r_rad_gas_trial_Abs, Δρu_Z_rad_gas_trial_Abs,  Δρu_r_rad_dust_trial_Abs, Δρu_Z_rad_dust_trial_Abs,
-        ΔStellarRT, js_IR, Td_new = AbsorptionStep( Δtsub, c̃, ρ, nH_old, nHI_old, nH2_old, nHeI_old, nHeII_old, 
+        ΔStellarRT, js_IR, Td_new = AbsorptionStep( Δtsub, c̃, ρ_old, nH_old, nHI_old, nH2_old, nHeI_old, nHeII_old, 
                                                     nDI_old, nHD_old, nCI_old, nCHx_old, nCO_old, nOI_old, nOHx_old, ne_old,
                                                     ρd_old, Dust, T_old, Td, TCMB,
                                                     J_opt_old,  dJ_optdt,   H_r_opt_old,  H_Z_opt_old,  dHr_optdt,  dHZ_optdt,
@@ -1510,7 +1495,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
             ρu_r_new, ρu_Z_new, 
             ρdud_r_new, ρdud_Z_new,
             u_r_candidate, u_Z_candidate, 
-            ud_r_candidate, ud_Z_candidate = UpdateGasDustMomenta( Δtsub, ρ, ρd_old,
+            ud_r_candidate, ud_Z_candidate = UpdateGasDustMomenta( Δtsub, ρ_old, ρd_old,
                                                                    Δρu_r_gas_trial, Δρu_r_dust_trial,
                                                                    Δρu_Z_gas_trial, Δρu_Z_dust_trial,
                                                                    ρu_r_old, ρu_Z_old, 
@@ -1538,7 +1523,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         end
 
         if ConvergedDustGasCoupling == false 
-            # Change in velocities were too large, reduce Δtsub & retry:
+            # Failed to converge, reduce Δtsub & retry:
             Δtsub = Δtsub_half
 
             continue    
@@ -1551,14 +1536,62 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         ###################################################################################
 
         # Next, update the dust & metal density, from considering dust growth (by accretion)
-        # and destruction (by sublimation + sputtering). TODO
+        # and destruction (by sublimation, thermal & non-thermal sputtering). 
 
-        #ρd_new, ρZ_new = DustGrowthDestruction_Update( ρd_old, ρZ_old, nH_old, 
-        #                                               T_old, Td_new, Zgr_C )
+        if DustGrowthDestruction && ρd_old > ρd_floor
+            # Get dust-gas relative velocity magnitude:
+            urel = hypot( ud_r_new - u_r_new,  ud_Z_new - u_Z_new )
 
-        #DG_new        = ρd_new / ρ
-        #Zgas_Zsun_new = ρZ_new / ρ
+            # Update dust & metal density:
+            ρd_new, ρZ_new = DustGrowthDestruction_Update( ρd_old, ρZ_old, ρ_old, nH_old, 
+                                                           T_old, Td_new, urel, 
+                                                           xCI_old, Ztot_Zsun, Δtsub )
 
+            # Floor dust density: 
+            ρd_new         = max( ρd_new, ρd_floor ) 
+
+            # Check relative change in ρd:
+            Δρd_rel        = abs( ρd_new - ρd_old ) / max( ρd_old, ρd_th_subcycling, ρd_floor )
+
+            if Δρd_rel > tol_DustDensity
+                # Change in dust density was too high, reduce Δtsub & retry:
+                Δtsub = Δtsub_half
+
+                continue    
+            end
+
+            # Get new gas density:
+            ρ_new          = max( ρ_old + ( ρZ_new - ρZ_old ), ρ_floor )
+            inv_ρ_new      = 1 / ρ_new 
+
+            # Get new gas metallicity (in Solar units) & dust-to-gas ratio:
+            Zgas_Zsun_new  = ( ρZ_new * inv_ρ_new ) * inv_Zsun
+            DG_new         = ρd_new * inv_ρ_new
+        else
+            # If dust growth/destruction is turned off, return old values:
+            ρd_new, ρZ_new = ρd_old, ρZ_old
+
+            # No relative change:
+            Δρd_rel        = 0.0
+
+            # New gas density = old gas density:
+            ρ_new          = ρ_old
+
+            # New metallicity & dust-to-gas ratio = old values:
+            Zgas_Zsun_new  = Zgas_Zsun_old
+            DG_new         = DG_old
+        end
+
+        # Get updated number densities: 
+        nHI_new, nHII_new, nH2_new, nHeI_new, nHeII_new, 
+        nHeIII_new, nDI_new, nDII_new, nHD_new, 
+        nCI_new, nCII_new, nCO_new, nCHx_new, nOI_new, nOII_new, nOHx_new, 
+        ne_new, n_new, nH_new, nHe_new, nD_new, 
+        nC_new, nO_new = GetAllNumberDensities( xH2_old, xHII_old, 
+                                                xHeII_old, xHeIII_old, 
+                                                xHD_old, xDII_old,
+                                                xCI_old, xCII_old, xCO_old,
+                                                xOI_old, xOII_old, ρ_new, Zgas_Zsun_new )
 
         #######################################################################
         #######                                                         #######
@@ -1570,11 +1603,11 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         # substep Δtsub.
 
         REDO_HEATINGCOOLING, e_new, 
-        Δe, Δt_e = HeatingCoolingStep( Δtsub, e_old, Td_new, γad, 
-                                       n, nH_old, nHI_old, nH2_old, nHII_old, nHeI_old, nHeII_old,
-                                       nHeIII_old, nHD_old, ne_old,  Zgas_Zsun, DG, ρd_old,
-                                       xCI_old, xCII_old, xCO_old, xOI_old, N_CO,
-                                       J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, 
+        Δe, Δt_e = HeatingCoolingStep( Δtsub, e_old, Td_new, γad, n_new, nH_new, nC_new, nO_new, 
+                                       nHI_new, nH2_new, nHII_new, nHeI_new, nHeII_new, nHeIII_new,
+                                       nHD_new, nCI_new, nCO_new, nCII_new, nOI_new, ne_new, ρZ_new, 
+                                       Zgas_Zsun_new, DG_new, ρd_new, N_CO, 
+                                       J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
                                        SelfShielding, z, Γpd, OTS, e_floor )
 
         if REDO_HEATINGCOOLING
@@ -1604,15 +1637,18 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         # Finally, we update the chemistry over a sub-step Δtsub.
 
         # Get the normalized temperature Tnorm = T / [μ(γ-1)] = e × mH / (kB × ρ):
-        Tnorm =  e_new * mH_inv_kBρ 
+        Tnorm =  e_new * mH / (kB * ρ_new)
 
-        # Update chemistry:
+        # Update chemistry (NOTE: number densities have changed from dust update, but not 
+        # abundance fractions, hence use of x*_old yet n*_new):
         ( xH2_new, xHI_new, xHII_new, xHD_new, xDI_new, xDII_new,
           xHeI_new, xHeII_new, xHeIII_new,
           xOI_new, xOII_new, xCI_new, xCII_new, xCO_new, ConvergedCarbonOxygen,
           ne_new, Δne ) =
-          UpdateChemistrySubStep( Δtsub, Tnorm, Td_new, ρ, ρd_old, xH2_old, xHII_old, xHD_old, xDII_old, xHeII_old, xHeIII_old,
-                                  xOI_old, xOII_old, xCI_old, xCII_old, xCO_old, Zgas_Zsun,
+          UpdateChemistrySubStep( Δtsub, Tnorm, Td_new, ρ_new, ρd_new, 
+                                  nH_new, nC_new, nO_new, nHI_new, nH2_new, nHII_new, ne_new,
+                                  xH2_old, xHII_old, xHD_old, xDII_old, xHeII_old, xHeIII_old,
+                                  xOI_old, xOII_old, xCI_old, xCII_old, xCO_old, Zgas_Zsun_new,
                                   ΓionHI, ΓionH2, ΓionDI, ΓionHeI, ΓionHeII, Γ_LW, Γpd, Γ_LW_HD, 
                                   ΓionOI, ΓionCI, ΓdissCO, ΓdissOHx, ΓdissCHx,
                                   z, OTS ) 
@@ -1627,7 +1663,8 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         Δx_rel      = maximum( ( ΔxH2_rel, ΔxHII_rel, Δne_rel ) )
 
         if Δx_rel > tol_Chem || ConvergedCarbonOxygen == false 
-            # Change in H₂, H II, or e⁻ was too high, reduce Δtsub & retry:
+            # Change in H₂, H II, or e⁻ was too high, or the carbon/oxygen update 
+            # not converged, reduce Δtsub & retry:
             Δtsub = Δtsub_half
 
             continue    
@@ -1636,7 +1673,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         # Recommended next sub-cycle time-step based on the relative change 
         # in quantities:
         if ( Δx_rel < tol_enlargestep  &&  Δe < tol_enlargestep  
-             &&  ΔStellarRT < tol_enlargestep )
+             &&  ΔStellarRT < tol_enlargestep  &&  Δρd_rel < tol_enlargestep )
             Δtsub_new = 2 * min( Δtsub, Δt_e )
         else
             Δtsub_new = Δtsub
@@ -1651,7 +1688,8 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
                H_r_IR, H_Z_IR,
                Δρu_r_trial, Δρu_Z_trial,  Δρu_r_IR_trial, Δρu_Z_IR_trial, # Diagnostics for radiation pressure 
                ρu_r_new, ρu_Z_new,  ρdud_r_new, ρdud_Z_new,               # Updated gas & dust momenta 
-               Td_new, js_IR, Zgr_sil, Zgr_C
+               Td_new, js_IR, Zgr_sil, Zgr_C,
+               ρd_new, ρ_new, Zgas_Zsun_new
 
     end
 
@@ -1683,8 +1721,8 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
                                               Δtglobal::Float64,
                                                      c̃::Float64,
                                                  e_old::Float64,
-                                                     ρ::Float64,
-                                                    ∇ρ::Float64,
+                                                 ρ_old::Float64,
+                                                  Lsob::Float64,
                                                xH2_old::Float64,
                                               xHII_old::Float64, 
                                                xHD_old::Float64,
@@ -1696,7 +1734,7 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
                                                xCI_old::Float64, 
                                               xCII_old::Float64, 
                                                xCO_old::Float64,
-                                             Zgas_Zsun::Float64,
+                                         Zgas_Zsun_old::Float64,
                                                 ρd_old::Float64,
                                                   Dust::DustState,
 
@@ -1759,31 +1797,37 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
                                                    OTS::Bool    = true,
                                            RadPressure::Bool    = true,   # Radiation pressure feedback on gas & dust (on if true, off if false)
                                                  L_box::Float64 = ΔL_max, # Box size, to limit column densities
-                                        CoolingHeating::Bool    = true
+                                        CoolingHeating::Bool    = true,
+                                 DustGrowthDestruction::Bool    = true
                                               )
 
     # Initialize gas & dust momenta:
-    ρu_r_current     = ρu_r_old 
-    ρu_Z_current     = ρu_Z_old 
-    ρdud_r_current   = ρdud_r_old  
-    ρdud_Z_current   = ρdud_Z_old 
+    ρu_r_current      = ρu_r_old 
+    ρu_Z_current      = ρu_Z_old 
+    ρdud_r_current    = ρdud_r_old  
+    ρdud_Z_current    = ρdud_Z_old 
+
+    # Initialize gas & dust density, and metallicity:
+    ρ_current         = ρ_old
+    ρd_current        = ρd_old
+    Zgas_Zsun_current = Zgas_Zsun_old
 
     # Initialize time, internal energy, and abundance fractions
     # using the ones from the previous global time-step:
-    t_accum          = 0.0 
-    e_current        = e_old 
-    xH2_current      = xH2_old
-    xHII_current     = xHII_old
-    xHD_current      = xHD_old 
-    xDII_current     = xDII_old
-    xHeII_current    = xHeII_old
-    xHeIII_current   = xHeIII_old
-    xOI_current      = xOI_old
-    xOII_current     = xOII_old
-    xCI_current      = xCI_old
-    xCII_current     = xCII_old
-    xCO_current      = xCO_old
-    Td               = 30.0     # Dust temperature can be initialized arbitrarily 
+    t_accum           = 0.0 
+    e_current         = e_old 
+    xH2_current       = xH2_old
+    xHII_current      = xHII_old
+    xHD_current       = xHD_old 
+    xDII_current      = xDII_old
+    xHeII_current     = xHeII_old
+    xHeIII_current    = xHeIII_old
+    xOI_current       = xOI_old
+    xOII_current      = xOII_old
+    xCI_current       = xCI_old
+    xCII_current      = xCII_old
+    xCO_current       = xCO_old
+    Td                = 30.0     # Dust temperature can be initialized arbitrarily 
 
     # Similarly, initialize the intensities J as those from 
     # the transport step:
@@ -1836,12 +1880,12 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
         # Call sub-cycle update for this sub-step:
         result =  ThermoChemistrySubStepUpdate!( icell, jcell, Δr, ΔZ,
                   Δtsub, c̃,
-                  e_current, ρ, ∇ρ,
+                  e_current, ρ_current, Lsob,
                   xH2_current, xHII_current, xHD_current, xDII_current,
                   xHeII_current, xHeIII_current, 
                   xCI_current, xCII_current, xCO_current, 
                   xOI_current, xOII_current,
-                  Zgas_Zsun, ρd_old,
+                  Zgas_Zsun_current, ρd_old,
                   ρdud_r_current, ρdud_Z_current,     
                   ρu_r_current, ρu_Z_current,      
                   Dust,
@@ -1867,7 +1911,7 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
                   J_IR_current, 
                   H_r_IR_current, H_Z_IR_current, 
 
-                  z, OTS, RadPressure, L_box, CoolingHeating )
+                  z, OTS, RadPressure, L_box, CoolingHeating, DustGrowthDestruction )
 
         # Unpack result:
         Δtsub, Δtsub_new, e_new, xH2_new, xHII_new, xHD_new, xDII_new, xHeII_new, xHeIII_new, 
@@ -1879,50 +1923,56 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
         Δρu_r_substep, Δρu_Z_substep,  
         Δρu_r_IR_substep, Δρu_Z_IR_substep, 
         ρu_r_new, ρu_Z_new,  ρdud_r_new, ρdud_Z_new,  
-        Td, js_IR, Zgr_sil, Zgr_C  = result
+        Td, js_IR, Zgr_sil, Zgr_C, 
+        ρd_new, ρ_new, Zgas_Zsun_new  = result
 
         # Update our current internal energy & abundance fractions:
-        e_current        = e_new
-        xH2_current      = xH2_new
-        xHII_current     = xHII_new
-        xHD_current      = xHD_new 
-        xDII_current     = xDII_new
-        xHeII_current    = xHeII_new
-        xHeIII_current   = xHeIII_new
-        xOI_current      = xOI_new
-        xOII_current     = xOII_new
-        xCI_current      = xCI_new
-        xCII_current     = xCII_new
-        xCO_current      = xCO_new
+        e_current         = e_new
+        xH2_current       = xH2_new
+        xHII_current      = xHII_new
+        xHD_current       = xHD_new 
+        xDII_current      = xDII_new
+        xHeII_current     = xHeII_new
+        xHeIII_current    = xHeIII_new
+        xOI_current       = xOI_new
+        xOII_current      = xOII_new
+        xCI_current       = xCI_new
+        xCII_current      = xCII_new
+        xCO_current       = xCO_new
         # Update our current intensities:
-        J_opt_current    = J_opt
-        J_FUV_current    = J_FUV 
-        J_LW_current     = J_LW 
-        J_EUV1_current   = J_EUV1
-        J_EUV2_current   = J_EUV2
-        J_EUV3_current   = J_EUV3 
-        J_IR_current     = J_IR
+        J_opt_current     = J_opt
+        J_FUV_current     = J_FUV 
+        J_LW_current      = J_LW 
+        J_EUV1_current    = J_EUV1
+        J_EUV2_current    = J_EUV2
+        J_EUV3_current    = J_EUV3 
+        J_IR_current      = J_IR
         # Update our current H-components:
-        H_r_opt_current  = H_r_opt
-        H_Z_opt_current  = H_Z_opt 
-        H_r_FUV_current  = H_r_FUV
-        H_Z_FUV_current  = H_Z_FUV
-        H_r_LW_current   = H_r_LW
-        H_Z_LW_current   = H_Z_LW 
-        H_r_EUV1_current = H_r_EUV1
-        H_Z_EUV1_current = H_Z_EUV1
-        H_r_EUV2_current = H_r_EUV2 
-        H_Z_EUV2_current = H_Z_EUV2 
-        H_r_EUV3_current = H_r_EUV3
-        H_Z_EUV3_current = H_Z_EUV3
-        H_r_IR_current   = H_r_IR
-        H_Z_IR_current   = H_Z_IR
+        H_r_opt_current   = H_r_opt
+        H_Z_opt_current   = H_Z_opt 
+        H_r_FUV_current   = H_r_FUV
+        H_Z_FUV_current   = H_Z_FUV
+        H_r_LW_current    = H_r_LW
+        H_Z_LW_current    = H_Z_LW 
+        H_r_EUV1_current  = H_r_EUV1
+        H_Z_EUV1_current  = H_Z_EUV1
+        H_r_EUV2_current  = H_r_EUV2 
+        H_Z_EUV2_current  = H_Z_EUV2 
+        H_r_EUV3_current  = H_r_EUV3
+        H_Z_EUV3_current  = H_Z_EUV3
+        H_r_IR_current    = H_r_IR
+        H_Z_IR_current    = H_Z_IR
 
         # Update gas & dust momenta:
-        ρu_r_current     = ρu_r_new
-        ρu_Z_current     = ρu_Z_new
-        ρdud_r_current   = ρdud_r_new
-        ρdud_Z_current   = ρdud_Z_new
+        ρu_r_current      = ρu_r_new
+        ρu_Z_current      = ρu_Z_new
+        ρdud_r_current    = ρdud_r_new
+        ρdud_Z_current    = ρdud_Z_new
+
+        # Update gas & dust density, and metallicity:
+        ρ_current         = ρ_new
+        ρd_current        = ρd_new
+        Zgas_Zsun_current = Zgas_Zsun_new
 
         # Add diagnostic stellar radiation pressure momentum from this sub-step: 
         Δρu_stellar_r[icell, jcell] += Δρu_r_substep
@@ -1956,9 +2006,12 @@ max_steps::Int64 = 1000000 # Maximum number of sub-cycling sub-steps per global 
            H_r_EUV2_current, H_Z_EUV2_current,  H_r_EUV3_current, H_Z_EUV3_current, 
            H_r_IR_current,   H_Z_IR_current, 
            ρu_r_current, ρu_Z_current,  ρdud_r_current, ρdud_Z_current, 
-           Td, js_IR, Zgr_sil, Zgr_C
+           Td, js_IR, Zgr_sil, Zgr_C,
+           ρ_current, ρd_current, Zgas_Zsun_current
 end
 
+
+const inv_Lmax_∇ρ::Float64 = 1 / Mpc   # Just a large value to limit ∇ρ / ρ 
 
 function UpdateRTandThermoChemistry!( Δt_RT_max::Float64, 
                                              RT::StellarRTArrays,
@@ -1993,7 +2046,7 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
 
                                            # Radiation pressure feedback on gas & dust 
                                            # (on if true, off if false):
-                                    RadPressure::Bool    = true  
+                                    RadPressure::Bool = true  
 
                                               )
 
@@ -2008,31 +2061,34 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
     end
     
     # Unpack hydro, dust & chemistry arrays:
-    ρ         = HydroState.ρ
-    ρu_r      = HydroState.ρu_X
-    ρu_Z      = HydroState.ρu_Y
-    e         = HydroState.e 
-    T         = HydroState.T
+    ρ          = HydroState.ρ
+    ρu_r       = HydroState.ρu_X
+    ρu_Z       = HydroState.ρu_Y
+    e          = HydroState.e 
+    T          = HydroState.T
 
-    ρd        = HydroState.ρd
-    ρdud_r    = HydroState.ρdud_X
-    ρdud_Z    = HydroState.ρdud_Y
+    ρd         = HydroState.ρd
+    ρdud_r     = HydroState.ρdud_X
+    ρdud_Z     = HydroState.ρdud_Y
 
-    xH2       = ChemState.xH2
-    xHII      = ChemState.xHII
-    xHD       = ChemState.xHD
-    xDII      = ChemState.xDII
-    xHeII     = ChemState.xHeII 
-    xHeIII    = ChemState.xHeIII 
-    xCI       = ChemState.xCI 
-    xCII      = ChemState.xCII
-    xCO       = ChemState.xCO
-    xOI       = ChemState.xOI 
-    xOII      = ChemState.xOII
-    Zgas_Zsun = ChemState.Zgas_Zsun
+    xH2        = ChemState.xH2
+    xHII       = ChemState.xHII
+    xHD        = ChemState.xHD
+    xDII       = ChemState.xDII
+    xHeII      = ChemState.xHeII 
+    xHeIII     = ChemState.xHeIII 
+    xCI        = ChemState.xCI 
+    xCII       = ChemState.xCII
+    xCO        = ChemState.xCO
+    xOI        = ChemState.xOI 
+    xOII       = ChemState.xOII
+    Zgas_Zsun  = ChemState.Zgas_Zsun
 
     # On-spot-approximation (Case B) or modelling of recombination radiation:
     OTS        = RT.OTS
+
+    # Dust growth/destruction setting:
+    DustGrowthDestruction = Dust.DustGrowthDestruction
 
     # Boundary conditions:
     BC_r_left  = HydroState.BC_X_left
@@ -2182,8 +2238,10 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
 
                 Δr   = r[i+1] - r[i]   # Cell width in r-direction
 
-                # Get density gradient magnitude for the cell (for the column density estimate):
+                # Get the estimate of the Sobolev-like length scale ρ / ∇ρ,
+                # needed for column density estimates:
                 ∇ρ   = Estimate_∇ρ( i, j, ρ, rCoM, ZCoM )
+                Lsob = ρ[i,j] / max( ∇ρ,  ρ[i,j] * inv_Lmax_∇ρ )
 
                 # Get estimated time-derivatives of J from emission + advection:
                 dJ_optdt   = ( RT.J_opt[i,j]  - RT.J_opt_old[i,j]  ) * inv_Δt_RT
@@ -2215,7 +2273,7 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                 # Next we sub-cycle for each cell: 
                 result = ThermoChemistrySubCycleUpdate!( i, j,  Δr, ΔZ,
                                                           Δt_RT,   c̃,
-                                                         e[i,j],   ρ[i,j],   ∇ρ,
+                                                         e[i,j],   ρ[i,j],   Lsob,
                                                        xH2[i,j],   xHII[i,j],
                                                        xHD[i,j],   xDII[i,j],
                                                      xHeII[i,j],   xHeIII[i,j],
@@ -2250,7 +2308,8 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                                                  RT.J_IR[i,j], 
                                                RT.H_r_IR[i,j], RT.H_Z_IR[i,j], 
 
-                                                          z, OTS, RadPressure, L_box, CoolingHeating )
+                                                z, OTS, RadPressure, L_box, CoolingHeating,
+                                                DustGrowthDestruction )
 
                 # Get updated quantities:
                 e[i,j], xH2[i,j], xHII[i,j], xHD[i,j], xDII[i,j], xHeII[i,j], xHeIII[i,j], 
@@ -2267,10 +2326,11 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                 ρu_r[i,j],         ρu_Z[i,j],  
                 ρdud_r[i,j],       ρdud_Z[i,j], 
                 Dust.Td[i,j],      RT.js_IR[i,j],
-                Dust.Zgr_sil[i,j], Dust.Zgr_C[i,j]  = result 
+                Dust.Zgr_sil[i,j], Dust.Zgr_C[i,j],
+                ρ[i,j],   ρd[i,j],  Zgas_Zsun[i,j]  = result 
 
                 # Update IR flux opacity (for accurate M1 transport in optically thick regime):
-                RT.α_F_IR[i,j] = ρd[i,j] * κR(Dust, Dust.Td[i,j])
+                RT.α_F_IR[i,j] = ρd[i,j] * κR( Dust, Dust.Td[i,j] )
 
             end
         end # End of i-loop 
@@ -2333,10 +2393,17 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
         # and ∫dν_js_Lyα (frequency-integrated emissivity):
         @threads for j in dN_Z 
             @inbounds for i in dN_r
-                # Get all needed number densities:
-                nHI, nHII, nH2       = GetHydrogenDensities( xHII[i,j], xH2[i,j], ρ[i,j] )
-                nHeI, nHeII, nHeIII  = GetHeliumDensities( xHeII[i,j], xHeIII[i,j], ρ[i,j] )
-                ne                   = GetElectronDensity( nHII, nHeII, nHeIII )
+
+                # Get all number densities (only some are needed):
+                nHI, nHII, nH2, nHeI, nHeII, 
+                nHeIII, nDI, nDII, nHD, 
+                nCI, nCII, nCO, nCHx, nOI, nOII, nOHx, 
+                ne, n, nH, nHe, nD, 
+                nC, nO = GetAllNumberDensities( xH2[i,j], xHII[i,j], 
+                                                xHeII[i,j], xHeIII[i,j], 
+                                                xHD[i,j], xDII[i,j],
+                                                xCI[i,j], xCII[i,j], xCO[i,j],
+                                                xOI[i,j], xOII[i,j], ρ[i,j], Zgas_Zsun[i,j] )
 
                 # Also get the gas temperature in the cell:
                 μ        = Getμ( xHII[i,j], xH2[i,j], xHeII[i,j], xHeIII[i,j] )
@@ -2442,6 +2509,8 @@ end
 
 
 
+""" This function sets up the stellar (+ IR) RT arrays and state,
+    for use in RHD simulations. """
 function GenerateStellarRTArrays( mstarZAMS::Float64, 
                                  Zstar_Zsun::Float64,
                                          ΔV::AbstractArray{Float64, 2},

@@ -412,17 +412,12 @@ const E_CII   = kB * 91.21
     C II is modelled as a two-level atom, using
     rates compiled in Draine (2011). """
 function Λ_CII( T::Float64, 
-               nH::Float64,
+             nCII::Float64,
               nHI::Float64, 
               nH2::Float64, 
              nHeI::Float64, 
-               ne::Float64,
-           Z_Zsun::Float64,
-             xCII::Float64
+               ne::Float64
                 )
-
-    # C II number density:
-    nCII    = xCII * C_H_ratio * nH * Z_Zsun
 
     # Convenient definitions:
     T       = clamp( T, 0.0, 1e5 )
@@ -463,17 +458,13 @@ const g_CI0  = 1;          const g_CI1  = 3;          const g_CI2  = 5
     C I is modelled as a 3-level atom, using rates compiled/cited
     in Draine (2011). """
 function Λ_CI( T::Float64, 
-              nH::Float64,
+             nCI::Float64,
             nHII::Float64,
              nHI::Float64, 
              nH2::Float64, 
             nHeI::Float64, 
-              ne::Float64,
-          Z_Zsun::Float64,
-             xCI::Float64
+              ne::Float64
               )
-
-    nCI     = xCI * C_H_ratio * nH * Z_Zsun
 
     # Convenient definitions:
     T       = clamp( T, 0.0, 1e5 )
@@ -589,15 +580,11 @@ const g_OI0  = 5;          const g_OI1  = 3;          const g_OI2  = 1
 """ The O I (63.18 μm, 145.5 μm) cooling rate (erg s⁻¹ cm⁻³). 
     O I is modelled as a 3-level atom, using rates compiled in Draine (2011). """
 function Λ_OI( T::Float64, 
-              nH::Float64,
+             nOI::Float64,
              nHI::Float64,
              nH2::Float64,
-              ne::Float64,
-          Z_Zsun::Float64,
-             xOI::Float64
+              ne::Float64
                 )
-
-    nOI     = xOI * O_H_ratio * nH * Z_Zsun
 
     # Convenient definitions:
     T       = clamp( T, 1.0, 1e5 )
@@ -672,13 +659,11 @@ const Tmin_CO    = 5.0     # Ignore CO cooling below this temperature
     in the low-density regime from HM has been corrected to agree 
     with Whitworth & Jaffa."""
 function Λ_CO( T::Float64, 
+             nCO::Float64,
               nH::Float64,
              nH2::Float64,
-          Z_Zsun::Float64,
-             xCO::Float64,
             N_CO::Float64 = 0.0 
                )
-    nCO      = xCO * C_H_ratio * nH * Z_Zsun  # The CO density
 
     # Convenient definitions:
     ncr_CO   = ncr_CO_0 * (T^0.5)    # Critical density (Hollenbach & McKee 1979)
@@ -711,15 +696,13 @@ const T_CLOUDYdata_C_min    = minimum( T_CLOUDYdata_C )
 const T_CLOUDYdata_C_max    = maximum( T_CLOUDYdata_C )
 
 """ The C (carbon) cooling rate (erg s⁻¹ cm⁻³) at high 
-    temperatures, assuming collisional ionization equilibrium,
-    and Solar abundance ratio. See ref. (6). """
+    temperatures, assuming collisional ionization equilibrium.
+    See ref. (6). """
 function Λ_C_CLOUDY( T::Float64, 
-                  nHII::Float64, 
-                    ne::Float64,
-                Z_Zsun::Float64 
+                    nC::Float64,
+                    ne::Float64
                     )
     if T > T_CLOUDYdata_C_min 
-        nC = C_H_ratio * nHII * Z_Zsun
         return nC * ne * InterpolCoolingRate_C(T) 
     else
         return 0.0
@@ -741,15 +724,13 @@ const T_CLOUDYdata_N_min    = minimum( T_CLOUDYdata_N )
 const T_CLOUDYdata_N_max    = maximum( T_CLOUDYdata_N )
 
 """ The N (nitrogen) cooling rate (erg s⁻¹ cm⁻³) at high 
-    temperatures, assuming collisional ionization equilibrium,
-    and Solar abundance ratio. See ref. (6). """
+    temperatures, assuming collisional ionization equilibrium.
+    See ref. (6). """
 function Λ_N_CLOUDY( T::Float64, 
-                  nHII::Float64, 
-                    ne::Float64,
-                Z_Zsun::Float64 
+                    nN::Float64,
+                    ne::Float64
                     )
     if T > T_CLOUDYdata_N_min
-        nN = N_H_ratio * nHII * Z_Zsun
         return nN * ne * InterpolCoolingRate_N(T) 
     else
         return 0.0
@@ -771,15 +752,13 @@ const T_CLOUDYdata_O_min    = minimum( T_CLOUDYdata_O )
 const T_CLOUDYdata_O_max    = maximum( T_CLOUDYdata_O )
 
 """ The O (oxygen) cooling rate (erg s⁻¹ cm⁻³) at high 
-    temperatures, assuming collisional ionization equilibrium,
-    and Solar abundance ratio. See ref. (6). """
+    temperatures, assuming collisional ionization equilibrium.
+    See ref. (6). """
 function Λ_O_CLOUDY( T::Float64, 
-                  nHII::Float64, 
-                    ne::Float64,
-                Z_Zsun::Float64 
+                    nO::Float64, 
+                    ne::Float64
                     )
     if T > T_CLOUDYdata_O_min
-        nO = O_H_ratio * nHII * Z_Zsun
         return nO * ne * InterpolCoolingRate_O(T) 
     else
         return 0.0
@@ -801,15 +780,13 @@ const T_CLOUDYdata_Ne_min    = minimum( T_CLOUDYdata_Ne )
 const T_CLOUDYdata_Ne_max    = maximum( T_CLOUDYdata_Ne )
 
 """ The O (oxygen) cooling rate (erg s⁻¹ cm⁻³) at high 
-    temperatures, assuming collisional ionization equilibrium,
-    and Solar abundance ratio. See ref. (6). """
+    temperatures, assuming collisional ionization equilibrium.
+    See ref. (6). """
 function Λ_Ne_CLOUDY( T::Float64, 
-                   nHII::Float64, 
-                     ne::Float64,
-                 Z_Zsun::Float64 
+                    nNe::Float64, 
+                     ne::Float64
                      )
     if T > T_CLOUDYdata_Ne_min 
-        nNe = Ne_H_ratio * nHII * Z_Zsun
         return nNe * ne * InterpolCoolingRate_Ne(T) 
     else
         return 0.0
@@ -831,15 +808,13 @@ const T_CLOUDYdata_Mg_min    = minimum( T_CLOUDYdata_Mg )
 const T_CLOUDYdata_Mg_max    = maximum( T_CLOUDYdata_Mg )
 
 """ The Mg (magnesium) cooling rate (erg s⁻¹ cm⁻³) at high 
-    temperatures, assuming collisional ionization equilibrium,
-    and Solar abundance ratio. See ref. (6). """
+    temperatures, assuming collisional ionization equilibrium.
+    See ref. (6). """
 function Λ_Mg_CLOUDY( T::Float64, 
-                   nHII::Float64, 
-                     ne::Float64,
-                 Z_Zsun::Float64 
+                    nMg::Float64, 
+                     ne::Float64
                      )
     if T > T_CLOUDYdata_Mg_min 
-        nMg = Mg_H_ratio * nHII * Z_Zsun
         return nMg * ne * InterpolCoolingRate_Mg(T) 
     else
         return 0.0
@@ -861,15 +836,13 @@ const T_CLOUDYdata_Si_min    = minimum( T_CLOUDYdata_Si )
 const T_CLOUDYdata_Si_max    = maximum( T_CLOUDYdata_Si )
 
 """ The Si (silicon) cooling rate (erg s⁻¹ cm⁻³) at high 
-    temperatures, assuming collisional ionization equilibrium,
-    and Solar abundance ratio. See ref. (6). """
+    temperatures, assuming collisional ionization equilibrium.
+    See ref. (6). """
 function Λ_Si_CLOUDY( T::Float64, 
-                   nHII::Float64, 
-                     ne::Float64,
-                 Z_Zsun::Float64 
+                    nSi::Float64, 
+                     ne::Float64
                      )
     if T > T_CLOUDYdata_Si_min 
-        nSi = Si_H_ratio * nHII * Z_Zsun
         return nSi * ne * InterpolCoolingRate_Si(T) 
     else
         return 0.0
@@ -891,15 +864,13 @@ const T_CLOUDYdata_S_min    = minimum( T_CLOUDYdata_S )
 const T_CLOUDYdata_S_max    = maximum( T_CLOUDYdata_S )
 
 """ The S (sulfur) cooling rate (erg s⁻¹ cm⁻³) at high 
-    temperatures, assuming collisional ionization equilibrium,
-    and Solar abundance ratio. See ref. (6). """
+    temperatures, assuming collisional ionization equilibrium.
+    See ref. (6). """
 function Λ_S_CLOUDY( T::Float64, 
-                  nHII::Float64, 
-                    ne::Float64,
-                Z_Zsun::Float64 
+                    nS::Float64, 
+                    ne::Float64
                     )
     if T > T_CLOUDYdata_S_min 
-        nS = S_H_ratio * nHII * Z_Zsun
         return nS * ne * InterpolCoolingRate_S(T) 
     else
         return 0.0
@@ -921,15 +892,13 @@ const T_CLOUDYdata_Fe_min    = minimum( T_CLOUDYdata_Fe )
 const T_CLOUDYdata_Fe_max    = maximum( T_CLOUDYdata_Fe )
 
 """ The Fe (iron) cooling rate (erg s⁻¹ cm⁻³) at high 
-    temperatures, assuming collisional ionization equilibrium,
-    and Solar abundance ratio. See ref. (6). """
+    temperatures, assuming collisional ionization equilibrium.
+    See ref. (6). """
 function Λ_Fe_CLOUDY( T::Float64, 
-                  nHII::Float64, 
-                    ne::Float64,
-                Z_Zsun::Float64 
-                    )
+                    nFe::Float64, 
+                     ne::Float64
+                     )
     if T > T_CLOUDYdata_Fe_min 
-        nFe = Fe_H_ratio * nHII * Z_Zsun
         return nFe * ne * InterpolCoolingRate_Fe(T) 
     else
         return 0.0
@@ -938,36 +907,46 @@ end
 
 
 # Interpolation coefficients (Kim et al. 2023):
-const a_Z = 10.0; const T1_Z = 2e4; const T2_Z = 3.5e4
+const a_Z::Float64 = 10.0; const T1_Z::Float64 = 2e4; const T2_Z::Float64 = 3.5e4
 
 """ Total metal cooling rate (erg s⁻¹ cm⁻³). """
-function Λ_Z( T::Float64, 
+function Λ_Z( T::Float64,
+             nH::Float64,  # nHI + nHII + 2 × nH₂
+             nC::Float64,  # nCI + nCII + nCO + nCHₓ
+             nO::Float64,  # nOI + nOII + nCO + nOHₓ
             nHI::Float64,
             nH2::Float64,
            nHII::Float64,
-           nHeI::Float64, 
-             ne::Float64, 
-         Z_Zsun::Float64,
-            xCI::Float64,  # nCI / nC
-           xCII::Float64,  # nCII / nC
-            xCO::Float64,  # nCO / nC 
-            xOI::Float64,  # nOI / nO
+           nHeI::Float64,
+            nCI::Float64,
+           nCII::Float64,
+            nCO::Float64,
+            nOI::Float64,
+             ne::Float64,
+             ρZ::Float64,  # Metal density 
+         Z_Zsun::Float64,  # Metallicity in Solar units, for the nebular line cooling rate 
            N_CO::Float64 = 0.0
              )
 
-    nH   = nHI + nHII + 2 * nH2
+    # Get trace metals number densities:
+    nN   = fNitrogen   * ρZ * inv_mN
+    nNe  = fNeon       * ρZ * inv_mNe
+    nMg  = fMagnesium  * ρZ * inv_mMg
+    nSi  = fSilicon    * ρZ * inv_mSi 
+    nS   = fSulfur     * ρZ * inv_mS 
+    nFe  = fIron       * ρZ * inv_mFe
 
     # Metal cooling rate at high temperatures from CLOUDY, assuming CIE:
-    Λ_Z_CLOUDY = ( Λ_C_CLOUDY(T, nHII, ne, Z_Zsun)  +  Λ_N_CLOUDY(T, nHII, ne, Z_Zsun)
-                 + Λ_O_CLOUDY(T, nHII, ne, Z_Zsun)  +  Λ_Ne_CLOUDY(T, nHII, ne, Z_Zsun)
-                 + Λ_Mg_CLOUDY(T, nHII, ne, Z_Zsun) +  Λ_Si_CLOUDY(T, nHII, ne, Z_Zsun)
-                 + Λ_S_CLOUDY(T, nHII, ne, Z_Zsun)  +  Λ_Fe_CLOUDY(T, nHII, ne, Z_Zsun))
+    Λ_Z_CLOUDY = ( Λ_C_CLOUDY(T, nC, ne)  +  Λ_N_CLOUDY(T, nN, ne)
+                 + Λ_O_CLOUDY(T, nO, ne)  +  Λ_Ne_CLOUDY(T, nNe, ne)
+                 + Λ_Mg_CLOUDY(T, nMg, ne) +  Λ_Si_CLOUDY(T, nSi, ne)
+                 + Λ_S_CLOUDY(T, nS, ne)  +  Λ_Fe_CLOUDY(T, nFe, ne))
     # Total metal cooling rate, using interpolation (Kim et al. 2023):
     S   = 1 / ( 1 + exp( - a_Z*(T - 0.5*(T1_Z + T2_Z))/(T2_Z - T1_Z) ) )
 
-    Λ_Z = ((1 - S) * ( Λ_neb(T, nHII, ne, Z_Zsun) + Λ_CII(T, nH, nHI, nH2, nHeI, ne, Z_Zsun, xCII)
-        +  Λ_CI(T, nH, nHII, nHI, nH2, nHeI, ne, Z_Zsun, xCI) + Λ_OI(T, nH, nHI, nH2, ne, Z_Zsun, xOI)
-        +  Λ_CO(T, nH, nH2, Z_Zsun, xCO, N_CO) ) 
+    Λ_Z = ((1 - S) * ( Λ_neb(T, nHII, ne, Z_Zsun) + Λ_CII(T, nCII, nHI, nH2, nHeI, ne)
+        +  Λ_CI(T, nCI, nHII, nHI, nH2, nHeI, ne) + Λ_OI(T, nOI, nHI, nH2, ne)
+        +  Λ_CO(T, nCO, nH, nH2, N_CO) ) 
         +  S * Λ_Z_CLOUDY )
 
     return Λ_Z
@@ -982,24 +961,28 @@ end
 
 """ The total cooling rate (erg s⁻¹ cm⁻³) from all processes 
     considered. """
-function Λ(    T::Float64, 
-             nHI::Float64, 
-            nHII::Float64, 
-            nHeI::Float64,
-           nHeII::Float64,
-          nHeIII::Float64,
-              ne::Float64,
-             nH2::Float64,
-             nHD::Float64,
-          Z_Zsun::Float64,
-             xCI::Float64,  # nCI / nC
-            xCII::Float64,  # nCII / nC
-             xCO::Float64,  # nCO / nC 
-             xOI::Float64,  # nOI / nO
-            N_CO::Float64 = 0.0,
-               z::Float64 = 0.0,
-           CaseB::Bool    = true 
-        )
+function Λ( T::Float64, 
+          nHI::Float64,
+          nH2::Float64, 
+         nHII::Float64, 
+         nHeI::Float64,
+        nHeII::Float64,
+       nHeIII::Float64,
+          nHD::Float64,
+          nCI::Float64,
+          nCO::Float64,
+         nCII::Float64,
+          nOI::Float64,
+           ne::Float64,
+           nH::Float64,
+           nC::Float64,
+           nO::Float64,
+           ρZ::Float64,
+       Z_Zsun::Float64,
+         N_CO::Float64 = 0.0,
+            z::Float64 = 0.0,
+        CaseB::Bool    = true 
+             )
 
     # Cooling rate from all processes except Compton cooling/heating and dust cooling/heating:
     Λ1   =  ( Λ_HIcoll(T, nHI, ne) + Λ_HeIIcoll(T, nHeII, ne) 
@@ -1015,7 +998,7 @@ function Λ(    T::Float64,
 
             + Λ_HD(T, nHD, nHI)
             
-            + Λ_Z(T, nHI, nH2, nHII, nHeI, ne, Z_Zsun, xCI, xCII, xCO, xOI, N_CO) )
+            + Λ_Z(T, nH, nC, nO, nHI, nH2, nHII, nHeI, nCI, nCII, nCO, nOI, ne, ρZ, Z_Zsun, N_CO) )
 
     # Correct for the CMB-induced limit following Hopkins et al. (2023):
     TCMB = TCMB0 * (1 + z)

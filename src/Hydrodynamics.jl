@@ -31,7 +31,8 @@ using Printf
 
 export GetPrimitive, GetCFLTimeStep, 
        GetGravityTimeStep, GetRadPressureTimeStep, Getγad, Getμ, UpdateHydro!, 
-       GravitySolveAndKick!, GravityKick!, UpdateTotalMass!, GenerateHydroArrays
+       GravitySolveAndKick!, GravityKick!, UpdateTotalMass!, UpdateGasVelocityDispersion!, 
+       GenerateHydroArrays
 
 ###############################################################
 #######                                                 #######
@@ -5186,10 +5187,11 @@ end
                                            ΔV::AbstractMatrix{Float64}
                                   )
     
-    # Initialize total mass to zero before we compute it:
-    M = 0.0
+    # Initialize total gas & dust mass to zero before we compute it:
+    M  = 0.0
+    Md = 0.0
 
-    # Grid size: 
+    # Grid size & intervals: 
     N_r, N_Z = size( ΔV )
     dN_r     = 1:N_r 
     dN_Z     = 1:N_Z 
@@ -5198,15 +5200,79 @@ end
     for j in dN_Z 
         @inbounds @simd for i in dN_r 
             # Add mass contribution from cell:
-            M += ΔV[i,j] * HydroState.ρ[i,j]
+            M  += ΔV[i,j] * HydroState.ρ[i,j]
+            Md += ΔV[i,j] * HydroState.ρd[i,j]
         end
     end
 
-    # Store computed mass:
-    HydroState.M_simvol = M 
+    # Store computed masses:
+    HydroState.M_simvol  = M 
+    HydroState.Md_simvol = Md 
 
     return nothing 
 end
+
+
+""" A function for computing the mass-weighted gas velocity dispersion σ.
+    Good for tracking growth/decay of turbulence. """
+@inline function UpdateGasVelocityDispersion!( HydroState::HydrodynamicsState,
+                                                       ΔV::AbstractMatrix{Float64} )
+
+    ρ   = HydroState.ρ
+    u_X = HydroState.u_X
+    u_Y = HydroState.u_Y
+
+    # Grid size & intervals:
+    N_X, N_Y = size( ρ )
+    dN_X     = 1:N_X 
+    dN_Y     = 1:N_Y
+
+    ############ Find mean gas velocity first #############
+    ū_X = 0.0  # Mean gas velocity in X-direction 
+    ū_Y = 0.0  # Mean gas velocity in Y-direction 
+    M   = 0.0  # Total gas mass in simulation volume 
+    for j in dN_Y 
+        @inbounds @simd for i in dN_X 
+            ū_X +=  ΔV[i,j] * ρ[i,j] * u_X[i,j] 
+            ū_Y +=  ΔV[i,j] * ρ[i,j] * u_Y[i,j] 
+            M   +=  ΔV[i,j] * ρ[i,j]
+        end
+    end     
+    # Normalize:
+    inv_M  = 1 / M 
+    ū_X    = ū_X * inv_M 
+    ū_Y    = ū_Y * inv_M                           
+
+    ############ Find gas velocity dispersion #############
+    σ_X_squared = 0.0  # X-direction velocity dispersion squared 
+    σ_Y_squared = 0.0  # Y-direction velocity dispersion squared 
+    for j in dN_Y 
+        @inbounds @simd for i in dN_X 
+            Δu_X         =  u_X[i,j] - ū_X
+            Δu_Y         =  u_Y[i,j] - ū_Y
+            σ_X_squared +=  ΔV[i,j] * ρ[i,j] * Δu_X * Δu_X
+            σ_Y_squared +=  ΔV[i,j] * ρ[i,j] * Δu_Y * Δu_Y
+        end
+    end
+    # Normalize:
+    σ_X_squared = σ_X_squared * inv_M 
+    σ_Y_squared = σ_Y_squared * inv_M
+
+    # Get velocity dispersion components:
+    σ_X  =  sqrt( σ_X_squared )
+    σ_Y  =  sqrt( σ_Y_squared )
+
+    # Get total velocity dispersion:
+    σ = sqrt( σ_X_squared  +  σ_Y_squared )
+
+    # Store result:
+    HydroState.σ_X = σ_X
+    HydroState.σ_Y = σ_Y
+    HydroState.σ   = σ
+
+    return nothing 
+end
+
 
 
 """ Initialize all the hydro arrays (cell-centered, interface,
@@ -5412,14 +5478,20 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
     # Strang split order:
     rfirst_Hydro = true 
 
-    # Total mass in simulation volume:
-    M_simvol = 0.0
+    # Total gas & dust mass in simulation volume:
+    M_simvol  = 0.0
+    Md_simvol = 0.0
+
+    # Velocity dispersions:
+    σ_X = 0.0
+    σ_Y = 0.0
+    σ   = 0.0
 
     # Arrays needed for advection of passive scalars:
     Scalars       = zeros(Float64, N_X, N_Y, N_Scalars)
     Scalars_old   = zeros(Float64, N_X, N_Y, N_Scalars)
     Scalars_stage = zeros(Float64, N_X, N_Y, N_Scalars)
-    ρ_save        = zeros(Float64, N_X,   N_Y)
+    ρ_save        = zeros(Float64, N_X, N_Y)
 
     # Create structs:
     hydrostate = HydrodynamicsState( ρ_new, ρu_X_new, ρu_Y_new, E_new, ρ, ρu_X, ρu_Y, E, 
@@ -5447,7 +5519,9 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
                                      ρdc, ρdud_Xc, ρdud_Yc, ud_Xc, ud_Yc, 
 
                                      Scalars, Scalars_old, Scalars_stage, ρ_save,
-                                     rfirst_Hydro, M_simvol )
+                                     rfirst_Hydro, M_simvol, Md_simvol,
+                                     
+                                     σ_X, σ_Y, σ)
 
     ghostgrid  = GhostPaddedGrid( Xg, XCoMg, Yg, YCoMg )
   

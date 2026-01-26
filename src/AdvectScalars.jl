@@ -16,8 +16,8 @@ using  Base.Threads              # For CPU acceleration
 export PreparePassiveScalars!, RecoverChemistryFromPassiveScalars!
 
 
-const C_over_O::Float64 = C_H_ratio / O_H_ratio  # nC / nO
 
+""" This function prepares all passive scalars for advection. """
 @views function PreparePassiveScalars!( HydroState::HydrodynamicsState, 
                                          Chemistry::ChemistryState )
 
@@ -55,7 +55,7 @@ const C_over_O::Float64 = C_H_ratio / O_H_ratio  # nC / nO
 end
 
 
-
+""" This function recovers all passive scalars after advection. """
 function RecoverChemistryFromPassiveScalars!( HydroState::HydrodynamicsState, 
                                                Chemistry::ChemistryState)
 
