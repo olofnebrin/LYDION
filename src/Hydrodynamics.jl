@@ -44,8 +44,8 @@ export GetPrimitive, GetCFLTimeStep,
 # which you can change.
 
 const CFL::Float64         =  0.4        # CFL factor for gas tim                            (< 1, default: 0.4)
-const C_Grav::Float64      =  0.1        # Sets the gravity-limited time-step                (default: 0.1)
-const C_RP::Float64        =  0.1        # Sets the rad. presure-limited time-step           (default: 0.1)
+const C_Grav::Float64      =  0.5        # Sets the gravity-limited time-step                (default: 0.5)
+const C_RP::Float64        =  0.5        # Sets the rad. presure-limited time-step           (default: 0.5)
 const ρ_floor::Float64     =  1e-10 * mH # Gas density floor                                 (default: 10⁻¹⁰ mH per cm⁻³)
 const ρd_floor::Float64    =  1e-13 * mH # Dust density floor                                (default: 10⁻¹³ mH per cm⁻³)
 const P_floor::Float64     =  1e-30      # Gas pressure floor                                (default: 10⁻³⁰ in cgs units)
@@ -202,6 +202,7 @@ end
 @inline function GetRadPressureTimeStep( X::AbstractVector{Float64}, # Interface X-values
                                          Y::AbstractVector{Float64}, # Interface Y-values
                                          ρ::AbstractMatrix{Float64}, # Gas density 
+                                        ρd::AbstractMatrix{Float64}, # Dust density 
                                    f_rad_X::AbstractMatrix{Float64}, # X-component of radiation pressure force per unit volume 
                                    f_rad_Y::AbstractMatrix{Float64}, # Y-component of radiation pressure force per unit volume 
                                          )
@@ -218,11 +219,14 @@ end
         @simd for i in dN_X 
 
             # Compute the horizontal cell width (same for all j-indices):
-            ΔX = X[i+1] - X[i]
+            ΔX   = X[i+1] - X[i]
+
+            # Total mass density:
+            ρtot = ρ[i,j] + ρd[i,j]
 
             # Compute the local acceleration time-scale:
-            Δt = min( sqrt( 2 * ΔX * ρ[i,j] / abs(f_rad_X[i,j]) ), 
-                      sqrt( 2 * ΔY * ρ[i,j] / abs(f_rad_Y[i,j]) ) )
+            Δt   = min( sqrt( 2 * ΔX * ρtot / abs(f_rad_X[i,j]) ), 
+                        sqrt( 2 * ΔY * ρtot / abs(f_rad_Y[i,j]) ) )
             
             if Δt < local_min_Δt
                 # Update the smallest time-scale found:

@@ -9,7 +9,7 @@ from matplotlib.ticker import MultipleLocator  # add this import
 
 
 # ---------------- user inputs ----------------
-filename = "RHDSim_NoLya_64x64_2026-01-26.h5"       
+filename = "RHDSim_NoLya_512x512_2026-01-26.h5"       
 frameskip = 1                 
 save_mp4 = True               
 outname = "density_T.mp4"
@@ -160,7 +160,7 @@ panel_label_style = dict(ha='right', va='top', color='black',
 ax1.text(0.9, 0.2, "n$_{H}$ (cm$^{-3}$)", transform=ax1.transAxes, **panel_label_style)
 
 ax1.set_xlim(r[0]/pc, r[-1]/pc)
-ax1.set_ylim(Z[0]/pc, Z[-1]/pc)
+ax1.set_ylim( Z[0]/pc, Z[-1]/pc )
 #ax1.set_xlim(r[0]/pc, 0.001)
 #ax1.set_ylim(Z[0]/pc, 0.001)
 

@@ -59,6 +59,10 @@ mutable struct LyαArrays
     νC::Array{Float64, 1}
     Δν::Array{Float64, 1}
 
+    # Also store inverses of νC and Δν, which are used in the frequency factors update:
+    inv_Δν::Array{Float64, 1}
+    inv_νC::Array{Float64, 1}
+
     # Bounds on the min and max bin indices to consider in M1 advection: 
     kcore_min::Int 
     kcore_max::Int 

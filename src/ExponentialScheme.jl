@@ -2,42 +2,47 @@
 """ FILE:    ExponentialScheme.jl
 
     PURPOSE: Contains the numerically stable exponential scheme for handling 
-             diffusion+advection flux terms.
+             diffusion + advection frequency flux terms.
 """
 
 
-export A_mplus, A_m, A_mminus, ϕplus
+export A_mplus, A_m, A_mminus
 
-const Pmax::Float64 = 40.0   # Maximum magnitude of Péclet number to avoid overflow in exponentials and/or floating point errors (default = 30).
-const Pmin::Float64 = 1e-6   # Minimum magnitude of Péclet number below which we use Taylor expansion
+
+const Pmax::Float64 = 40.0   # Maximum magnitude of Péclet number to avoid overflow in exponentials and/or floating point errors (default = 40).
+const Pmin::Float64 = 1e-3   # Minimum magnitude of Péclet number below which we use a 2:nd order Taylor expansion (default = 10⁻³)
 
 """ The function [1 - exp(-P_m)]/C_m, where P_m is the Péclet number
     in cell m. """
-function ϕminus( C_m::Float64, 
-                Δy_m::Float64, 
-                 K_m::Float64
-                )
-    P_m = clamp( C_m*Δy_m/K_m, -Pmax, Pmax ) # Péclet number
+@inline function ϕminus( C_m::Float64, 
+                        Δy_m::Float64, 
+                         K_m::Float64
+                        )
+
+    X   = Δy_m / K_m                      # Convenient variable 
+    P_m = clamp( C_m * X,  - Pmax, Pmax ) # Péclet number
     if abs( P_m ) < Pmin
         # In this case, Taylor expand the exponential to second order:
-        return Δy_m / K_m  -  0.5 * C_m * (Δy_m / K_m)^2
+        return X  -  0.5 * C_m * (X^2)
     else 
         # In this case we use the full expression:
-        return ( @fastmath 1 - exp(- P_m ) ) / C_m
+        return ( @fastmath 1 - exp( - P_m ) ) / C_m
     end
 end
 
 
 """ The function [1 - exp(P_m)]/C_m, where P_m is the Péclet number
     in cell m. """
-function ϕplus( C_m::Float64, 
-               Δy_m::Float64, 
-                K_m::Float64
-                )
-    P_m = clamp( C_m*Δy_m/K_m, -Pmax, Pmax ) # Péclet number
+@inline function ϕplus( C_m::Float64, 
+                       Δy_m::Float64, 
+                        K_m::Float64
+                        )
+    
+    X   = Δy_m / K_m                      # Convenient variable 
+    P_m = clamp( C_m * X,  - Pmax, Pmax ) # Péclet number
     if abs( P_m ) < Pmin
         # In this case, Taylor expand the exponential to second order:
-        return - Δy_m / K_m  -  0.5 * C_m * (Δy_m / K_m)^2
+        return - X  -  0.5 * C_m * (X^2)
     else
         # In this case we use the full expression:
         return ( @fastmath 1 - exp( P_m ) ) / C_m
@@ -65,7 +70,7 @@ function A_mplus( f_mplushalf::Float64,
                       K_mplus::Float64  
                       )
 
-    P_mplus = clamp( C_mplus*Δy_m1/K_mplus, -Pmax, Pmax ) # Péclet number
+    P_mplus = clamp( C_mplus * Δy_m1 / K_mplus,  - Pmax, Pmax ) # Péclet number
 
     return f_mplushalf * ( @fastmath exp( P_mplus ) ) / ( ϕminus(C_m, Δy_m2, K_m) - ϕplus(C_mplus, Δy_m1, K_mplus) )
 end
@@ -101,8 +106,8 @@ function A_m( f_mplushalf::Float64,
                  K_mminus::Float64
                  )
     # Péclet numbers:
-    P_m_plus  = clamp( C_m*Δy_m2/K_m, -Pmax, Pmax )
-    P_m_minus = clamp( C_m*Δy_m3/K_m, -Pmax, Pmax )
+    P_m_plus  = clamp( C_m * Δy_m2 / K_m,  - Pmax, Pmax )
+    P_m_minus = clamp( C_m * Δy_m3 / K_m,  - Pmax, Pmax )
 
     A_m = ( f_mplushalf * ( @fastmath exp( - P_m_plus ) ) / ( ϕminus(C_m, Δy_m2, K_m) - ϕplus(C_mplus, Δy_m1, K_mplus) )
         +   f_mminushalf * ( @fastmath exp( P_m_minus ) ) / ( ϕminus(C_mminus, Δy_m4, K_mminus) - ϕplus(C_m, Δy_m3, K_m)) )
@@ -130,8 +135,8 @@ function A_mminus( f_mminushalf::Float64,
                        K_mminus::Float64
                        )
 
-    P_mminus = clamp( C_mminus*Δy_m4/K_mminus, -Pmax, Pmax ) # Péclet number
+    P_mminus = clamp( C_mminus * Δy_m4 / K_mminus,  - Pmax, Pmax ) # Péclet number
 
-    return f_mminushalf * ( @fastmath exp( -P_mminus ) ) / ( ϕminus(C_mminus, Δy_m4, K_mminus) - ϕplus(C_m, Δy_m3, K_m) )
+    return f_mminushalf * ( @fastmath exp( - P_mminus ) ) / ( ϕminus(C_mminus, Δy_m4, K_mminus) - ϕplus(C_m, Δy_m3, K_m) )
 end
 

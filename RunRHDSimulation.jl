@@ -27,7 +27,7 @@ z::Float64                         =  0.0           # Redshift
 DG₀::Float64                       =  1.0 * DGsun   # Dust-to-gas ratio (NOTE: *not* normalized to Solar value. To get e.g. Solar, set DG₀ = DGsun)
 Zgas_Zsun::Float64                 =  1.0           # Gas metallicity in Solar units 
 nH₀::Float64                       =  3e3           # Initial cloud density (cm⁻³)
-nH_ext::Float64                    =  1e-7 * nH₀    # Initial density far outside the cloud (cm⁻³)
+nH_ext::Float64                    =  1e-5 * nH₀    # Initial density far outside the cloud (cm⁻³)
 T₀::Float64                        =  500           # Initial cloud temperature (K)
 T_ext::Float64                     =  500           # Temperature outside the cloud 
 Rcl::Float64                       =  2 * pc        # Radius of cloud (i.e. high-density region)
@@ -40,10 +40,10 @@ u_RMSturb::Float64                 =  3 * kms       # Initial RMS turbulence vel
 # for the r-logarithmic grid (if used), but the Z-logarithmic grid (if used) stretches in both directions, with 
 # N_Z_log_side cells per side (upper logarithmic region, and lower logarithmic region).
 
-Rmax_lin::Float64                  =  3 * pc        # Uniform/linear grid out to cylindrical r = Rmax_lin 
+Rmax_lin::Float64                  =  6 * pc        # Uniform/linear grid out to cylindrical r = Rmax_lin 
 LZ_uniform::Float64                =  6 * pc        # Total extent of uniform grid along the Z-axis.  
-Rmax::Float64                      =  10 * pc       # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
-Zmax::Float64                      =  10 * pc       # Maximum extent along Z-axis. Should be ≥ LZ_uniform.
+Rmax::Float64                      =  6 * pc        # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
+Zmax::Float64                      =  6 * pc        # Maximum extent along Z-axis. Should be ≥ LZ_uniform.
 N_r_lin::Int                       =  64            # Number of cells along r-direction in the uniform grid section 
 N_Z_lin::Int                       =  64            # Number of cells along Z-direction in the uniform grid section 
 N_r_log::Int                       =  0             # Number of cells along r-direction in the logarithmic grid section 

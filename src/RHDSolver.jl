@@ -792,10 +792,10 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
         # Limit from Radiation pressure acceleration time-scale:
         if RadPressure 
             if Lyα
-                Δt_RP = min( GetRadPressureTimeStep( r, Z, ρ, LyαState.f_Lyα_r, LyαState.f_Lyα_Z ),
-                             GetRadPressureTimeStep( r, Z, ρ, RT.f_stellar_r,   RT.f_stellar_Z ) )
+                Δt_RP = min( GetRadPressureTimeStep( r, Z, ρ, ρd, LyαState.f_Lyα_r, LyαState.f_Lyα_Z ),
+                             GetRadPressureTimeStep( r, Z, ρ, ρd, RT.f_stellar_r,   RT.f_stellar_Z ) )
             else
-                Δt_RP = GetRadPressureTimeStep( r, Z, ρ, RT.f_stellar_r,   RT.f_stellar_Z )
+                Δt_RP = GetRadPressureTimeStep( r, Z, ρ, ρd, RT.f_stellar_r,   RT.f_stellar_Z )
             end
         else
             # Ignore limit in absence of radiation pressure feedback:
@@ -1280,10 +1280,10 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         # Limit from Radiation pressure acceleration time-scale:
         if RadPressure 
             if Lyα
-                Δt_RP = min( GetRadPressureTimeStep( r, Z, ρ, LyαState.f_Lyα_r, LyαState.f_Lyα_Z ),
-                             GetRadPressureTimeStep( r, Z, ρ, RT.f_stellar_r,   RT.f_stellar_Z ) )
+                Δt_RP = min( GetRadPressureTimeStep( r, Z, ρ, ρd, LyαState.f_Lyα_r, LyαState.f_Lyα_Z ),
+                             GetRadPressureTimeStep( r, Z, ρ, ρd, RT.f_stellar_r,   RT.f_stellar_Z ) )
             else
-                Δt_RP = GetRadPressureTimeStep( r, Z, ρ, RT.f_stellar_r,   RT.f_stellar_Z )
+                Δt_RP = GetRadPressureTimeStep( r, Z, ρ, ρd, RT.f_stellar_r,   RT.f_stellar_Z )
             end
         else
             # Ignore limit in absence of radiation pressure feedback:

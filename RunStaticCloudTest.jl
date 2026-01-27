@@ -6,11 +6,11 @@ using .StaticCloudTest.ConstantsAndFunctions   # For constants (e.g. unit conver
 
 τcl::Float64   = 1e8    # Cloud Lyα optical depth 
 T₀::Float64    = 1e4    # Cloud temperature (K)
-τabs::Float64  = 0.5    # Cloud continuum absorption optical depth 
+τabs::Float64  = 0.0    # Cloud continuum absorption optical depth 
 pd₀::Float64   = 0.0    # Lyα destruction probability
 rs::Float64    = 1.0    # Relative size of source region, Rs/Rcl
 umax::Float64  = 0.0    # Maximum gas velocity (km s⁻¹) at the cloud edge, assuming Hubble flow
-Recoil::Bool   = true   # Whether atomic recoil is turned on (true) or not (false)
+Recoil::Bool   = false  # Whether atomic recoil is turned on (true) or not (false)
 θhole::Float64 = 0.0    # Angle of any hole in the cloud 
 
 

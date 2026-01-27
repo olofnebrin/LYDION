@@ -9,7 +9,7 @@ yr   = 3.1556926e7
 kyr  = 1e3 * yr
 kms  = 1e5
 
-filename_Lya =  "RHDSim_NoLya_64x64_2026-01-26.h5"
+filename_Lya =  "RHDSim_NoLya_512x512_2026-01-26.h5"
 
 with h5py.File(filename_Lya, "r") as file:
     sigma     = file["VelocityDispersion_History"][:]

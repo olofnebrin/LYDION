@@ -68,13 +68,11 @@ const inv_c::Float64          = 1 / c  # Convenient constant
 end
 
 
-const τ_diff_floor::Float64 = 1.0
-const ψ_fluxlimiter::Float64 = 1.0   # Flux limiter in the highly optically thick regime
+const ψ_fluxlimiter::Float64 = 1.1   # Flux limiter in the highly optically thick regime
 
 """ Computes the HLL fluxes for J, H_r, and H_Z. Uses 
     a correction factor ϵ for the asymptotic diffusion limit for J,
-    important when τ_cell ≳ 1. The correction factor is taken 
-    from Bloch et al. (2021).  """
+    important when τ_cell ≳ 1. """
 @inline function GetFluxHLL( FJ_L::Float64,
                              FJ_R::Float64,
                             FHr_L::Float64, FHr_R::Float64,
@@ -98,13 +96,6 @@ const ψ_fluxlimiter::Float64 = 1.0   # Flux limiter in the highly optically thi
     # Pre-compute some quantities:
     S_R_mult_S_L = S_R * S_L 
     inv_ΔS       = 1 / ( S_R - S_L ) 
-
-    # Get the reduced flux factor f_{i+1/2} = ( f_L + F_R ) / 2:
-    f_L          = sqrt( Hr_L * Hr_L  +  HZ_L * HZ_L ) / max( J_L, Jeps )
-    f_R          = sqrt( Hr_R * Hr_R  +  HZ_R * HZ_R ) / max( J_R, Jeps )
-    f_interface  = 0.5 * ( f_L + f_R )
-    #oneminusf    = max( 1 - f_interface, 0.0 )
-    oneminusf    = 1.0
 
     # Effective cell optical depth & correction factor for diffusion limit:
     τ_cell       = τ_L + τ_R 

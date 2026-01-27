@@ -287,7 +287,7 @@ else:
     raise ValueError(f"Unknown left_panel_mode={left_panel_mode!r}. Use 'map' or 'axis'.")
 
 # --- spectrum panel ---
-ax_spec.set_ylim(0.0, 0.2e-13 )  # adjust if needed
+ax_spec.set_ylim(0.0, 1e-13 )  # adjust if needed
 ax_spec.set_xlabel(r"$\nu$ (Hz)", labelpad=12)
 ax_spec.set_ylabel(r"$J_{Ly\alpha}$", labelpad=12)
 ax_spec.set_xlim(nuC_plot.min(), nuC_plot.max())

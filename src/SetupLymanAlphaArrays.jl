@@ -71,6 +71,10 @@ function GenerateLyαArrays( c_Lyα::Float64,
     # Get bin centers νC:
     νC  = ν[1:end-1] .+ (Δν ./ 2)
 
+    # Store 1 / Δν and 1 / νC, since it is used in frequency factor calculations:
+    inv_Δν = 1 ./ Δν
+    inv_νC = 1 ./ νC
+
     # Get Voigt profile for each cell:
     N_r    = size( T, 1 )
     N_Z    = size( T, 2 )
@@ -174,7 +178,8 @@ function GenerateLyαArrays( c_Lyα::Float64,
                       D_rr_Lyα, D_ZZ_Lyα, D_rZ_Lyα, K_ϕϕ_iphalf_Lyα, K_ϕϕ_imhalf_Lyα, 
                       F_r_Lyα, F_Z_Lyα, F_r_Hr_Lyα, F_Z_Hr_Lyα, F_r_HZ_Lyα, F_Z_HZ_Lyα, 
                       α_Lyα, α_F_Lyα, αc_Lyα, pd, ∫dν_js_Lyα, Hvoigt, ϕ_ν, Fij_kp, Fij_k, Fij_km, 
-                      ν, νC, Δν, kcore_min, kcore_max,
+                      ν, νC, Δν, inv_Δν, inv_νC,
+                      kcore_min, kcore_max,
                       Recoil, LyαDestruction, α_Lyα_floor, Δρu_Lyα_r, Δρu_Lyα_Z, f_Lyα_r, f_Lyα_Z,
                       rfirst_Lyα,
                       M_F, M_F_antigravity, L_Lyα, f_esc_Lyα )

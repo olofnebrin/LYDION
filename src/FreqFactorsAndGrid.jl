@@ -61,52 +61,56 @@ const h_over_kB::Float64   = h    / kB
         REC_ONOFF = 0.0
     end
 
-    @inbounds begin 
-        @threads for i in dN_r
-            for j in dN_Z
+    @threads :static for k in dN_ν_int 
+        # Get intervals:
+        @inbounds Δy_m1     = Lyα.νC[k+1] - Lyα.ν[k+1]
+        @inbounds Δy_m2     = Lyα.ν[k+1]  - Lyα.νC[k]
+        @inbounds Δy_m3     = Lyα.νC[k]   - Lyα.ν[k]
+        @inbounds Δy_m4     = Lyα.ν[k]    - Lyα.νC[k-1]
+
+        # Inverses of Δν and νC are also needed:
+        @inbounds Inv_Δν    = Lyα.inv_Δν[k]
+        @inbounds Inv_νC_k  = Lyα.inv_νC[k]
+        @inbounds Inv_νC_kp = Lyα.inv_νC[k+1]
+        @inbounds Inv_νC_km = Lyα.inv_νC[k-1]
+
+        for j in dN_Z
+            @inbounds for i in dN_r 
+
                 Δν_D       = b(T[i,j]) * νLyα_over_c                                  # Doppler width Δν_D = (b / c) νLyα
                 PREFACT    = 0.5 * max( Lyα.α_Lyα[i,j], Lyα.α_Lyα_floor ) * (Δν_D^2)  
                 RECOIL_0   = h_over_kB / T[i,j]                                       # Recoil factor h / (kB * T)
 
-                for k in dN_ν_int
-                    # The Doppler factor (D:∇u)/c ( → (∇⋅u)/(3c) for isotropic intensity):
-                    Drr        = Float64( Lyα.D_rr_Lyα[i,j,k] )
-                    DrZ        = Float64( Lyα.D_rZ_Lyα[i,j,k] )
-                    DZZ        = Float64( Lyα.D_ZZ_Lyα[i,j,k] )
-                    D_colon_∇u = D_colon_∇u_Cylindrical( Drr,           DrZ,             DZZ,
-                                                         ∂u_r_∂r[i,j],  ∂u_r_∂Z[i,j],    ∂u_Z_∂r[i,j],
-                                                         ∂u_Z_∂Z[i,j],  u_r_over_r[i,j] )
-                    VELOCITY   = D_colon_∇u * inv_c 
 
-                    # Get K and C:
-                    Kjp            = PREFACT  * Lyα.Hvoigt[i, j, k+1] 
-                    Kj             = PREFACT  * Lyα.Hvoigt[i, j, k]    
-                    Kjm            = PREFACT  * Lyα.Hvoigt[i, j, k-1]
-                    Cjp            = VELOCITY * Lyα.νC[k]  +  REC_ONOFF * PREFACT * Lyα.Hvoigt[i, j, k+1] * ( RECOIL_0 -  2 / Lyα.νC[k+1] )
-                    Cj             = VELOCITY * Lyα.νC[k]  +  REC_ONOFF * PREFACT * Lyα.Hvoigt[i, j, k] * ( RECOIL_0  -  2 / Lyα.νC[k] ) 
-                    Cjm            = VELOCITY * Lyα.νC[k]  +  REC_ONOFF * PREFACT * Lyα.Hvoigt[i, j, k-1] * ( RECOIL_0  -  2 / Lyα.νC[k-1] ) 
+                # The Doppler factor (D:∇u)/c ( → (∇⋅u)/(3c) for isotropic intensity):
+                Drr        = Float64( Lyα.D_rr_Lyα[i,j,k] )
+                DrZ        = Float64( Lyα.D_rZ_Lyα[i,j,k] )
+                DZZ        = Float64( Lyα.D_ZZ_Lyα[i,j,k] )
+                D_colon_∇u = D_colon_∇u_Cylindrical( Drr,           DrZ,             DZZ,
+                                                     ∂u_r_∂r[i,j],  ∂u_r_∂Z[i,j],    ∂u_Z_∂r[i,j],
+                                                     ∂u_Z_∂Z[i,j],  u_r_over_r[i,j] )
+                VELOCITY   = D_colon_∇u * inv_c 
 
-                    # Get intervals:
-                    Δy_m1          = Lyα.νC[k+1] - Lyα.ν[k+1]
-                    Δy_m2          = Lyα.ν[k+1]  - Lyα.νC[k]
-                    Δy_m3          = Lyα.νC[k]   - Lyα.ν[k]
-                    Δy_m4          = Lyα.ν[k]    - Lyα.νC[k-1]
+                # Get K and C:
+                Kjp            = PREFACT  * Lyα.Hvoigt[i, j, k+1] 
+                Kj             = PREFACT  * Lyα.Hvoigt[i, j, k]   
+                Kjm            = PREFACT  * Lyα.Hvoigt[i, j, k-1] 
+                Cjp            = VELOCITY * Lyα.νC[k]  +  REC_ONOFF * PREFACT * Lyα.Hvoigt[i, j, k+1] * ( RECOIL_0  -  2 * Inv_νC_kp )
+                Cj             = VELOCITY * Lyα.νC[k]  +  REC_ONOFF * PREFACT * Lyα.Hvoigt[i, j, k] * ( RECOIL_0    -  2 * Inv_νC_k ) 
+                Cjm            = VELOCITY * Lyα.νC[k]  +  REC_ONOFF * PREFACT * Lyα.Hvoigt[i, j, k-1] * ( RECOIL_0  -  2 * Inv_νC_km ) 
 
-                    # FREQUENCY FACTORS F_{i,j,k}^+, F_{i,j,k}, F_{i,j,k}^- :
-                    Inv_Δν             = 1 / Lyα.Δν[k] 
-    
-                    Lyα.Fij_kp[i,j,k]  = A_mplus( Inv_Δν, Δy_m1, Δy_m2, Cj, Kj, Cjp, Kjp )
+                # FREQUENCY FACTORS F_{i,j,k}^+, F_{i,j,k}, F_{i,j,k}^- :    
+                Lyα.Fij_kp[i,j,k]  = A_mplus( Inv_Δν, Δy_m1, Δy_m2, Cj, Kj, Cjp, Kjp )
        
-                    Lyα.Fij_k[i,j,k]   = A_m( Inv_Δν, Inv_Δν, Δy_m1, Δy_m2, Δy_m3, Δy_m4, 
+                Lyα.Fij_k[i,j,k]   = A_m( Inv_Δν, Inv_Δν, Δy_m1, Δy_m2, Δy_m3, Δy_m4, 
                                               Cj, Kj, Cjp, Kjp, Cjm,  Kjm )
     
-                    Lyα.Fij_km[i,j,k]  = A_mminus( Inv_Δν, Δy_m3, Δy_m4, Cj, Kj, Cjm, Kjm )    
+                Lyα.Fij_km[i,j,k]  = A_mminus( Inv_Δν, Δy_m3, Δy_m4, Cj, Kj, Cjm, Kjm )   
 
-                end # End of k-loop (frequency)
-            end # End of j-loop 
-        end # End of i-loop 
+            end # End of i-loop 
+        end # End of j-loop 
+    end # End of k-loop (frequency)
 
-    end # End of inbounds 
 
     return nothing 
 end
