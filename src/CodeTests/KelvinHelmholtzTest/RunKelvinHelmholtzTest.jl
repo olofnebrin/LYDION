@@ -4,7 +4,7 @@ using .KelvinHelmholtzTest         # The Kelvin-Helmholtz test setup
 
 
 tmax::Float64                      =  5.0
-N_X::Int                           =  128
+N_X::Int                           =  512
 N_Y::Int                           =  N_X
 Nminsteps::Int                     =  300
 Nmaxsteps::Int                     =  100000

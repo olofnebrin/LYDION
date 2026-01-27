@@ -22,7 +22,7 @@ include("./CosmicRays.jl")
 
 
 const CFL_RT::Float64                  = 0.4   # CFL factor that determines the advection time-step for stellar, IR & Lyα RT (Default: 0.4. NOTE: Must be < 1)
-const DEBUG_PhotoThermoChemistry::Bool = false # Allow safety checks for physical values etc. Cheap & good for tracking bugs.
+const DEBUG_PhotoThermoChemistry::Bool = true  # Allow safety checks for physical values etc. Cheap & good for tracking bugs.
 
 
 # Export constants and functions: 
@@ -1695,7 +1695,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
 
     # Otherwise print error:
     error( """ ThermoChemistrySubStepUpdate could not converge within $(max_iter) iterations in cell (i,j) = ($(icell),$(jcell)),
-               and simulation has therefore terminated.
+               and simulation has therefore terminated. ρ = $(ρ_old), ρd = $(ρd_old).
                
                Relative changes in quantities in this cell during the final attempted sub-cycle time-step were:
                

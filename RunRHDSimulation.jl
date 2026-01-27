@@ -16,7 +16,7 @@ Nmaxsteps::Int                     =  100000       # Maximum number of time-step
 #########################################################################
 
 mstarZAMS::Float64                 =  35            # Initial mass of the star (M⊙)
-Zstar_Zsun::Float64                =  1.0           # Metallicity of the star in Solar units 
+Zstar_Zsun::Float64                =  0.0           # Metallicity of the star in Solar units 
 σstar_cell::Float64                =  4             # Gaussian size of stellar emission region in cell size units (≳ 4 for approximately spherical H II regions)
 
 #########################################################################
@@ -24,8 +24,8 @@ Zstar_Zsun::Float64                =  1.0           # Metallicity of the star in
 #########################################################################
 
 z::Float64                         =  0.0           # Redshift 
-DG₀::Float64                       =  1.0 * DGsun   # Dust-to-gas ratio (NOTE: *not* normalized to Solar value. To get e.g. Solar, set DG₀ = DGsun)
-Zgas_Zsun::Float64                 =  1.0           # Gas metallicity in Solar units 
+DG₀::Float64                       =  0.0 * DGsun   # Dust-to-gas ratio (NOTE: *not* normalized to Solar value. To get e.g. Solar, set DG₀ = DGsun)
+Zgas_Zsun::Float64                 =  Zstar_Zsun    # Gas metallicity in Solar units 
 nH₀::Float64                       =  3e3           # Initial cloud density (cm⁻³)
 nH_ext::Float64                    =  1e-5 * nH₀    # Initial density far outside the cloud (cm⁻³)
 T₀::Float64                        =  500           # Initial cloud temperature (K)

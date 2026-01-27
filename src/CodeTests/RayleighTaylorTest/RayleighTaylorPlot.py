@@ -4,11 +4,30 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
 
+from pathlib import Path
+import sys
+
+def add_cmastro_to_path():
+    here = Path(__file__).resolve()
+    # Walk upwards until we find the repo-relative path src/cmastro/src
+    for parent in [here.parent, *here.parents]:
+        candidate = parent / "src" / "cmastro" / "src"
+        if (candidate / "cmastro" / "__init__.py").exists():
+            sys.path.insert(0, str(candidate))
+            return str(candidate)
+    raise RuntimeError("Could not find src/cmastro/src containing cmastro/__init__.py")
+
+cmastro_path = add_cmastro_to_path()
+import cmastro
+
+
+
 # ---------------- User inputs ----------------
 script_dir = os.path.dirname(os.path.abspath(__file__))
-filename   = os.path.join(script_dir, "RayleighTaylor_512x1536_t15.00.h5")
+#filename   = os.path.join(script_dir, "RayleighTaylor_512x1536_t15.00.h5")
+filename   = os.path.join(script_dir, "RayleighTaylor_256x768_t15.00.h5")
 SaveFigure = True
-outname    = os.path.join(script_dir, "RayleighTaylorDensity_4snapshots.png")
+outname    = os.path.join(script_dir, "RayleighTaylorDensity_4snapshots.pdf")
 # ---------------------------------------------
 
 # --- Read data ---
@@ -62,7 +81,7 @@ if len(np.unique(indices)) < 4:
 print("Using indices:", indices, "Times:", t[indices])
 
 ###############################################################
-#######           Appearance Settings (same as before)   ######
+#######           P L O T  C O S M E T I C S             ######
 ###############################################################
 
 plt.rc('font', **{'sans-serif': ['AVHershey Complex'], 'size': 37})
@@ -88,8 +107,8 @@ plt.rcParams['xtick.major.pad'] = '15'
 plt.rcParams['ytick.major.pad'] = '15'
 
 plt.rcParams['legend.frameon'] = False
-plt.rcParams['axes.linewidth'] = 2.5
-plt.rcParams['grid.linewidth'] = 2.5
+plt.rcParams['axes.linewidth'] = 2.2
+plt.rcParams['grid.linewidth'] = 2.2
 plt.rcParams['grid.linestyle'] = '--'
 
 # Make ticks appear on all sides and point inwards
@@ -101,7 +120,7 @@ plt.rcParams['xtick.direction'] = 'in'
 plt.rcParams['ytick.direction'] = 'in'
 
 ###############################################################
-#######               Figure + Panels (tighter)           #####
+#######               Figure + Panels                     #####
 ###############################################################
 
 vmin_rho = np.min(rho_hist)
@@ -126,7 +145,8 @@ for n, (ax, idx) in enumerate(zip(axes, indices)):
     im = ax.pcolormesh(
         X, Y, frame,
         vmin=vmin_rho, vmax=vmax_rho,
-        shading='auto', cmap='viridis'
+        shading='auto', cmap='cma:laguna',
+        rasterized=True
     )
     if im0 is None:
         im0 = im
@@ -166,13 +186,13 @@ fig.subplots_adjust(
 )
 
 # Colorbar
-cbar = fig.colorbar(im0, ax=axes, pad=0.015, shrink=0.92)
+cbar = fig.colorbar(im0, ax=axes, pad=0.015, shrink=1.0)
 cbar.set_label(r"$\rho$", fontsize=28)
 cbar.ax.tick_params(labelsize=20)
 
 # Save
 if SaveFigure:
-    plt.savefig(outname, dpi=600, bbox_inches="tight")
+    plt.savefig(outname, dpi=300, bbox_inches="tight")
     print("Saved:", outname)
 else:
     plt.show()

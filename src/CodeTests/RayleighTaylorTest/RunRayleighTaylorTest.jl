@@ -4,7 +4,7 @@ using .RayleighTaylorTest         # The Kelvin-Helmholtz test setup
 
 
 tmax::Float64                      =  15.0
-N_X::Int                           =  64
+N_X::Int                           =  256
 N_Y::Int                           =  3 * N_X
 Nminsteps::Int                     =  300
 Nmaxsteps::Int                     =  100000

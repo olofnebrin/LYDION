@@ -16,6 +16,7 @@ using  Base.Threads              # For CPU acceleration
 export PreparePassiveScalars!, RecoverChemistryFromPassiveScalars!
 
 
+const Zgas_Zsun_floor::Float64 = 1e-10
 
 """ This function prepares all passive scalars for advection. """
 @views function PreparePassiveScalars!( HydroState::HydrodynamicsState, 
@@ -42,14 +43,14 @@ export PreparePassiveScalars!, RecoverChemistryFromPassiveScalars!
     @. S[:,:,7]  = ρ * Chemistry.xDI_adv 
     @. S[:,:,8]  = ρ * Chemistry.xDII
     @. S[:,:,9]  = ρ * Chemistry.xHD 
-    @. S[:,:,10] = ρ * Chemistry.xCHx_adv * Chemistry.Zgas_Zsun
-    @. S[:,:,11] = ρ * Chemistry.xCI      * Chemistry.Zgas_Zsun
-    @. S[:,:,12] = ρ * Chemistry.xCII     * Chemistry.Zgas_Zsun
-    @. S[:,:,13] = ρ * Chemistry.xCO      * Chemistry.Zgas_Zsun
-    @. S[:,:,14] = ρ * Chemistry.xOHx_adv * Chemistry.Zgas_Zsun
-    @. S[:,:,15] = ρ * Chemistry.xOI      * Chemistry.Zgas_Zsun
-    @. S[:,:,16] = ρ * Chemistry.xOII     * Chemistry.Zgas_Zsun
-    @. S[:,:,17] = ρ * Chemistry.Zgas_Zsun
+    @. S[:,:,10] = ρ * Chemistry.xCHx_adv * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
+    @. S[:,:,11] = ρ * Chemistry.xCI      * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
+    @. S[:,:,12] = ρ * Chemistry.xCII     * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
+    @. S[:,:,13] = ρ * Chemistry.xCO      * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
+    @. S[:,:,14] = ρ * Chemistry.xOHx_adv * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
+    @. S[:,:,15] = ρ * Chemistry.xOI      * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
+    @. S[:,:,16] = ρ * Chemistry.xOII     * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
+    @. S[:,:,17] = ρ * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
 
     return nothing 
 end
@@ -74,10 +75,10 @@ function RecoverChemistryFromPassiveScalars!( HydroState::HydrodynamicsState,
             inv_ρ        = 1 / max( ρ[i,j], ρ_floor )
 
             # Recover gas metallicity:
-            Chemistry.Zgas_Zsun[i,j] = S[i,j,17] * inv_ρ
+            Chemistry.Zgas_Zsun[i,j] = max( S[i,j,17] * inv_ρ,  Zgas_Zsun_floor )
 
             # Another convenient variable:
-            inv_ZgasZsun = 1 / max( Chemistry.Zgas_Zsun[i,j], 1e-10 )
+            inv_ZgasZsun = 1 / Chemistry.Zgas_Zsun[i,j]
 
             # Recover preliminary abundance fractions:
             Chemistry.xHI_adv[i,j]   = S[i,j,1]  * inv_ρ
@@ -127,6 +128,17 @@ function RecoverChemistryFromPassiveScalars!( HydroState::HydrodynamicsState,
             xHD      = $(Chemistry.xHD[i,j])
                 
             Occurred after gas fraction advection, but before renormalization. """
+
+            @assert isfinite(inv_xCtot) """ Non-finite inv_xCtot in cell (i,j)=($i,$j)
+                
+            xCHx_adv  = $(Chemistry.xCHx_adv[i,j])
+            xCI       = $(Chemistry.xCI[i,j])
+            xCII      = $(Chemistry.xCII[i,j])
+            xCO       = $(Chemistry.xCO[i,j])
+            Zgas_Zsun = $(Chemistry.Zgas_Zsun[i,j])
+                
+            Occurred after gas fraction advection, but before renormalization. """
+
 
             # Normalize hydrogen species (H I is not needed after advection):
             Chemistry.xHII[i,j]   = Chemistry.xHII[i,j]   * inv_xHtot

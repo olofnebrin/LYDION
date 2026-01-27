@@ -5,6 +5,24 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 import matplotlib.patheffects as pe
 
+
+from pathlib import Path
+import sys
+
+def add_cmastro_to_path():
+    here = Path(__file__).resolve()
+    # Walk upwards until we find the repo-relative path src/cmastro/src
+    for parent in [here.parent, *here.parents]:
+        candidate = parent / "src" / "cmastro" / "src"
+        if (candidate / "cmastro" / "__init__.py").exists():
+            sys.path.insert(0, str(candidate))
+            return str(candidate)
+    raise RuntimeError("Could not find src/cmastro/src containing cmastro/__init__.py")
+
+cmastro_path = add_cmastro_to_path()
+import cmastro
+
+
 # ---------------- User inputs ----------------
 script_dir = os.path.dirname(os.path.abspath(__file__))
 filename   = os.path.join(script_dir, "KelvinHelmholtz_Nx1024_Ny1024_t5.00.h5") 
@@ -127,7 +145,7 @@ print(f"rho range over all snapshots: [{vmin_rho:.3e}, {vmax_rho:.3e}]")
 im_rho = ax.pcolormesh(
     XX, YY, rho_hist[0].T,
     vmin=vmin_rho, vmax=vmax_rho,
-    shading='auto', cmap='Spectral'
+    shading='auto', cmap='cma:laguna',
 )
 cb_rho = fig.colorbar(im_rho, ax=ax, pad=0.02, shrink=0.7)
 cb_rho.set_label(r"$\rho$")

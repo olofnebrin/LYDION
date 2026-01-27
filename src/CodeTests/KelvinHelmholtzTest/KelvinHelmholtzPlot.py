@@ -4,11 +4,28 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
 
+from pathlib import Path
+import sys
+
+def add_cmastro_to_path():
+    here = Path(__file__).resolve()
+    # Walk upwards until we find the repo-relative path src/cmastro/src
+    for parent in [here.parent, *here.parents]:
+        candidate = parent / "src" / "cmastro" / "src"
+        if (candidate / "cmastro" / "__init__.py").exists():
+            sys.path.insert(0, str(candidate))
+            return str(candidate)
+    raise RuntimeError("Could not find src/cmastro/src containing cmastro/__init__.py")
+
+cmastro_path = add_cmastro_to_path()
+import cmastro
+
+
 # ---------------- User inputs ----------------
 script_dir = os.path.dirname(os.path.abspath(__file__))
-filename   = os.path.join(script_dir, "KelvinHelmholtz_Nx1024_Ny1024_t5.00.h5") 
+filename   = os.path.join(script_dir, "KelvinHelmholtz_Nx512_Ny512_t5.00.h5") 
 SaveFigure = True
-outname    = os.path.join(script_dir, "KelvinHelmholtzDensity_4snapshots.png")
+outname    = os.path.join(script_dir, "KelvinHelmholtzDensity_4snapshots.pdf")
 # ---------------------------------------------
 
 
@@ -134,7 +151,8 @@ for n, (ax, idx) in enumerate(zip(axes, indices)):
     im = ax.pcolormesh(
         XX, YY, rho,
         vmin=vmin_rho, vmax=vmax_rho,
-        shading='auto', cmap='Spectral'
+        shading='auto', cmap='cma:laguna',
+        rasterized=True
     )
     if im0 is None:
         im0 = im
@@ -171,7 +189,7 @@ for n, (ax, idx) in enumerate(zip(axes, indices)):
     )
 
 # Shared colorbar
-cbar = fig.colorbar(im0, ax=axes, pad=0.02, shrink=0.85)
+cbar = fig.colorbar(im0, ax=axes, pad=0.02, shrink=1.0)
 cbar.set_label(r"$\rho$")
 
 #fig.suptitle("Kelvin–Helmholtz Instability: Density Snapshots", y=0.98)

@@ -51,8 +51,8 @@ function CarbonOxygenChemistry( xOI_old::Float64,
     # Densities:
     nCI_old     = xCI_old  * nC         
     nCHx_old    = xCHx_old * nC         
-    nOI_old     = xOI_old  * nO       
-
+    nOI_old     = xOI_old  * nO    
+    
     # Limit nH₃⁺ in extreme cases:
     nH          = nHI_new + nHII_new + 2 * nH2_new
     nH3plus_max = nH / 3

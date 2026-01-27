@@ -6,10 +6,20 @@ from matplotlib.colors import LogNorm, Normalize
 from matplotlib.gridspec import GridSpec
 import matplotlib.patheffects as pe
 from matplotlib.ticker import MultipleLocator  # add this import
+from pathlib import Path
+import sys
+
+repo_root = Path(__file__).resolve().parent
+cmastro_src = repo_root / "src" / "cmastro" / "src"
+
+sys.path.insert(0, str(cmastro_src))
+
+import cmastro
+
 
 
 # ---------------- user inputs ----------------
-filename = "RHDSim_NoLya_512x512_2026-01-26.h5"       
+filename = "RHDSim_NoLya_64x64_2026-01-26.h5"       
 frameskip = 1                 
 save_mp4 = True               
 outname = "density_T.mp4"
@@ -127,7 +137,7 @@ norm_nH = LogNorm(vmin=vmin_nH, vmax=vmax_nH)
 vmin_T, vmax_T = 1, 1e5
 norm_T = LogNorm(vmin=vmin_T, vmax=vmax_T)
 
-vmin_DG, vmax_DG = 0.01, 10
+vmin_DG, vmax_DG = 0.1, 10
 norm_DG = LogNorm(vmin=vmin_DG, vmax=vmax_DG)
 
 vmin_x, vmax_x = 1e-8, 1.0
@@ -147,7 +157,7 @@ ax3.tick_params(labelbottom=False)
 
 # --- density ---
 ax1.set_ylabel("Z (pc)", labelpad=12)
-im_nH = ax1.pcolormesh(R, ZZ, nH_hist[0].T, norm=norm_nH, shading='auto', cmap='viridis')
+im_nH = ax1.pcolormesh(R, ZZ, nH_hist[0].T, norm=norm_nH, shading='auto', cmap='cma:laguna')
 cb1 = fig.colorbar(im_nH, ax=ax1, pad=0.02)
 #cb1.set_ticks([10, 1e3, 1e5, 1e7, 1e9])
 #cb1.set_ticks([1e3, 1e5, 1e7, 1e9])
@@ -176,12 +186,12 @@ ax2.text(0.9, 0.9, "T (K)", transform=ax2.transAxes, **panel_label_style)
 # --- Dust-to-gas ratio ---
 ax3.tick_params(labelleft=False)
 im_xH2 = ax3.pcolormesh(R, ZZ, np.clip(DG_hist[0].T, vmin_DG, vmax_DG),
-                        norm=norm_DG, shading='auto', cmap='gist_heat')
+                        norm=norm_DG, shading='auto', cmap='cma:emph')
 
 cb3 = fig.colorbar(im_xH2, ax=ax3, pad=0.02)
-cb3.set_ticks([0.01, 0.1, 1, 10])
+cb3.set_ticks([0.1, 1, 10])
 #cb3.set_ticks([1e-8, 1e-6, 1e-4, 0.01, 1])
-cb3.set_ticklabels(['0.01', '0.1', '1', '10'])
+cb3.set_ticklabels(['0.1', '1', '10'])
 #cb3.set_ticklabels(['10$^{-8}$', '10$^{-6}$', '10$^{-4}$', '0.01', '1'])
 ax3.text(0.9, 0.9, "D/D$_{\odot}$", transform=ax3.transAxes, **panel_label_style)
 
@@ -198,7 +208,7 @@ ax4.text(0.9, 0.9, "x$_{HII}$", transform=ax4.transAxes, **panel_label_style)
 # --- time label ---
 time_style = dict(ha='left', va='top', color='white',
                   path_effects=[pe.withStroke(linewidth=3, foreground='black')])
-txt = ax1.text(0.1, 0.9, "", fontsize=28, transform=ax1.transAxes, **time_style)
+txt = ax1.text(0.5, 0.9, "", fontsize=28, transform=ax1.transAxes, **time_style)
 
 # --- frames to animate: only where data exists ---
 frames = saved_idx[::frameskip]
