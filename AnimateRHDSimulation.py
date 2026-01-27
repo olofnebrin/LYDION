@@ -19,7 +19,7 @@ import cmastro
 
 
 # ---------------- user inputs ----------------
-filename = "RHDSim_NoLya_64x64_2026-01-26.h5"       
+filename = "RHDSim_NoLya_64x64_2026-01-27.h5"       
 frameskip = 1                 
 save_mp4 = True               
 outname = "density_T.mp4"

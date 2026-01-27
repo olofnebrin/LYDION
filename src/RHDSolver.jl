@@ -137,8 +137,6 @@ function UpdateRHD!( Δt_Hydro::Float64,
     #######                                                 #######
     ###############################################################
 
-    println("xCI before:", chemstate.xCI[1,1])
-
     if Hydro
         # Prepare passive scalars before we advect them:
         PreparePassiveScalars!( hydrostate, chemstate )
@@ -160,8 +158,6 @@ function UpdateRHD!( Δt_Hydro::Float64,
         # Recover abundance fractions from passive scalars (needed before sub-cycling):
         RecoverChemistryFromPassiveScalars!( hydrostate, chemstate )
     end
-
-    println("xCI after:", chemstate.xCI[1,1])
 
     # Gravity solver + kick update:
     if Gravity && Hydro 
