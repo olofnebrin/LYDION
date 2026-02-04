@@ -58,8 +58,9 @@ function CreateGravityStateAndCoefficients( A_r::AbstractArray{Float64, 2},
     f_gravity_r = zeros( Float64, N_r, N_Z )
     f_gravity_Z = zeros( Float64, N_r, N_Z )
 
-    # Vectors for storing Legendre polynomials & multipole moments (for use in BCs)
-    P           = zeros( Float64, ℓmax + 1 )
+    # Vectors for storing Legendre polynomials & multipole moments (for use in BCs):
+    nthreads    = Threads.maxthreadid()                  # Number of threads
+    P           = zeros( Float64, ℓmax + 1, nthreads )   # Create one array for each thread to avoid race conditions
     Q           = zeros( Float64, ℓmax + 1 )
 
     # Initialize coefficients for the Poisson equation:
@@ -180,8 +181,8 @@ end
 
 """ This function computes the multipole moments:
     
-    Qℓ ≡ ∫dV R^ℓ Pℓ(x) 
-       ≈ ∑_{i,j} ΔV_{i,j} (R_{i,j})^ℓ Pℓ(x_{i,j}),
+    Qℓ ≡ ∫dV ρ R^ℓ Pℓ(x) 
+       ≈ ∑_{i,j} ΔV_{i,j} ρ_{i,j} (R_{i,j})^ℓ Pℓ(x_{i,j}),
        
     where x = Z / R. """
 function ComputeMultiPoleMoments!( Q::AbstractArray{Float64, 1},
@@ -251,13 +252,45 @@ function ComputeMultiPoleMoments!( Q::AbstractArray{Float64, 1},
 end
 
 
+""" This function computes the multipole-expanded potential at a given 
+    position (rCoM, ZCoM), expanded around Z = Zc. """
+function Get_Φ_Multipole( P::AbstractArray{Float64, 1}, 
+                          Q::AbstractArray{Float64, 1}, 
+                       rCoM::Float64, 
+                       ZCoM::Float64, 
+                         Zc::Float64,
+                       ℓmax::Int )
+
+    R   = sqrt( rCoM * rCoM  +  (ZCoM - Zc) * (ZCoM - Zc) )
+    x   = ( ZCoM - Zc ) / R 
+
+    Get_Pℓ!( P, x, ℓmax ) 
+    inv_R      = 1 / R 
+    inv_Rpower = inv_R     # 1 / R^(ℓ+1), starting at ℓ = 0
+    ∑PQ_over_R = 0.0
+    for ℓ in 0:ℓmax 
+        ∑PQ_over_R += P[ℓ+1] * Q[ℓ+1] * inv_Rpower
+
+        # Update power of R:
+        inv_Rpower *= inv_R
+    end
+
+    # Put it all together to get the boundary potential:
+    Φ_Multipole = - G * ∑PQ_over_R
+
+    return Φ_Multipole
+end
+
+
+""" This function sets the BCs at non-reflective outermost cells (not ghost cells),
+    using multipole expansion. """
 function Set_Φ_BC!( Φ::AbstractArray{Float64, 2},
                     P::AbstractArray{Float64, 1},
                     Q::AbstractArray{Float64, 1},
                  rCoM::AbstractArray{Float64, 1},
                  ZCoM::AbstractArray{Float64, 1},
-                 ℓmax::Int    = 10,
-             BC_Z_bot::Symbol = :Reflect
+                 ℓmax::Int,
+             BC_Z_bot::Symbol
                     )
 
     N_r, N_Z = size( Φ )
@@ -274,70 +307,19 @@ function Set_Φ_BC!( Φ::AbstractArray{Float64, 2},
     end
 
     # OUTER r-BOUNDARY i = N_r:
-    for j in dN_Z 
-        @inbounds begin
-            R   = sqrt( rCoM[N_r] * rCoM[N_r]  +  (ZCoM[j] - zcenter) * (ZCoM[j] - zcenter) )
-            x   = ( ZCoM[j] - zcenter ) / R 
-
-            Get_Pℓ!( P, x, ℓmax ) 
-            inv_R      = 1 / R 
-            inv_Rpower = inv_R     # 1 / R^(ℓ+1), starting at ℓ = 0
-            ∑PQ_over_R = 0.0
-            for ℓ in 0:ℓmax 
-                ∑PQ_over_R += P[ℓ+1] * Q[ℓ+1] * inv_Rpower
-
-                # Update power of R:
-                inv_Rpower *= inv_R
-            end
-
-            # Put it all together to get the boundary potential:
-            Φ[N_r,j] = - G * ∑PQ_over_R
-        end
+    @inbounds for j in dN_Z 
+        Φ[N_r,j] = Get_Φ_Multipole( P, Q, rCoM[N_r], ZCoM[j], zcenter, ℓmax )
     end
 
     # OUTER Z-BOUNDARY j = N_Z:
-    for i in dN_r 
-        @inbounds begin
-            R   = sqrt( rCoM[i] * rCoM[i]  +  (ZCoM[N_Z] - zcenter) * (ZCoM[N_Z] - zcenter) )
-            x   = ( ZCoM[N_Z] - zcenter ) / R 
-
-            Get_Pℓ!( P, x, ℓmax ) 
-            inv_R      = 1 / R 
-            inv_Rpower = inv_R     # 1 / R^(ℓ+1), starting at ℓ = 0
-            ∑PQ_over_R = 0.0
-            for ℓ in 0:ℓmax 
-                ∑PQ_over_R += P[ℓ+1] * Q[ℓ+1] * inv_Rpower
-
-                # Update power of R:
-                inv_Rpower *= inv_R
-            end
-
-            # Put it all together to get the boundary potential:
-            Φ[i,N_Z] = - G * ∑PQ_over_R
-        end
+    @inbounds for i in dN_r 
+        Φ[i,N_Z] = Get_Φ_Multipole( P, Q, rCoM[i], ZCoM[N_Z], zcenter, ℓmax )
     end
 
     # LOWER Z-BOUNDARY j = 1 (only relevant if we don't assume mirror symmetry):
     if BC_Z_bot != :Reflect
-        for i in dN_r 
-            @inbounds begin
-                R   = sqrt( rCoM[i] * rCoM[i]  +  (ZCoM[1] - zcenter) * (ZCoM[1] - zcenter) )
-                x   = ( ZCoM[1] - zcenter ) / R 
-
-                Get_Pℓ!( P, x, ℓmax ) 
-                inv_R      = 1 / R 
-                inv_Rpower = inv_R     # 1 / R^(ℓ+1), starting at ℓ = 0
-                ∑PQ_over_R = 0.0
-                for ℓ in 0:ℓmax 
-                    ∑PQ_over_R += P[ℓ+1] * Q[ℓ+1] * inv_Rpower
-
-                    # Update power of R:
-                    inv_Rpower *= inv_R
-                end
-
-                # Put it all together to get the boundary potential:
-                Φ[i,1] = - G * ∑PQ_over_R
-            end
+        @inbounds for i in dN_r 
+            Φ[i,1] = Get_Φ_Multipole( P, Q, rCoM[i], ZCoM[1], zcenter, ℓmax )
         end
     end
 
@@ -346,7 +328,7 @@ end
 
 
 const Four_π_G::Float64 = Four_π * G   # 4πG
-const tol_Grav::Float64 = 1e-5         # Maximum relative residual tolerance 
+const tol_Grav::Float64 = 1e-6         # Maximum relative residual tolerance 
 const tol_ΔΦ::Float64   = 10 * eps()   # If the relative change in Φ is less than ∼ 10⁻¹⁵ (near round-off errors) we also deem it converged
 const check_every::Int  = 10           # Check for convergence every 10 step (by default)
 
@@ -370,9 +352,9 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
                             rCoM::AbstractArray{Float64, 1},
                             ZCoM::AbstractArray{Float64, 1},
                                Q::AbstractArray{Float64, 1},
-                               P::AbstractArray{Float64, 1},
-                            ℓmax::Int    = 10,
-                        BC_Z_bot::Symbol = :Reflect
+                               P::AbstractArray{Float64, 2},
+                            ℓmax::Int,
+                        BC_Z_bot::Symbol
                                )
 
     # Grid size:
@@ -387,8 +369,8 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
     ρtot      .= ρ  .+  ρd  .+  ρ_bg
 
     # Enforce Dirichlet BC values once before iteration (and keep them fixed)
-    ComputeMultiPoleMoments!( Q, P, ρtot, rCoM, ZCoM, ΔV, ℓmax, BC_Z_bot )
-    Set_Φ_BC!( Φ, P, Q, rCoM, ZCoM, ℓmax, BC_Z_bot )
+    ComputeMultiPoleMoments!( Q, P[:,1], ρtot, rCoM, ZCoM, ΔV, ℓmax, BC_Z_bot )
+    Set_Φ_BC!( Φ, P[:,1], Q, rCoM, ZCoM, ℓmax, BC_Z_bot )
     Φ_half .= Φ 
     Φ_old  .= Φ
 
@@ -535,9 +517,10 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
         if k % check_every == 0
             Residual_max = 0.0 
             ΔΦ_max       = 0.0
+            Φ_floor      = 1e-10 * maximum( abs.(Φ) )
 
-            for j in dN_Z_int
-                for i in dN_r_int
+            for j in dN_Z 
+                for i in dN_r 
                     @inbounds begin
                         # Ensure that ghost points are mirrored:
                         ip1  = min(i+1, N_r)
@@ -545,16 +528,13 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
                         im1  = max(i-1, 1)
                         jm1  = max(j-1, 1)
 
-                        # Scale that determines relative residual if ρ happens to be very small:
-                        #SafetyScale = abs( RPoiss_ij[i,j] + ZPoiss_ij[i,j] ) * abs( Φ[i,j] )
-
                         # Compute relative residual ≡ (∇²Φ - 4πGρ)/4πGρ at (i,j):
-                        Residual = abs(  RPoiss_ijp[i,j] * Φ[ip1,j]  -  RPoiss_ij[i,j] * Φ[i,j]  +  RPoiss_ijm[i,j] * Φ[im1,j]
-                                       + ZPoiss_ijp[i,j] * Φ[i,jp1]  -  ZPoiss_ij[i,j] * Φ[i,j]  +  ZPoiss_ijm[i,j] * Φ[i,jm1]
-                                       - Four_π_G * ρtot[i,j]  ) / ( Four_π_G * ρtot[i,j] )
+                        Residual = abs( ( RPoiss_ijp[i,j] * Φ[ip1,j]  -  RPoiss_ij[i,j] * Φ[i,j]  +  RPoiss_ijm[i,j] * Φ[im1,j]
+                                        + ZPoiss_ijp[i,j] * Φ[i,jp1]  -  ZPoiss_ij[i,j] * Φ[i,j]  +  ZPoiss_ijm[i,j] * Φ[i,jm1] )
+                                        - Four_π_G * ρtot[i,j]  ) / ( Four_π_G * max( ρtot[i,j], ρ_floor ) )
 
                         # Compute relative change (Φ - Φ_old) / Φ_old:
-                        ΔΦ       = abs( Φ[i,j] - Φ_old[i,j] ) / abs( Φ_old[i,j] )
+                        ΔΦ       = abs( Φ[i,j] - Φ_old[i,j] ) / max( abs( Φ_old[i,j] ), Φ_floor )
 
                         # Update maximum residual & relative change found:
                         Residual_max = max( Residual_max, Residual )
@@ -607,9 +587,9 @@ function Update_Φ!( Φ::AbstractArray{Float64, 2},
                  rCoM::AbstractArray{Float64, 1},
                  ZCoM::AbstractArray{Float64, 1},
                     Q::AbstractArray{Float64, 1},
-                    P::AbstractArray{Float64, 1},
-                 ℓmax::Int    = 20,
-             BC_Z_bot::Symbol = :Reflect
+                    P::AbstractArray{Float64, 2},
+                 ℓmax::Int,
+             BC_Z_bot::Symbol
 
                     )
 
@@ -652,18 +632,34 @@ function Update_Φ!( Φ::AbstractArray{Float64, 2},
 end
 
 
-@fastmath function Update_∇Φ!( ∂Φ∂r::AbstractArray{Float64, 2}, 
-                               ∂Φ∂Z::AbstractArray{Float64, 2},
-                                  Φ::AbstractArray{Float64, 2},
-                        f_gravity_r::AbstractArray{Float64, 2},
-                        f_gravity_Z::AbstractArray{Float64, 2},
-                                  ρ::AbstractArray{Float64, 2},
-                               rCoM::AbstractArray{Float64},
-                               ZCoM::AbstractArray{Float64} ) 
+@views function Update_∇Φ!( ∂Φ∂r::AbstractArray{Float64, 2}, 
+                            ∂Φ∂Z::AbstractArray{Float64, 2},
+                               Φ::AbstractArray{Float64, 2},
+                     f_gravity_r::AbstractArray{Float64, 2},
+                     f_gravity_Z::AbstractArray{Float64, 2},
+                               ρ::AbstractArray{Float64, 2},
+                               r::AbstractArray{Float64, 1},
+                               Z::AbstractArray{Float64, 1},
+                            rCoM::AbstractArray{Float64, 1},
+                            ZCoM::AbstractArray{Float64, 1},
+                               P::AbstractArray{Float64, 2},
+                               Q::AbstractArray{Float64, 1},
+                        BC_Z_bot::Symbol,
+                            ℓmax::Int ) 
+
     N_r, N_Z = size( Φ )
     dN_r     = 1:N_r
     dN_Z     = 1:N_Z 
-    dN_rm    = 2:(N_r-1)
+    dN_rint  = 2:(N_r-1)
+
+    if BC_Z_bot == :Reflect
+        # If we have mirror symmetry around Z = 0, we use multipole 
+        # expansion around Z = 0:
+        Zc = 0.0
+    else
+        # If no symmetry, we expand around the center along the Z-axis:
+        Zc = 0.5 * ( ZCoM[end] + ZCoM[1] )
+    end
 
     ##################################################################
     #######                                                    #######
@@ -672,44 +668,67 @@ end
     ##################################################################
 
     @threads for j in dN_Z
+        tid = Threads.threadid() # Get thread ID for P 
 
         @inbounds begin 
-            # Boundary i = 1: Second-order accurate forward difference:
-            h1 = rCoM[2] - rCoM[1]
-            h2 = rCoM[3] - rCoM[2] 
-            A0 = - (2 * h1  +  h2) / (h1 * (h1 + h2))
-            A1 =   (h1 + h2)       / (h1 * h2)
-            A2 = -  h1             / (h2 * (h1 + h2))
-        
-            ∂Φ∂r[1,j] = A0 * Φ[1,j]  +  A1 * Φ[2,j]  +  A2 * Φ[3,j]
+            # Boundary i = 1: 
+            rCoM_0     =  - rCoM[1]   # Mirror ghost point i = 0
+            Φ_0        =  Φ[1,j]      # Reflective BC at ghost point 
 
-            # Interior points (2 ≤ i ≤ N_r): Second-order generalized 
-            # central finite difference:
-            @simd for i in dN_rm 
-                # Coefficients for the second-order differences:
-                Δm  = rCoM[i]   - rCoM[i-1]
-                Δp  = rCoM[i+1] - rCoM[i]
-                am  = - Δp / (Δm * (Δm + Δp))
-                a0  = ( Δp - Δm ) / (Δm * Δp)
-                ap  = Δm / (Δp * (Δm + Δp))
-                
-                # Estimate of derivative: 
-                ∂Φ∂r[i,j] = ap * Φ[i+1,j]  +  a0 * Φ[i,j]  +  am * Φ[i-1,j]
+            # Get ∂ᵣΦ at the interfaces i - 1/2 and i + 1/2 (for i = 1), consistent 
+            # with the Poisson equation discretization:
+            ∂Φ_imhalf  = ( Φ[1,j] - Φ_0 )    / ( rCoM[1] - rCoM_0  )
+            ∂Φ_iphalf  = ( Φ[2,j] - Φ[1,j] ) / ( rCoM[2] - rCoM[1] )
+
+            # Get the weights:
+            Δr         = r[2] - r[1]
+            Stuff      = ( rCoM[1] - r[1] ) / Δr 
+            w_p        = clamp( Stuff, 0.0, 1.0 )  # Clamp for numerical safety 
+            w_m        = 1.0 - Stuff 
+
+            # Cell-averaged ∂ᵣΦ:
+            ∂Φ∂r[1,j]  = w_m * ∂Φ_imhalf  +  w_p * ∂Φ_iphalf
+
+            # Interior points (2 ≤ i ≤ N_r - 1):
+            @simd for i in dN_rint
+
+                # Get ∂ᵣΦ at the interfaces i - 1/2 and i + 1/2, consistent 
+                # with the Poisson equation discretization:
+                ∂Φ_imhalf  = ( Φ[i,j]   - Φ[i-1,j] ) / ( rCoM[i]   - rCoM[i-1] )
+                ∂Φ_iphalf  = ( Φ[i+1,j] - Φ[i,j]   ) / ( rCoM[i+1] - rCoM[i]   )
+
+                # Get the weights:
+                Δr         = r[i+1] - r[i]
+                Stuff      = ( rCoM[i] - r[i] ) / Δr 
+                w_p        = clamp( Stuff, 0.0, 1.0 ) # Clamp for numerical safety 
+                w_m        = 1.0 - Stuff 
+
+                # Cell-averaged ∂ᵣΦ:
+                ∂Φ∂r[i,j]  = w_m * ∂Φ_imhalf  +  w_p * ∂Φ_iphalf
+
             end
 
-            # Boundary i = N_r: Second-order accurate backward difference:
+            # Boundary i = N_r: 
 
-            h1 = rCoM[N_r] - rCoM[N_r-1]
-            h2 = rCoM[N_r-1] - rCoM[N_r-2] 
-            B0 = (2 * h1  +  h2) / (h1 * (h1 + h2))
-            B1 = - (h1 + h2)     / (h1 * h2)
-            B2 =  h1             / (h2 * (h1 + h2)) 
-        
-            ∂Φ∂r[N_r,j] = B0 * Φ[N_r,j]  +  B1 * Φ[N_r-1,j]  +  B2 * Φ[N_r-2,j]
+            rCoM_Np1    =  rCoM[N_r] + (rCoM[N_r] - rCoM[N_r-1])                       # Ghost point N_r + 1
+            Φ_Np1       =  Get_Φ_Multipole( P[:,tid], Q, rCoM_Np1, ZCoM[j], Zc, ℓmax ) # Potential at ghost point 
+
+            # Get ∂ᵣΦ at the interfaces i - 1/2 and i + 1/2, consistent 
+            # with the Poisson equation discretization:
+            ∂Φ_imhalf   = ( Φ[N_r,j] - Φ[N_r-1,j] ) / ( rCoM[N_r] - rCoM[N_r-1]  )
+            ∂Φ_iphalf   = ( Φ_Np1    - Φ[N_r,j]   ) / ( rCoM_Np1  - rCoM[N_r]    )
+
+            # Get the weights:
+            Δr          = r[N_r+1] - r[N_r]
+            Stuff       = ( rCoM[N_r] - r[N_r] ) / Δr 
+            w_p         = clamp( Stuff, 0.0, 1.0 )  # Clamp for numerical safety  
+            w_m         = 1.0 - Stuff 
+
+            # Cell-averaged ∂ᵣΦ:
+            ∂Φ∂r[N_r,j] = w_m * ∂Φ_imhalf  +  w_p * ∂Φ_iphalf
 
         end # End of inbounds 
-    end # End fo j-loop
-
+    end # End of j-loop
 
     ##################################################################
     #######                                                    #######
@@ -717,46 +736,84 @@ end
     #######                                                    #######
     ##################################################################
 
+    # Next we fill in ∂Φ/∂Z. The loop order is optimized here, so slightly 
+    # different structure compared to the loop for ∂Φ/∂r.
+
     @threads for j in dN_Z
+        tid = Threads.threadid() # Get thread ID for P 
+
         @inbounds begin
             if j == 1
-                # Lower boundary: Use forward difference:
-                h1 = ZCoM[2] - ZCoM[1]
-                h2 = ZCoM[3] - ZCoM[2]
-                c0 = - (2 * h1  +  h2) / (h1 * (h1 + h2))
-                c1 =   (h1 + h2)       / (h1 * h2)
-                c2 = -  h1             / (h2 * (h1 + h2))
+                # BOUNDARY j = 1:
+                ZCoM_0     =  - ZCoM[1]   # Mirror ghost point j = 0
 
-                @simd for i in dN_r 
-                    ∂Φ∂Z[i,1] = c0 * Φ[i,1]  +  c1 * Φ[i,2]  +  c2 * Φ[i,3] 
-                end
-            elseif j == N_Z 
-                # Upper boundary: Use backward difference:
-                h1 = ZCoM[N_Z]   - ZCoM[N_Z-1]
-                h2 = ZCoM[N_Z-1] - ZCoM[N_Z-2]
-                d0 =   (2 * h1 + h2) / (h1 * (h1 + h2))
-                d1 = - (h1 + h2)     / (h1 * h2)
-                d2 =    h1           / (h2 * (h1 + h2))
+                # Get the weights:
+                ΔZ         = Z[2] - Z[1]
+                Stuff      = ( ZCoM[1] - Z[1] ) / ΔZ 
+                w_p        = clamp( Stuff, 0.0, 1.0 )  # Clamp for numerical safety 
+                w_m        = 1.0 - Stuff 
 
                 @simd for i in dN_r
-                    ∂Φ∂Z[i,N_Z] = d0 * Φ[i,N_Z]  +  d1 * Φ[i,N_Z-1]  +  d2 * Φ[i,N_Z-2]
+                    if BC_Z_bot == :Reflect 
+                        Φ_0 = Φ[i,1]
+                    else
+                        Φ_0 = Get_Φ_Multipole( P[:,tid], Q, rCoM[i], ZCoM_0, Zc, ℓmax )
+                    end
+
+                    # Get ∂Φ/∂Z at the interfaces j - 1/2 and j + 1/2 (for j = 1), consistent 
+                    # with the Poisson equation discretization:
+                    ∂Φ_jmhalf  = ( Φ[i,1] - Φ_0 )    / ( ZCoM[1] - ZCoM_0  )
+                    ∂Φ_jphalf  = ( Φ[i,2] - Φ[i,1] ) / ( ZCoM[2] - ZCoM[1] )
+
+                    # Cell-averaged ∂Φ/∂Z:
+                    ∂Φ∂Z[i,1]  = w_m * ∂Φ_jmhalf  +  w_p * ∂Φ_jphalf
                 end
+
+            elseif j == N_Z
+                # BOUNDARY j = N_Z:
+                ZCoM_Np1   =  ZCoM[N_Z] + (ZCoM[N_Z] - ZCoM[N_Z-1])   # Ghost point N_Z + 1 by extrapolation
+
+                # Get the weights:
+                ΔZ         = Z[N_Z+1] - Z[N_Z]
+                Stuff      = ( ZCoM[N_Z] - Z[N_Z] ) / ΔZ 
+                w_p        = clamp( Stuff, 0.0, 1.0 )  # Clamp for numerical safety  
+                w_m        = 1.0 - Stuff 
+
+                @simd for i in dN_r
+                    # Get Φ at ghost point:
+                    Φ_Np1       = Get_Φ_Multipole( P[:,tid], Q, rCoM[i], ZCoM_Np1, Zc, ℓmax ) 
+
+                    # Get ∂Φ/∂Z at the interfaces j - 1/2 and j + 1/2 (for j = 1), consistent 
+                    # with the Poisson equation discretization:
+                    ∂Φ_jmhalf   = ( Φ[i,N_Z] - Φ[i,N_Z-1] ) / ( ZCoM[N_Z] - ZCoM[N_Z-1]  )
+                    ∂Φ_jphalf   = ( Φ_Np1    - Φ[i,N_Z] )   / ( ZCoM_Np1  - ZCoM[N_Z]    )
+
+                    # Cell-averaged ∂Φ/∂Z:
+                    ∂Φ∂Z[i,N_Z] = w_m * ∂Φ_jmhalf  +  w_p * ∂Φ_jphalf
+                end
+
             else
-                # Interior points: Use generalized central difference:
-                Δm = ZCoM[j]   - ZCoM[j-1]
-                Δp = ZCoM[j+1] - ZCoM[j]
-                bm = -  Δp        / (Δm * (Δm + Δp))
-                b0 =  ( Δp - Δm ) / (Δm * Δp)
-                bp =    Δm        / (Δp * (Δm + Δp))
+                # INTERIOR POINTS:
+
+                # Get the weights:
+                ΔZ         = Z[j+1] - Z[j]
+                Stuff      = ( ZCoM[j] - Z[j] ) / ΔZ 
+                w_p        = clamp( Stuff, 0.0, 1.0 )  # Clamp for numerical safety  
+                w_m        = 1.0 - Stuff 
 
                 @simd for i in dN_r
-                    ∂Φ∂Z[i,j] = bm * Φ[i,j-1]  +  b0 * Φ[i,j]  +  bp * Φ[i,j+1]
+                    # Get ∂Φ/∂Z at the interfaces j - 1/2 and j + 1/2, consistent 
+                    # with the Poisson equation discretization:
+                    ∂Φ_jmhalf  = ( Φ[i,j]   - Φ[i,j-1] ) / ( ZCoM[j]   - ZCoM[j-1] )
+                    ∂Φ_jphalf  = ( Φ[i,j+1] - Φ[i,j]   ) / ( ZCoM[j+1] - ZCoM[j]   )
+
+                    # Cell-averaged ∂Φ/∂Z:
+                    ∂Φ∂Z[i,j]  = w_m * ∂Φ_jmhalf  +  w_p * ∂Φ_jphalf
                 end
-            end    
+            end
 
         end # End of inbounds 
     end # End of j-loop 
-
 
     # Update gravitational force per unit volume (mainly for tracking):
     @threads for j in dN_Z
@@ -766,9 +823,11 @@ end
         end
     end
 
-    return nothing
+    return nothing 
 end
 
+
+const tol_GravUpdate::Float64 = 1e-6 
 
 """ This function checks whether the residual for the updated 
     density field is large enough that we *should* solve the 
@@ -782,30 +841,42 @@ function ShouldWeUpdateΦ( Φ::AbstractArray{Float64, 2},
                  RPoiss_ijm::AbstractArray{Float64, 2},
                  ZPoiss_ijp::AbstractArray{Float64, 2},
                   ZPoiss_ij::AbstractArray{Float64, 2},
-                 ZPoiss_ijm::AbstractArray{Float64, 2}
+                 ZPoiss_ijm::AbstractArray{Float64, 2},
+                   BC_Z_bot::Symbol
                          )
 
     N_r, N_Z = size( Φ )
-    dN_r     = 1:(N_r-1)
-    dN_Z     = 1:(N_Z-1) 
+    dN_r     = 1:(N_r-1) # Exclude outer boundary cells in check
+
+    if BC_Z_bot == :Reflect 
+        dN_Z  = 1:(N_Z-1) # Exclude only upper boundary cells in check 
+    else
+        dN_Z  = 2:(N_Z-1) # Exclude boundary cells bottom and top boundary cells in check 
+    end  
 
     ShouldWeUpdate::Bool = false  
     for j in dN_Z 
         for i in dN_r 
             @inbounds begin 
-                # Ensure that ghost points are mirrored:
-                ip1  = min(i+1, N_r)
-                jp1  = min(j+1, N_Z)
-                im1  = max(i-1, 1)
-                jm1  = max(j-1, 1)
+                if BC_Z_bot == :Reflect && j == 1
+                    Φ_jm1 = Φ[i,1]  # Reflect 
+                else 
+                    Φ_jm1 = Φ[i,j-1]
+                end
+
+                if i == 1
+                    Φ_im1 = Φ[1,j]  # Reflect
+                else
+                    Φ_im1 = Φ[i-1,j]
+                end
 
                 # Compute Φ':
                 Φ_prime  = ( - Four_π_G * ( ρ[i,j] + ρd[i,j] + ρ_bg[i,j] )
-                             + RPoiss_ijp[i,j] * Φ[ip1,j]  +  RPoiss_ijm[i,j] * Φ[im1,j]
-                             + ZPoiss_ijp[i,j] * Φ[i,jp1]  +  ZPoiss_ijm[i,j] * Φ[i,jm1] ) / ( RPoiss_ij[i,j] + ZPoiss_ij[i,j] )
+                             + RPoiss_ijp[i,j] * Φ[i+1,j]  +  RPoiss_ijm[i,j] * Φ_im1
+                             + ZPoiss_ijp[i,j] * Φ[i,j+1]  +  ZPoiss_ijm[i,j] * Φ_jm1 ) / ( RPoiss_ij[i,j] + ZPoiss_ij[i,j] )
 
                 # Compute measure of error and decide to update if it is large enough:
-                if abs( Φ_prime - Φ[i,j] ) > tol_Grav * abs(Φ[i,j])
+                if abs( Φ_prime - Φ[i,j] ) > tol_GravUpdate * abs(Φ[i,j]) 
                     ShouldWeUpdate = true 
                     return ShouldWeUpdate 
                 end

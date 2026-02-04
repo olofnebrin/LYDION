@@ -180,14 +180,10 @@ mutable struct StellarRTArrays
     F_r_Hr_EUV3::Array{Float64, 2}; F_Z_Hr_EUV3::Array{Float64, 2}
     F_r_HZ_EUV3::Array{Float64, 2}; F_Z_HZ_EUV3::Array{Float64, 2}
 
-    # Flux opacities for all bands:
+    # Flux opacities for all bands, for the asymptotic diffusion fix (only 
+    # relevant for IR):
     α_F_IR::Array{Float64, 2}
-    α_F_opt::Array{Float64, 2}
-    α_F_FUV::Array{Float64, 2}
-    α_F_LW::Array{Float64, 2}
-    α_F_EUV1::Array{Float64, 2}
-    α_F_EUV2::Array{Float64, 2}
-    α_F_EUV3::Array{Float64, 2}
+    α_F_stellar::Array{Float64, 2}
 
     # Luminosities in all bands, over infinite space (i.e. the full luminosity of the star):
     Lum_IR::Float64
@@ -315,6 +311,10 @@ mutable struct ChemistryState{T<:AbstractFloat}
 
     # Overall gas metallicity:
     Zgas_Zsun::Array{T, 2}
+
+    # Setting for whether to model hydrong + helium + deuterium, or pure 
+    # hydrogen gas (useful for idealized tests):
+    HydrogenAndHelium::Bool
 
 end
 
@@ -649,7 +649,7 @@ mutable struct GravityState{T<:AbstractFloat}
     ρ_bg::Array{T, 2}        # Static non-gas gravitating mass density, e.g. from star & dark matter 
     f_gravity_r::Array{T, 2}
     f_gravity_Z::Array{T, 2}
-    P::Array{T, 1}           # Legendre polynomials (for BCs)
+    P::Array{T, 2}           # Legendre polynomials (for BCs), one array for each tread (to avoid race conditions)
     Q::Array{T, 1}           # Multipole moments (for BCs)
     ℓmax::Int                # Maximum ℓ to use in Legendre polynomials
 end

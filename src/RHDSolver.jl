@@ -137,11 +137,19 @@ function UpdateRHD!( Δt_Hydro::Float64,
     #######                                                 #######
     ###############################################################
 
+    # Gravity solver + kick update (over a half-step):
+    Δt_Hydro_half = 0.5 * Δt_Hydro
+    if Gravity && Hydro 
+        GravitySolveAndKick!( Δt_Hydro_half, hydrostate, gravstate, gravcoeffs,
+                              ΔV, r, Z, rCoM, ZCoM )
+
+    end
+
     if Hydro
         # Prepare passive scalars before we advect them:
         PreparePassiveScalars!( hydrostate, chemstate )
 
-        # Update hydro & dust variables & passive scalars by advection:
+        # Update hydro & dust variables & passive scalars by advection (full step):
         UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, inv_ΔV, A_r, A_Z,
 
                       w_i_m1_r, w_i_0_r, w_i_p1_r, w_j_m1_Z, w_j_0_Z, w_j_p1_Z, 
@@ -159,10 +167,10 @@ function UpdateRHD!( Δt_Hydro::Float64,
         RecoverChemistryFromPassiveScalars!( hydrostate, chemstate )
     end
 
-    # Gravity solver + kick update:
+    # Gravity solver + kick update (over a half-step):
     if Gravity && Hydro 
-        GravitySolveAndKick!( Δt_Hydro, hydrostate, gravstate, gravcoeffs,
-                              ΔV, rCoM, ZCoM )
+        GravitySolveAndKick!( Δt_Hydro_half, hydrostate, gravstate, gravcoeffs,
+                              ΔV, r, Z, rCoM, ZCoM )
 
     end
 
@@ -437,7 +445,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     # Initialize the RSL for M1 stellar & Lyα RT (will be updated adaptively each time-step)
     c̃          = 300 * kms  
 
-    # Setup uniform cylindrical grid:
+    # Setup cylindrical grid:
     LZ_uniform = min( LZ_uniform, Zmax )
     geometry   = SetupCylindricalGrid( Rmax, Rmax_lin, Zmax, LZ_uniform, 
                                        N_r_lin, N_r_log, 
@@ -463,7 +471,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
         Zstar_pos = 0.0
     else
         # Otherwise, we center the star & cloud:
-        Zcl_pos   = Z[end] / 2
+        Zcl_pos   = 0.5 * ( Z[1] + Z[end] )
         Zstar_pos = Zcl_pos
     end
 
@@ -536,11 +544,11 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
 
     # Set up chemistry state struct, containing arrays for all species tracked,
     # e.g. xHII, xH2 etc. :
-    chemstate = InitializeChemistryArrays( N_r, N_Z, Zgas_Zsun )
+    chemstate = InitializeChemistryArrays( N_r, N_Z, Zgas_Zsun, true )
 
     # Cloud density properties:
-    ρcl  = max( nH₀ * mH / X,  10 * ρ_floor )                               # Density within cloud 
-    ρext = max( nH_ext * mH / X,  10 * ρ_floor )                            # Density far outside the cloud
+    ρcl  = max( Get_ρ_From_nH( nH₀, Zgas_Zsun, true ),    10 * ρ_floor )    # Density within cloud 
+    ρext = max( Get_ρ_From_nH( nH_ext, Zgas_Zsun, true ), 10 * ρ_floor )    # Density far outside the cloud
     δr   = max( 2 * max( minimum(diff(r)), minimum(diff(Z)) ), 0.05 * Rcl ) # Determines fall-off in density outside cloud
 
     if ρcl < 1e3 * ρ_floor 
@@ -753,7 +761,10 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                    ΔV, rCoM, ZCoM, gravstate.Q, gravstate.P, gravstate.ℓmax, BC_Z_left )
 
         Update_∇Φ!( gravstate.∂Φ∂r, gravstate.∂Φ∂Z, gravstate.Φ, 
-                    gravstate.f_gravity_r, gravstate.f_gravity_Z, ρ, rCoM, ZCoM )
+                    gravstate.f_gravity_r, gravstate.f_gravity_Z, ρ, 
+                    r, Z, rCoM, ZCoM, 
+                    gravstate.P, gravstate.Q,
+                    BC_Z_left, gravstate.ℓmax )
     end
 
     Δt_Resolve  = tmax / Nminsteps
@@ -783,7 +794,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
 
         # Limit from gravitational acceleration time-scale:
         if Gravity
-            Δt_Grav = GetGravityTimeStep( r, Z, gravstate.∂Φ∂r, gravstate.∂Φ∂Z )      
+            Δt_Grav = GetGravityTimeStep( r, Z, gravstate.∂Φ∂r, gravstate.∂Φ∂Z, ρ )      
         else
             # Ignore limit in absence of gravity:
             Δt_Grav = Inf    
@@ -1006,7 +1017,7 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
 
         # Set up chemistry state struct, containing arrays for all species tracked,
         # e.g. xHII, xH2 etc. (not initialized to right values yet):
-        chemstate = InitializeChemistryArrays( N_r, N_Z, Zgas_Zsun )
+        chemstate = InitializeChemistryArrays( N_r, N_Z, Zgas_Zsun, true )
 
         chemstate.xHII    .=  CheckPoint["xHII"][:, :]
         chemstate.xH2     .=  CheckPoint["xH2"][:, :]

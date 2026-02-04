@@ -1,7 +1,5 @@
 
 
-#using ..SpatialGrid      # for GeometryCylindrical
-#using ..Hydrodynamics    # for HydrodynamicsState
 using HDF5
 using HDF5: create_dataset, h5open, resize!, attrs, datatype
 

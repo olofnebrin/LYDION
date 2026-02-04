@@ -135,6 +135,8 @@ function SetupRTTest( tmax::Float64,
     dN_X     = 1:N_X 
     dN_Y     = 1:N_Y
 
+    @assert iseven( N_X ) "This test assumes even N_X to get perfectly symmetric ICs."
+
     # Create file:
     outdir   = @__DIR__    # .../src/CodeTests/RayleighTaylorTest
     FileName = joinpath( outdir, @sprintf( "RayleighTaylor_%03dx%03d_t%.2f.h5",
@@ -188,6 +190,26 @@ function SetupRTTest( tmax::Float64,
     Yc   = 0.5 * Ymax 
     Xc   = 0.5 * Xmax 
 
+    # Find the index corresponding to the midpoint along the X-axis:
+    imid = N_X ÷ 2
+
+    # Fill the Y-velocity to the left of midpoint:
+    for j in dN_Y 
+        for i in 1:imid
+            u_Y[i,j] = 0.01 * (1 + cos( 4 * π * ( XCoM[i] - Xc) )) * (1 + cos( 3 * π * (YCoM[j] - Yc) )) / 4
+        end
+    end
+
+    # Fill the Y-velocity to the right of the midpoint, using exact mirroring to avoid 
+    # tiny floating point errors that could cause asymmetry:
+    for j in dN_Y 
+        for i in (imid + 1):N_X
+            imirror  = N_X + 1 - i    # Index i should mirror index imirror
+            u_Y[i,j] = u_Y[imirror,j]
+        end
+    end
+
+    # Proceed and fill variables:
     for j in dN_Y 
         for i in dN_X 
 
@@ -208,9 +230,6 @@ function SetupRTTest( tmax::Float64,
             # Set initial gas pressure, such that we have hydrostatic equilibrium (for the assumed Φ):
             P[i,j]    = P0  -  0.1 * ( YCoM[j] - Yc ) * ρ[i,j]
 
-            # Set Y-velocity:
-            u_Y[i,j]  = 0.01 * (1 + cos( 4 * π * ( XCoM[i] - Xc) )) * (1 + cos( 3 * π * (YCoM[j] - Yc) )) / 4
-
             # Set Y-momentum:
             ρu_Y[i,j] = ρ[i,j] * u_Y[i,j]
 
@@ -226,14 +245,14 @@ function SetupRTTest( tmax::Float64,
         end # End of i-loop 
     end # End of j-loop
 
-
+    # Check that the ICs are symmetric enough:
     for j in dN_Y
         for i in dN_X
-            i_mirror = N_X + 1 - i
+            imirror  = N_X + 1 - i
 
-            @assert ρ[i,j]   ≈ ρ[i_mirror,j]   atol=1e-14
-            @assert P[i,j]   ≈ P[i_mirror,j]   atol=1e-14
-            @assert u_Y[i,j] ≈ u_Y[i_mirror,j] atol=1e-14
+            @assert ρ[i,j]   ≈ ρ[imirror,j]   atol = 1e-15
+            @assert P[i,j]   ≈ P[imirror,j]   atol = 1e-15
+            @assert u_Y[i,j] ≈ u_Y[imirror,j] atol = 1e-15
         end
     end
 

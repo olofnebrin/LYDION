@@ -1,11 +1,10 @@
 
-include( "RayleighTaylorTest.jl" )
-using .RayleighTaylorTest         # The Kelvin-Helmholtz test setup 
+include( "SodTest.jl" )
+using .SodTest         # The Sod shock tube test setup 
 
 
-tmax::Float64                      =  15.0
-N_X::Int                           =  256
-N_Y::Int                           =  3 * N_X
+tmax::Float64                      =  0.2
+N_X::Int                           =  128
 Nminsteps::Int                     =  300
 Nmaxsteps::Int                     =  100000
 
@@ -15,5 +14,5 @@ Nmaxsteps::Int                     =  100000
 #######                                                 #######
 ###############################################################
 
-SetupRTTest( tmax, N_X, N_Y, 
-             Nminsteps, Nmaxsteps )
+SetupSodTest( tmax, N_X,
+              Nminsteps, Nmaxsteps )

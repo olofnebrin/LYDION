@@ -169,7 +169,21 @@ end
                                                       F_R::Float64
                                                        )
 
-    Qnew = Q  -  ( c̃Δt * inv_ΔV ) * ( A_R * F_R  -  A_L * F_L )
+    FluxTerms = 0.0
+    if A_L > 0.0
+        # Add flux from left state if the left interface area 
+        # is non-zero:
+        FluxTerms -=  A_L * F_L
+    end
+
+    if A_R > 0.0
+        # Add flux from right state if the right interface area 
+        # is non-zero:
+        FluxTerms +=  A_R * F_R 
+    end
+
+    Qnew = Q  -  ( c̃Δt * inv_ΔV ) * FluxTerms
+    
     return Qnew
 end
 

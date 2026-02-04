@@ -15,7 +15,7 @@ export InitializeChemistryArrays
     NOTE: This function does *not* fill 
     the arrays with values, i.e. the abundances are all zero.
     They need to be filled by hand later. """
-function InitializeChemistryArrays( N_r::Int, N_Z::Int, Zgas_Zsun_val::Float64 )
+function InitializeChemistryArrays( N_r::Int, N_Z::Int, Zgas_Zsun_val::Float64, HydrogenAndHelium::Bool )
 
     xHI_adv    =  zeros( Float64, N_r, N_Z ); xHI_adv_old  = zeros( Float64, N_r, N_Z )
     xHII       = zeros( Float64, N_r, N_Z );  xHII_old     = zeros( Float64, N_r, N_Z )
@@ -43,5 +43,5 @@ function InitializeChemistryArrays( N_r::Int, N_Z::Int, Zgas_Zsun_val::Float64 )
                            xDI_adv, xDI_adv_old,  xDII, xDII_old,  xHD, xHD_old,
                            xCI, xCI_old,  xCII, xCII_old,  xCHx_adv, xCHx_adv_old,
                            xCO, xCO_old,  xOI, xOI_old,  xOII, xOII_old,  xOHx_adv, xOHx_adv_old,
-                           Zgas_Zsun )
+                           Zgas_Zsun, HydrogenAndHelium )
 end

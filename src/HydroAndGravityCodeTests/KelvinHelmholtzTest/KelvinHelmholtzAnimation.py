@@ -25,7 +25,7 @@ import cmastro
 
 # ---------------- User inputs ----------------
 script_dir = os.path.dirname(os.path.abspath(__file__))
-filename   = os.path.join(script_dir, "KelvinHelmholtz_Nx1024_Ny1024_t5.00.h5") 
+filename   = os.path.join(script_dir, "KelvinHelmholtz_Nx512_Ny512_t5.00.h5") 
 frameskip  = 1
 save_mp4   = True
 outname    = os.path.join(script_dir, "KelvinHelmholtzDensity.mp4")

@@ -271,7 +271,8 @@ function UpdateChemistrySubStep( Δtsub::Float64,
                               ΓdissOHx::Float64 = 0.0,
                               ΓdissCHx::Float64 = 0.0,
                                      z::Float64 = 0.0,
-                                 CaseB::Bool = true
+                                 CaseB::Bool    = true,
+                     HydrogenAndHelium::Bool    = true
                                  )
 
     # Get xDI_old, needed for the deuterium update:
@@ -365,7 +366,7 @@ function UpdateChemistrySubStep( Δtsub::Float64,
     # Update the electron number density:
     ne_new1 = GetElectronDensityFromFracs( xHII_new, xHeII_old, xHeIII_old, 
                                            xDII_old, xCII_old,  xOII_old, 
-                                           ρ, Zgas_Zsun )
+                                           ρ, Zgas_Zsun, HydrogenAndHelium )
 
     # Get change in ne during the H update (for accuracy checking):
     Δne_H   = abs( ne_new1 - ne_old )
@@ -436,7 +437,7 @@ function UpdateChemistrySubStep( Δtsub::Float64,
     # Get updated electron number density:
     ne_new2     = GetElectronDensityFromFracs( xHII_new, xHeII_new, xHeIII_new, 
                                                xDII_old, xCII_old,  xOII_old, 
-                                               ρ, Zgas_Zsun )
+                                               ρ, Zgas_Zsun, HydrogenAndHelium )
 
     # Get change in ne during the He update (for accuracy checking):
     Δne_He      = abs( ne_new2 - ne_new1 )
@@ -511,7 +512,7 @@ function UpdateChemistrySubStep( Δtsub::Float64,
     # Get updated electron number density:
     ne_new3 = GetElectronDensityFromFracs( xHII_new, xHeII_new, xHeIII_new, 
                                            xDII_new, xCII_old,  xOII_old, 
-                                           ρ, Zgas_Zsun )
+                                           ρ, Zgas_Zsun, HydrogenAndHelium )
 
     # Get change in ne during the D update (for accuracy checking):
     Δne_D   = abs( ne_new3 - ne_new2 )
@@ -542,7 +543,7 @@ function UpdateChemistrySubStep( Δtsub::Float64,
     # Get final electron number density:
     ne_final    = GetElectronDensityFromFracs( xHII_new, xHeII_new, xHeIII_new, 
                                                xDII_new, xCII_new,  xOII_new, 
-                                               ρ, Zgas_Zsun )
+                                               ρ, Zgas_Zsun, HydrogenAndHelium )
 
     # Get change in ne during the C/O update (for accuracy checking):
     Δne_CarbOxy = abs( ne_final - ne_new3 )

@@ -5,7 +5,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.colors import LogNorm, Normalize
 from matplotlib.gridspec import GridSpec
 import matplotlib.patheffects as pe
-from matplotlib.ticker import MultipleLocator  # add this import
+from matplotlib.ticker import MultipleLocator 
 from pathlib import Path
 import sys
 
@@ -19,7 +19,7 @@ import cmastro
 
 
 # ---------------- user inputs ----------------
-filename = "RHDSim_NoLya_64x64_2026-01-27.h5"       
+filename = "RHDSim_NoLya_128x128_2026-02-03.h5"       
 frameskip = 1                 
 save_mp4 = True               
 outname = "density_T.mp4"

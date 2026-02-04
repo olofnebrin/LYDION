@@ -22,7 +22,7 @@ import cmastro
 
 # ---------------- User inputs ----------------
 script_dir = os.path.dirname(os.path.abspath(__file__))
-filename   = os.path.join(script_dir, "RayleighTaylor_064x192_t15.00.h5")
+filename   = os.path.join(script_dir, "RayleighTaylor_256x768_t15.00.h5")
 frameskip  = 1
 save_mp4   = True
 outname    = os.path.join(script_dir, "RayleighTaylorDensity.mp4")

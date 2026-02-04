@@ -13,6 +13,7 @@ __precompile__()
 using SpecialFunctions  # For Dawson integral
 using Base.Threads      # For CPU acceleration
 using Roots             # Needed for root-finding in the frequency grid setup 
+using QuadGK            # For numerical integration 
 
 export LyαArrays, GenerateLyαArrays, H, Htophat, b, a, σ0, 
        Update_Hvoigt!, Update_ϕν!, Update_e_Lyα!,
@@ -23,8 +24,8 @@ export LyαArrays, GenerateLyαArrays, H, Htophat, b, a, σ0,
        D_colon_∇u_Cartesian, Compute_f_esc_Cylindrical, Compute_f_esc_Lyα_Cylindrical,
        vth_H, GetHydrogenDensities, GetHeliumDensities, GetDeuteriumDensities, 
        GetCarbonDensities, GetOxygenDensities, GetElectronDensity,
-       GetElectronDensityFromFracs, GetAllNumberDensities, 
-       MinMod, MonCen, PrintLYDIONLogo
+       GetElectronDensityFromFracs, GetAllNumberDensities, Get_ρ_From_nH,
+       MinMod, MonCen, GetBlackBodyIonizingEmission, PrintLYDIONLogo
 
 
 ###############################################################
@@ -39,6 +40,7 @@ const Lsun::Float64       = 3.839e33              # Solar luminsoity (erg/s)
 const Msun::Float64       = 1.988435e33           # Solar mass (g)
 const AU::Float64         = 1.495978707e13        # 1 AU (cm)
 const pc::Float64         = 3.085677581467192e18  # 1 parsec (cm)
+const kpc::Float64        = 1e3 * pc              # 1 kiloparsec (cm)
 const Mpc::Float64        = 1e6 * pc              # 1 Megaparsec (cm)
 const Gpc::Float64        = 1e9 * pc              # 1 Gigaparsec (cm)
 const kms::Float64        = 1e5                   # 1 km/s (cm/s)
@@ -75,6 +77,8 @@ const mSi::Float64        = 28.086 * mu           # Mass of silicon atom (g)
 const mS::Float64         = 32.065 * mu           # Mass of sulfur atom (g)
 const mFe::Float64        = 55.845 * mu           # Mass of iron atom (g)
 
+const inv_mH::Float64     = 1 / mH 
+const inv_mHe::Float64    = 1 / mHe 
 const inv_mD::Float64     = 1 / mD 
 const inv_mC::Float64     = 1 / mC 
 const inv_mO::Float64     = 1 / mO 
@@ -146,7 +150,6 @@ const inv_Zsun::Float64      = 1 / Zsun
 ####### BAND ENERGIES ####################
 
 # Photon band energies:
-
 const E_opt::Float64      = 3.67  * eV       # 1-5.8 eV band (optical)
 const E_FUV::Float64      = 8.45  * eV       # 5.8-11.2 eV band (FUV)
 const E_LW::Float64       = 12.26 * eV       # 11.2-13.6 eV band (Lyman-Werner)
@@ -171,7 +174,7 @@ export c, h, G, kB, e, q_e, q_HII, q_HeII, q_HeIII,
        mH, mH2, mD, me, mHe, mC, mCO, 
        inv_mN, inv_mNe, inv_mMg, inv_mSi, inv_mS, inv_mFe,
 
-       Lsun, Msun, AU, pc, Mpc, Gpc, kms, day, yr, Myr, Gyr, eV, Ang, nm, μm, F_Habing,
+       Lsun, Msun, AU, pc, kpc, Mpc, Gpc, kms, day, yr, Myr, Gyr, eV, Ang, nm, μm, F_Habing,
        OneThird, ThreeEights, ThreeFourths, Four_π, inv_Four_π, Two_π, Sqrt_π, Sqrt_2,
        Four_π_over_c, inv_c, X_over_mH, Y_over_mHe, 
 
@@ -980,9 +983,17 @@ end
     gas density ρ. """
 @inline @fastmath function GetHydrogenDensities( xHII::Float64, 
                                                   xH2::Float64,
-                                                    ρ::Float64 )
+                                                    ρ::Float64,
+                                    HydrogenAndHelium::Bool = true )
 
-    nH    =   ρ * X_over_mH
+    if HydrogenAndHelium
+        # By default we have hydrogen, helium (and deuterium):
+        nH = ρ * X_over_mH
+    else
+        # In some idealized tests we only have hydrogen:
+        nH = ρ * inv_mH
+    end
+
     xHI   =   max( 1 - xHII - 2 * xH2, 0.0 )
     nHI   =   xHI  * nH
     nHII  =   xHII * nH 
@@ -997,9 +1008,17 @@ end
     gas density ρ. """
 @inline @fastmath function GetHeliumDensities( xHeII::Float64, 
                                               xHeIII::Float64,
-                                                   ρ::Float64 )
+                                                   ρ::Float64,
+                                   HydrogenAndHelium::Bool = true )
 
-    nHe     =   ρ * Y_over_mHe
+    if HydrogenAndHelium
+        # By default we have hydrogen, helium (and deuterium):
+        nHe = ρ * Y_over_mHe
+    else
+        # In some idealized tests we only have hydrogen:
+        nHe = 0.0
+    end
+
     xHeI    =   max( 1 - xHeII - xHeIII, 0.0 )
     nHeI    =   xHeI   * nHe
     nHeII   =   xHeII  * nHe
@@ -1014,10 +1033,17 @@ end
     gas density ρ. """
 @inline @fastmath function GetDeuteriumDensities( xHD::Float64, 
                                                  xDII::Float64,
-                                                    ρ::Float64 )
+                                                    ρ::Float64,
+                                    HydrogenAndHelium::Bool = true )
 
     # Total deuterium number density:
-    nD    =   ρ * X_D_over_mD 
+    if HydrogenAndHelium
+        # By default we have hydrogen, helium, and deuterium:
+        nD = ρ * X_D_over_mD 
+    else
+        # In some idealized tests we only have hydrogen:
+        nD = 0.0
+    end
 
     # Get number densities 
     nDI   =   max( 1 - xDII  - xHD, 0.0 ) * nD
@@ -1096,7 +1122,8 @@ const fOxygen_over_mO::Float64 = fOxygen * inv_mO
                                                         xCII::Float64,
                                                         xOII::Float64,
                                                            ρ::Float64,
-                                                   Zgas_Zsun::Float64
+                                                   Zgas_Zsun::Float64,
+                                           HydrogenAndHelium::Bool = true 
                                                         )
 
     # Get metal density:
@@ -1106,16 +1133,26 @@ const fOxygen_over_mO::Float64 = fOxygen * inv_mO
     # Get pristine (H + He + D) gas density:
     ρ_pristine = max( (1 - Z), 0.0 ) * ρ
 
+    if HydrogenAndHelium
+        # By default we have hydrogen, helium (and deuterium):
+        nH  = ρ_pristine * X_over_mH
+        nHe = ρ_pristine * Y_over_mHe
+        nD  = ρ_pristine * X_D_over_mD
+    else
+        # In some idealized tests we only have hydrogen:
+        nH  = ρ_pristine * inv_mH
+        nHe = 0.0
+        nD  = 0.0
+    end
+
     # Get nHII:
-    nHII       = xHII * ρ_pristine * X_over_mH
+    nHII       = xHII * nH
 
     # Get nHeII and nHeIII:
-    nHe        = ρ_pristine * Y_over_mHe
     nHeII      = xHeII  * nHe 
     nHeIII     = xHeIII * nHe 
 
     # Get nDII:
-    nD         = ρ_pristine * X_D_over_mD
     nDII       = xDII * nD 
 
     # Get nCII:
@@ -1146,7 +1183,8 @@ function GetAllNumberDensities( xH2::Float64,
                                 xOI::Float64,
                                xOII::Float64,
                                   ρ::Float64,
-                          Zgas_Zsun::Float64 )
+                          Zgas_Zsun::Float64,
+                  HydrogenAndHelium::Bool = true )
 
     # Get metal density:
     Z          = clamp( Zgas_Zsun * Zsun, 0.0, 1.0 )
@@ -1156,13 +1194,13 @@ function GetAllNumberDensities( xH2::Float64,
     ρ_pristine = max( (1 - Z), 0.0 ) * ρ
 
     # Get hydrogen densities:
-    nHI, nHII, nH2, nH        = GetHydrogenDensities( xHII, xH2, ρ_pristine )
+    nHI, nHII, nH2, nH        = GetHydrogenDensities( xHII, xH2, ρ_pristine, HydrogenAndHelium )
 
     # Get helium densities:
-    nHeI, nHeII, nHeIII, nHe  = GetHeliumDensities( xHeII, xHeIII, ρ_pristine )
+    nHeI, nHeII, nHeIII, nHe  = GetHeliumDensities( xHeII, xHeIII, ρ_pristine, HydrogenAndHelium )
 
     # Get deuterium densities:
-    nDI, nDII, nHD, nD        = GetDeuteriumDensities( xHD, xDII, ρ_pristine )
+    nDI, nDII, nHD, nD        = GetDeuteriumDensities( xHD, xDII, ρ_pristine, HydrogenAndHelium )
 
     # Get carbon species densities:
     ρCarbon                   = fCarbon * ρZ 
@@ -1184,6 +1222,38 @@ function GetAllNumberDensities( xH2::Float64,
 end
 
 
+@inline function Get_ρ_From_nH( nH::Float64, 
+                         Zgas_Zsun::Float64, 
+                 HydrogenAndHelium::Bool )
+
+    if HydrogenAndHelium
+        # In case we model hydrogen, helium, deuterium & metals, 
+        # we recover the gas density as follows.
+
+        # Pristine (H, He, D) mass density:
+        ρ_pristine = nH * mH / X 
+
+        # Use (1 - Z)ρ = ρ_pristine:
+        Z = clamp( Zgas_Zsun * Zsun, 0.0, 1.0 )
+        ρ = ρ_pristine / ( 1 - Z )
+
+        return ρ
+    else
+        # In case we only model hydrogen (and metals), we recover 
+        # the gas density as follows.
+
+        # Hydrogen density (for X = 1):
+        ρ_H = nH * mH 
+
+        # Use (1 - Z)ρ = ρ_H:
+        Z   = clamp( Zgas_Zsun * Zsun, 0.0, 1.0 )
+        ρ   = ρ_H / ( 1 - Z )
+
+        return ρ
+    end
+end
+
+
 """ MinMod slope limiter. Used in the hydrodynamics, M1 RT, 
     and in the estimate for ∇ρ for the Sobolev-like 
     column density estimates. """
@@ -1202,6 +1272,42 @@ end
     MinMod( 0.5 * ( A + B ), MinMod( 2.0 * A, 2.0 * B ) )
 end
 
+
+""" This function computes the number of ionizing photons in each ionizing 
+    band (EUV1, EUV2, EUV3), assuming a black-body spectrum of temperature 
+    Teff (K), and a total ionizing output dNdt_LyC. Useful for idealized tests. """
+function GetBlackBodyIonizingEmission( dNdt_LyC::Float64, Teff::Float64 )
+
+    # Convenient variable:
+    inv_kBT = 1 / ( kB * Teff )
+
+    # Photon weight, ∝ Bν / ν ∝ x²/[exp(x) - 1], where x ≡ hν / kB T:
+    ϕ  = ( x::Float64 ) -> (x^2) / expm1( x )
+
+    # Minimum x of each band:
+    x0 = ( 13.6 * eV ) * inv_kBT
+    x1 = ( 24.6 * eV ) * inv_kBT
+    x2 = ( 54.4 * eV ) * inv_kBT
+
+    # Total ionizing photons (LyC): [13.6 eV, ∞):
+    I_tot, _ = quadgk( ϕ, x0, Inf, rtol = 1e-10 )
+
+    # The ionizing photons in each band (EUV1, EUV2, EUV3):
+    I1, _ = quadgk( ϕ, x0, x1,  rtol = 1e-10 )
+    I2, _ = quadgk( ϕ, x1, x2,  rtol = 1e-10 )
+    I3, _ = quadgk( ϕ, x2, Inf, rtol = 1e-10 )
+
+    @assert isfinite(I_tot) && I_tot > 0
+    @assert abs( ( I1 + I2 + I3 ) / I_tot - 1 ) < 1e-10
+
+    # Normalize and multiply by the total ionziing output to 
+    # get emission rates for each band:
+    dNdt_EUV1 = dNdt_LyC * ( I1 / I_tot )
+    dNdt_EUV2 = dNdt_LyC * ( I2 / I_tot )
+    dNdt_EUV3 = dNdt_LyC * ( I3 / I_tot )
+
+    return dNdt_EUV1, dNdt_EUV2, dNdt_EUV3
+end
 
 
 """ Prints LYDION logo. """

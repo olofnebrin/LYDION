@@ -157,9 +157,18 @@ function Get_QL_and_QR( W_im2::Float64,      # We need W[i-2] and W[i-1] for the
         # Save chosen reconstruction order:
         ReconstructionOrder = Int8(2)
 
-        if (EnsurePositivity && ( W_L ≤ 0.0 || W_R ≤ 0.0 || ΔW_L > 0.9 * W_im1 || ΔW_R > 0.9 * W_i )) || MaxReconstructionOrder == Int8(1)
+        if (!EnsurePositivity && (!isfinite(W_L) || !isfinite(W_R))) || MaxReconstructionOrder == Int8(1)
+          # If we still get undefined values, fall back to a first-order method (i.e. no reconstruction):
+          W_L = W_im1 
+          W_R = W_i 
+
+          # Save chosen reconstruction order:
+          ReconstructionOrder = Int8(1)
+        end
+
+        if (EnsurePositivity && (!isfinite(W_L) || !isfinite(W_R) || W_L ≤ 0.0 || W_R ≤ 0.0 )) || MaxReconstructionOrder == Int8(1)
           # If we want positive primitives, yet the PLM reconstruction 
-          # *still* produces negative values or too large changes from cell-avearges,
+          # *still* produces negative values,
           # fall back to a first-order method (i.e. no reconstruction):
           W_L = W_im1 
           W_R = W_i 
@@ -228,12 +237,15 @@ function Get_QL_and_QR( W_im2::Float64,      # We need W[i-2] and W[i-1] for the
     ReconstructionOrder = Int8(3)
 
     # FALL BACK TO 2nd-ORDER (OR 1st-ORDER) METHOD FOR NEGATIVE INTERFACE STATES 
-    # (relevant for ρ, P), OR TOO LARGE DEVIATIONS FROM CELL AVERAGES (see refs. 2 & 3):
+    # (relevant for ρ, P), OR TOO LARGE/UNDEFINED DEVIATIONS FROM
+    # CELL AVERAGES (see refs. 2 & 3):
 
     ΔW_L = abs( W_L - W_im1 )
     ΔW_R = abs( W_R - W_i )
 
-    if EnsurePositivity && ( W_L ≤ 0.0 || W_R ≤ 0.0 || ΔW_L > 0.9 * W_im1 || ΔW_R > 0.9 * W_i )
+    # For variables that need not be positive, we still check that the interface 
+    # values are finite, and if not, fall back to PLM:
+    if !EnsurePositivity && ( !isfinite(W_L) || !isfinite(W_R) )
         # Slopes in cell i-1 (for W_L):
         sL_im1 = (W_im1 - W_im2) / (XCoM_im1 - XCoM_im2)
         sR_im1 = (W_i   - W_im1) / (XCoM_i   - XCoM_im1)
@@ -255,10 +267,43 @@ function Get_QL_and_QR( W_im2::Float64,      # We need W[i-2] and W[i-1] for the
         # Save chosen reconstruction order:
         ReconstructionOrder = Int8(2)
 
-        # Check again if we have positive interfaces & values not too far off from 
-        # cell-averaged ones. If not, revert to a 1st-order method 
+        # Check again if we have defined values. If not, revert to a 1st-order method 
         # (no interface reconstruction):
-        if W_L ≤ 0.0 || W_R ≤ 0.0 || ΔW_L > 0.9 * W_im1 || ΔW_R > 0.9 * W_i
+        if !isfinite(W_L) || !isfinite(W_R) 
+          W_L = W_im1 
+          W_R = W_i
+          
+          # Save chosen reconstruction order:
+          ReconstructionOrder = Int8(1)
+        end 
+    end
+
+    # For variables that should be finite & positive, we add additional constraints: 
+    if EnsurePositivity && ( !isfinite(W_L) || !isfinite(W_R) || W_L ≤ 0.0 || W_R ≤ 0.0 || ΔW_L > 0.9 * W_im1 || ΔW_R > 0.9 * W_i )
+        # Slopes in cell i-1 (for W_L):
+        sL_im1 = (W_im1 - W_im2) / (XCoM_im1 - XCoM_im2)
+        sR_im1 = (W_i   - W_im1) / (XCoM_i   - XCoM_im1)
+        s_im1  = MinMod( sL_im1, sR_im1 )
+
+        # Slopes in cell i (for W_R):
+        sL_i   = (W_i   - W_im1) / (XCoM_i   - XCoM_im1)
+        sR_i   = (W_ip1 - W_i  ) / (XCoM_ip1 - XCoM_i)
+        s_i    = MinMod( sL_i, sR_i )
+
+        # Get left & right states: 
+        W_L    = W_im1  +  s_im1 * ( X_i - XCoM_im1 )
+        W_R    = W_i    +  s_i   * ( X_i - XCoM_i )
+
+        # Measure change between interface and cell centers:
+        ΔW_L = abs( W_L - W_im1 )
+        ΔW_R = abs( W_R - W_i )
+
+        # Save chosen reconstruction order:
+        ReconstructionOrder = Int8(2)
+
+        # Check again if we have positive & defined interfaces. If not, revert to a 1st-order method 
+        # (no interface reconstruction):
+        if !isfinite(W_L) || !isfinite(W_R) || W_L ≤ 0.0 || W_R ≤ 0.0 
           W_L = W_im1 
           W_R = W_i
           

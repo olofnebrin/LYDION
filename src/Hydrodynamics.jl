@@ -44,14 +44,15 @@ export GetPrimitive, GetCFLTimeStep,
 # which you can change.
 
 const CFL::Float64         =  0.4        # CFL factor for gas tim                            (< 1, default: 0.4)
-const C_Grav::Float64      =  0.5        # Sets the gravity-limited time-step                (default: 0.5)
-const C_RP::Float64        =  0.5        # Sets the rad. presure-limited time-step           (default: 0.5)
+const C_Grav::Float64      =  0.1        # Sets the gravity-limited time-step                (default: 0.1)
+const C_RP::Float64        =  0.1        # Sets the rad. presure-limited time-step           (default: 0.1)
 const ρ_floor::Float64     =  1e-10 * mH # Gas density floor                                 (default: 10⁻¹⁰ mH per cm⁻³)
 const ρd_floor::Float64    =  1e-13 * mH # Dust density floor                                (default: 10⁻¹³ mH per cm⁻³)
 const P_floor::Float64     =  1e-30      # Gas pressure floor                                (default: 10⁻³⁰ in cgs units)
 const γmon::Float64        =  5 / 3      # Adiabatic index of monoatomic gas
 const γdia::Float64        =  7 / 5      # Adiabatic index of diatomic gas
-const DEBUG_Hydro::Bool    =  true       # Checks for non-physical values & errors, on if true (default: true)
+const SteepFallBack::Bool  =  false      # Whether to use fall backs to cell centers = cell average (default: false)
+const DEBUG_Hydro::Bool    =  true       # Checks for non-physical values & errors, on if true      (default: true)
 
 export CFL, C_Grav, C_RP, ρ_floor, ρd_floor, P_floor, γmon, γdia  
 
@@ -82,12 +83,12 @@ end
 
 """ Converts from primitive variables (ρ, u_X, u_Y, P) to 
     conservative ones (ρu_X, ρu_Y, E). """
-@inline @fastmath function GetConservative( ρ::Float64, # Gas density 
-                                          u_X::Float64, # Gas velocity in R-direction
-                                          u_Y::Float64, # Gas velocity in R-direction
-                                            P::Float64, # Gas pressure 
-                                          γad::Float64  # Adiabatic index
-                                           )
+@inline function GetConservative( ρ::Float64, # Gas density 
+                                u_X::Float64, # Gas velocity in R-direction
+                                u_Y::Float64, # Gas velocity in R-direction
+                                  P::Float64, # Gas pressure 
+                                γad::Float64  # Adiabatic index
+                                 )
     ρu_X = ρ * u_X 
     ρu_Y = ρ * u_Y
     E    = P / (γad - 1)  +  ρ * (u_X * u_X  +  u_Y * u_Y) / 2 
@@ -154,10 +155,13 @@ end
 end
 
 
+const t_ff0::Float64 = sqrt( 3 * π / (32 * G) )
+
 @inline function GetGravityTimeStep( X::AbstractVector{Float64}, # Interface X-values
                                      Y::AbstractVector{Float64}, # Interface Y-values
                                   ∂Φ∂X::AbstractMatrix{Float64}, # X-component of ∇Φ  
-                                  ∂Φ∂Y::AbstractMatrix{Float64}  # Y-component of ∇Φ 
+                                  ∂Φ∂Y::AbstractMatrix{Float64}, # Y-component of ∇Φ 
+                                     ρ::AbstractMatrix{Float64}
                                     )
 
     N_X, N_Y = size( ∂Φ∂X )
@@ -176,8 +180,14 @@ end
             ΔX = X[i+1] - X[i]
 
             # Compute the local acceleration time-scale:
-            Δt_g  = min( sqrt( 2 * ΔX / abs(∂Φ∂X[i,j]) ), 
-                         sqrt( 2 * ΔY / abs(∂Φ∂Y[i,j]) ) )
+            Δt_acc = min( sqrt( 2 * ΔX / abs(∂Φ∂X[i,j]) ), 
+                          sqrt( 2 * ΔY / abs(∂Φ∂Y[i,j]) ) )
+
+            # Compute the local free-fall time:
+            t_ff   = t_ff0 / sqrt( ρ[i,j] )
+
+            # Get the minimum of the two:
+            Δt_g   = min( Δt_acc, t_ff )
             
             if Δt_g < local_min_Δt
                 # Update the smallest time-scale found:
@@ -461,13 +471,42 @@ const ϵ_Shock_HLL_and_PLM::Float64 = 4.0 # Critical value of shock-indicator to
 end
 
 
+""" This function flags averages → cell-center conversions as 'steep',
+    if they intoduce new extrema. 
+        
+    NOTE: In early Rayleigh-Taylor instability tests, we have found that a naive 
+          check (Qc > Qmax or Qc < Qmin) can more easily cause asymmetry unless 
+          one properly takes into account floating point errors, hence the ϵ.  """
 @inline function SteepOrNot( Qc::Float64, Qm1::Float64, Q::Float64, Qp1::Float64 )
-    if Qc > max( Q, Qp1, Qm1 ) || Qc < min( Q, Qp1, Qm1 )
-        # Flag as steep:
-        return 1
-    else
-        return 0
+    # Get maximum and minimum allowed values of Q (allowing for moderate extrema):
+    Qmax_nb = max( Q, Qp1, Qm1 )
+    Qmin_nb = min( Q, Qp1, Qm1 )
+    Qmax    = Qmax_nb  +  0.4 * abs( Qmax_nb )
+    Qmin    = Qmin_nb  -  0.4 * abs( Qmin_nb )
+
+    # Exit early if the difference between Qc and Q are tiny:
+    ΔQ      = Qc - Q 
+    Q̃       = max( abs(Q), abs(Qc), abs(Qm1), abs(Qp1), 1e-300 )
+    if abs(ΔQ) < 50.0 * eps(Q̃)
+        # If ΔQ = 0 to ≈ machine precision, then Qc = Q and there is no problem, so set τ = 1:
+        τ = 1.0
+        return τ 
     end
+
+    if ΔQ > 0.0
+        # In this case the candidate Qc exceeds Q, and so we want to find τ
+        # that ensures the accepted Qc is < Qmax:
+        τ = min( 1.0, ( Qmax  - Q ) / ΔQ )
+    elseif ΔQ < 0.0
+        # In this case the candidate Qc is below Q, and so we want to find τ
+        # that ensures the accepted Qc is > Qmin:
+        τ = min( 1.0, ( Qmin  - Q ) / ΔQ )
+    end
+    
+    # Clamp τ:
+    τ = clamp( τ, 0.0, 1.0 )
+
+    return τ
 end
 
 
@@ -543,35 +582,43 @@ end
 
             # RECONSTRUCT ⟨ρ⟩ᵢ → ρ(rcᵢ) AT i = 1:
             ρc[1,j]      = w_i_m1_X[1] * ρ_0  +  w_i_0_X[1] * ρ[1,j]  +  w_i_p1_X[1] * ρ[2,j]
-            Steep_ρ      = SteepOrNot( ρc[1,j], ρ_0, ρ[1,j], ρ[2,j] )
+            τ_ρ          = SteepOrNot( ρc[1,j], ρ_0, ρ[1,j], ρ[2,j] )
 
             ρdc[1,j]     = w_i_m1_X[1] * ρd_0  +  w_i_0_X[1] * ρd[1,j]  +  w_i_p1_X[1] * ρd[2,j]   # Dust 
-            Steep_ρd     = SteepOrNot( ρdc[1,j], ρd_0, ρd[1,j], ρd[2,j] )
+            τ_ρd         = SteepOrNot( ρdc[1,j], ρd_0, ρd[1,j], ρd[2,j] )
 
             # RECONSTRUCT ⟨ρu_X⟩ᵢ → ρu_X(rcᵢ) AT i = 1:
             ρu_Xc[1,j]   = w_i_m1_X[1] * ρu_X_0  +  w_i_0_X[1] * ρu_X[1,j]  +  w_i_p1_X[1] * ρu_X[2,j]
-            Steep_ρu_X   = SteepOrNot( ρu_Xc[1,j], ρu_X_0, ρu_X[1,j], ρu_X[2,j] )
+            τ_ρu_X       = SteepOrNot( ρu_Xc[1,j], ρu_X_0, ρu_X[1,j], ρu_X[2,j] )
 
             ρdud_Xc[1,j] = w_i_m1_X[1] * ρdud_X_0  +  w_i_0_X[1] * ρdud_X[1,j]  +  w_i_p1_X[1] * ρdud_X[2,j]  # Dust
-            Steep_ρdud_X = SteepOrNot( ρdud_Xc[1,j], ρdud_X_0, ρdud_X[1,j], ρdud_X[2,j] )
+            τ_ρdud_X     = SteepOrNot( ρdud_Xc[1,j], ρdud_X_0, ρdud_X[1,j], ρdud_X[2,j] )
 
             # RECONSTRUCT ⟨ρu_Y⟩ᵢ → ρu_Y(rcᵢ) AT i = 1:
             ρu_Yc[1,j]   = w_i_m1_X[1] * ρu_Y_0  +  w_i_0_X[1] * ρu_Y[1,j]  +  w_i_p1_X[1] * ρu_Y[2,j]
-            Steep_ρu_Y   = SteepOrNot( ρu_Yc[1,j], ρu_Y_0, ρu_Y[1,j], ρu_Y[2,j] )
+            τ_ρu_Y       = SteepOrNot( ρu_Yc[1,j], ρu_Y_0, ρu_Y[1,j], ρu_Y[2,j] )
 
             ρdud_Yc[1,j] = w_i_m1_X[1] * ρdud_Y_0  +  w_i_0_X[1] * ρdud_Y[1,j]  +  w_i_p1_X[1] * ρdud_Y[2,j]
-            Steep_ρdud_Y = SteepOrNot( ρdud_Yc[1,j], ρdud_Y_0, ρdud_Y[1,j], ρdud_Y[2,j] )
+            τ_ρdud_Y     = SteepOrNot( ρdud_Yc[1,j], ρdud_Y_0, ρdud_Y[1,j], ρdud_Y[2,j] )
 
             # RECONSTRUCT ⟨E⟩ᵢ → E(rcᵢ) AT i = 1:
-            Ec[1,j]    = w_i_m1_X[1] * E_0  +  w_i_0_X[1] * E[1,j]  +  w_i_p1_X[1] * E[2,j]
-            Steep_E    = SteepOrNot( Ec[1,j], E_0, E[1,j], E[2,j] )
+            Ec[1,j]      = w_i_m1_X[1] * E_0  +  w_i_0_X[1] * E[1,j]  +  w_i_p1_X[1] * E[2,j]
+            τ_E          = SteepOrNot( Ec[1,j], E_0, E[1,j], E[2,j] )
 
-            # GET STEEPNESS INDICATOR:
-            Steep = max( Steep_ρ, Steep_ρd, Steep_ρu_X, Steep_ρdud_X, Steep_ρu_Y, Steep_ρdud_Y, Steep_E )
+            # SAFETY CORRECT FOR STEEPENESS:
+            τ            = min( τ_ρ, τ_ρd, τ_ρu_X, τ_ρdud_X, τ_ρu_Y, τ_ρdud_Y, τ_E )
+            OneMinusτ    = max( 1.0 - τ, 0.0 )
+            ρc[1,j]      = ρc[1,j]      * τ  +  OneMinusτ * ρ[1,j]
+            ρdc[1,j]     = ρdc[1,j]     * τ  +  OneMinusτ * ρd[1,j]
+            ρu_Xc[1,j]   = ρu_Xc[1,j]   * τ  +  OneMinusτ * ρu_X[1,j]
+            ρdud_Xc[1,j] = ρdud_Xc[1,j] * τ  +  OneMinusτ * ρdud_X[1,j]
+            ρu_Yc[1,j]   = ρu_Yc[1,j]   * τ  +  OneMinusτ * ρu_Y[1,j]
+            ρdud_Yc[1,j] = ρdud_Yc[1,j] * τ  +  OneMinusτ * ρdud_Y[1,j]
+            Ec[1,j]      = Ec[1,j]      * τ  +  OneMinusτ * E[1,j]
 
             # SECOND-ORDER SAFETY FALLBACK:
             _, _, Pc_candidate = GetPrimitive( ρc[1,j], ρu_Xc[1,j], ρu_Yc[1,j], Ec[1,j], γad[1,j] )
-            if Shock[1,j] == Shock_HLL_and_PLM || Steep == 1 || ρc[1,j] ≤ ρ_floor || ρdc[1,j] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate)
+            if Shock[1,j] == Shock_HLL_and_PLM || ρc[1,j] ≤ ρ_floor || ρdc[1,j] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate) 
                 ρc[1,j]      = max( ρ[1,j], ρ_floor )
                 ρu_Xc[1,j]   = ρu_X[1,j]
                 ρu_Yc[1,j]   = ρu_Y[1,j]
@@ -589,35 +636,43 @@ end
         @inbounds @simd for i in dN_Xint
             # RECONSTRUCT ⟨ρ⟩ᵢ → ρ(rcᵢ):
             ρc[i,j]      = w_i_m1_X[i] * ρ[i-1,j]  +  w_i_0_X[i] * ρ[i,j]  +  w_i_p1_X[i] * ρ[i+1,j]
-            Steep_ρ      = SteepOrNot( ρc[i,j], ρ[i-1,j], ρ[i,j], ρ[i+1,j] )
+            τ_ρ          = SteepOrNot( ρc[i,j], ρ[i-1,j], ρ[i,j], ρ[i+1,j] )
 
             ρdc[i,j]     = w_i_m1_X[i] * ρd[i-1,j]  +  w_i_0_X[i] * ρd[i,j]  +  w_i_p1_X[i] * ρd[i+1,j]  # Dust 
-            Steep_ρd     = SteepOrNot( ρdc[i,j], ρd[i-1,j], ρd[i,j], ρd[i+1,j] )
+            τ_ρd         = SteepOrNot( ρdc[i,j], ρd[i-1,j], ρd[i,j], ρd[i+1,j] )
 
             # RECONSTRUCT ⟨ρu_X⟩ᵢ → ρu_X(rcᵢ):
             ρu_Xc[i,j]   = w_i_m1_X[i] * ρu_X[i-1,j]  +  w_i_0_X[i] * ρu_X[i,j]  +  w_i_p1_X[i] * ρu_X[i+1,j]
-            Steep_ρu_X   = SteepOrNot( ρu_Xc[i,j], ρu_X[i-1,j], ρu_X[i,j], ρu_X[i+1,j] )
+            τ_ρu_X       = SteepOrNot( ρu_Xc[i,j], ρu_X[i-1,j], ρu_X[i,j], ρu_X[i+1,j] )
 
             ρdud_Xc[i,j] = w_i_m1_X[i] * ρdud_X[i-1,j]  +  w_i_0_X[i] * ρdud_X[i,j]  +  w_i_p1_X[i] * ρdud_X[i+1,j]  # Dust 
-            Steep_ρdud_X = SteepOrNot( ρdud_Xc[i,j], ρdud_X[i-1,j], ρdud_X[i,j], ρdud_X[i+1,j] )
+            τ_ρdud_X     = SteepOrNot( ρdud_Xc[i,j], ρdud_X[i-1,j], ρdud_X[i,j], ρdud_X[i+1,j] )
 
             # RECONSTRUCT ⟨ρu_Y⟩ᵢ → ρu_Y(rcᵢ):
             ρu_Yc[i,j]   = w_i_m1_X[i] * ρu_Y[i-1,j]  +  w_i_0_X[i] * ρu_Y[i,j]  +  w_i_p1_X[i] * ρu_Y[i+1,j]
-            Steep_ρu_Y   = SteepOrNot( ρu_Yc[i,j], ρu_Y[i-1,j], ρu_Y[i,j], ρu_Y[i+1,j] )
+            τ_ρu_Y       = SteepOrNot( ρu_Yc[i,j], ρu_Y[i-1,j], ρu_Y[i,j], ρu_Y[i+1,j] )
 
             ρdud_Yc[i,j] = w_i_m1_X[i] * ρdud_Y[i-1,j]  +  w_i_0_X[i] * ρdud_Y[i,j]  +  w_i_p1_X[i] * ρdud_Y[i+1,j]
-            Steep_ρdud_Y = SteepOrNot( ρdud_Yc[i,j], ρdud_Y[i-1,j], ρdud_Y[i,j], ρdud_Y[i+1,j] )
+            τ_ρdud_Y     = SteepOrNot( ρdud_Yc[i,j], ρdud_Y[i-1,j], ρdud_Y[i,j], ρdud_Y[i+1,j] )
 
             # RECONSTRUCT ⟨E⟩ᵢ → E(rcᵢ):
             Ec[i,j]      = w_i_m1_X[i] * E[i-1,j]  +  w_i_0_X[i] * E[i,j]  +  w_i_p1_X[i] * E[i+1,j]
-            Steep_E      = SteepOrNot( Ec[i,j], E[i-1,j], E[i,j], E[i+1,j] )
+            τ_E          = SteepOrNot( Ec[i,j], E[i-1,j], E[i,j], E[i+1,j] )
 
-            # GET STEEPNESS INDICATOR:
-            Steep = max( Steep_ρ, Steep_ρd, Steep_ρu_X, Steep_ρdud_X, Steep_ρu_Y, Steep_ρdud_Y, Steep_E )
+            # SAFETY CORRECT FOR STEEPENESS:
+            τ            = min( τ_ρ, τ_ρd, τ_ρu_X, τ_ρdud_X, τ_ρu_Y, τ_ρdud_Y, τ_E )
+            OneMinusτ    = max( 1.0 - τ, 0.0 )
+            ρc[i,j]      = ρc[i,j]      * τ  +  OneMinusτ * ρ[i,j]
+            ρdc[i,j]     = ρdc[i,j]     * τ  +  OneMinusτ * ρd[i,j]
+            ρu_Xc[i,j]   = ρu_Xc[i,j]   * τ  +  OneMinusτ * ρu_X[i,j]
+            ρdud_Xc[i,j] = ρdud_Xc[i,j] * τ  +  OneMinusτ * ρdud_X[i,j]
+            ρu_Yc[i,j]   = ρu_Yc[i,j]   * τ  +  OneMinusτ * ρu_Y[i,j]
+            ρdud_Yc[i,j] = ρdud_Yc[i,j] * τ  +  OneMinusτ * ρdud_Y[i,j]
+            Ec[i,j]      = Ec[i,j]      * τ  +  OneMinusτ * E[i,j]
 
             # SECOND-ORDER SAFETY FALLBACK:
             _, _, Pc_candidate = GetPrimitive( ρc[i,j], ρu_Xc[i,j], ρu_Yc[i,j], Ec[i,j], γad[i,j] )
-            if Shock[i,j] == Shock_HLL_and_PLM || Steep == 1 || ρc[i,j] ≤ ρ_floor || ρdc[i,j] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate)
+            if Shock[i,j] == Shock_HLL_and_PLM || ρc[i,j] ≤ ρ_floor || ρdc[i,j] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate) 
                 ρc[i,j]      = max( ρ[i,j], ρ_floor )
                 ρu_Xc[i,j]   = ρu_X[i,j]
                 ρu_Yc[i,j]   = ρu_Y[i,j]
@@ -668,35 +723,43 @@ end
 
             # RECONSTRUCT ⟨ρ⟩ᵢ → ρ(rcᵢ) AT i = N_X:
             ρc[N_X,j]      =  w_i_m1_X[N_X] * ρ[N_X-1,j]  +  w_i_0_X[N_X] * ρ[N_X,j]  +  w_i_p1_X[N_X] * ρ_Np1
-            Steep_ρ        = SteepOrNot( ρc[N_X,j], ρ[N_X-1,j], ρ[N_X,j], ρ_Np1 )
+            τ_ρ            = SteepOrNot( ρc[N_X,j], ρ[N_X-1,j], ρ[N_X,j], ρ_Np1 )
 
             ρdc[N_X,j]     =  w_i_m1_X[N_X] * ρd[N_X-1,j]  +  w_i_0_X[N_X] * ρd[N_X,j]  +  w_i_p1_X[N_X] * ρd_Np1  # Dust 
-            Steep_ρd       = SteepOrNot( ρdc[N_X,j], ρd[N_X-1,j], ρd[N_X,j], ρd_Np1 )
+            τ_ρd           = SteepOrNot( ρdc[N_X,j], ρd[N_X-1,j], ρd[N_X,j], ρd_Np1 )
 
             # RECONSTRUCT ⟨ρu_X⟩ᵢ → ρu_X(rcᵢ) AT i = N_X:
             ρu_Xc[N_X,j]   = w_i_m1_X[N_X] * ρu_X[N_X-1,j]  +  w_i_0_X[N_X] * ρu_X[N_X,j]  +  w_i_p1_X[N_X] * ρu_X_Np1
-            Steep_ρu_X     = SteepOrNot( ρu_Xc[N_X,j], ρu_X[N_X-1,j], ρu_X[N_X,j], ρu_X_Np1 )
+            τ_ρu_X         = SteepOrNot( ρu_Xc[N_X,j], ρu_X[N_X-1,j], ρu_X[N_X,j], ρu_X_Np1 )
 
             ρdud_Xc[N_X,j] = w_i_m1_X[N_X] * ρdud_X[N_X-1,j]  +  w_i_0_X[N_X] * ρdud_X[N_X,j]  +  w_i_p1_X[N_X] * ρdud_X_Np1  # Dust 
-            Steep_ρdud_X   = SteepOrNot( ρdud_Xc[N_X,j], ρdud_X[N_X-1,j], ρdud_X[N_X,j], ρdud_X_Np1 )
+            τ_ρdud_X       = SteepOrNot( ρdud_Xc[N_X,j], ρdud_X[N_X-1,j], ρdud_X[N_X,j], ρdud_X_Np1 )
 
             # RECONSTRUCT ⟨ρu_Y⟩ᵢ → ρu_Y(rcᵢ) AT i = N_X:
             ρu_Yc[N_X,j]   = w_i_m1_X[N_X] * ρu_Y[N_X-1,j]  +  w_i_0_X[N_X] * ρu_Y[N_X,j]  +  w_i_p1_X[N_X] * ρu_Y_Np1
-            Steep_ρu_Y     = SteepOrNot( ρu_Yc[N_X,j], ρu_Y[N_X-1,j], ρu_Y[N_X,j], ρu_Y_Np1 )
+            τ_ρu_Y         = SteepOrNot( ρu_Yc[N_X,j], ρu_Y[N_X-1,j], ρu_Y[N_X,j], ρu_Y_Np1 )
 
             ρdud_Yc[N_X,j] = w_i_m1_X[N_X] * ρdud_Y[N_X-1,j]  +  w_i_0_X[N_X] * ρdud_Y[N_X,j]  +  w_i_p1_X[N_X] * ρdud_Y_Np1
-            Steep_ρdud_Y   = SteepOrNot( ρdud_Yc[N_X,j], ρdud_Y[N_X-1,j], ρdud_Y[N_X,j], ρdud_Y_Np1 )
+            τ_ρdud_Y       = SteepOrNot( ρdud_Yc[N_X,j], ρdud_Y[N_X-1,j], ρdud_Y[N_X,j], ρdud_Y_Np1 )
 
             # RECONSTRUCT ⟨E⟩ᵢ → E(rcᵢ) AT i = N_X:
             Ec[N_X,j]      = w_i_m1_X[N_X] * E[N_X-1,j]  +  w_i_0_X[N_X] * E[N_X,j]  +  w_i_p1_X[N_X] * E_Np1
-            Steep_E        = SteepOrNot( Ec[N_X,j], E[N_X-1,j], E[N_X,j], E_Np1 )
+            τ_E            = SteepOrNot( Ec[N_X,j], E[N_X-1,j], E[N_X,j], E_Np1 )
 
-            # GET STEEPNESS INDICATOR:
-            Steep = max( Steep_ρ, Steep_ρd, Steep_ρu_X, Steep_ρdud_X, Steep_ρu_Y, Steep_ρdud_Y, Steep_E )
+            # SAFETY CORRECT FOR STEEPENESS:
+            τ              = min( τ_ρ, τ_ρd, τ_ρu_X, τ_ρdud_X, τ_ρu_Y, τ_ρdud_Y, τ_E )
+            OneMinusτ      = max( 1.0 - τ, 0.0 )
+            ρc[N_X,j]      = ρc[N_X,j]      * τ  +  OneMinusτ * ρ[N_X,j]
+            ρdc[N_X,j]     = ρdc[N_X,j]     * τ  +  OneMinusτ * ρd[N_X,j]
+            ρu_Xc[N_X,j]   = ρu_Xc[N_X,j]   * τ  +  OneMinusτ * ρu_X[N_X,j]
+            ρdud_Xc[N_X,j] = ρdud_Xc[N_X,j] * τ  +  OneMinusτ * ρdud_X[N_X,j]
+            ρu_Yc[N_X,j]   = ρu_Yc[N_X,j]   * τ  +  OneMinusτ * ρu_Y[N_X,j]
+            ρdud_Yc[N_X,j] = ρdud_Yc[N_X,j] * τ  +  OneMinusτ * ρdud_Y[N_X,j]
+            Ec[N_X,j]      = Ec[N_X,j]      * τ  +  OneMinusτ * E[N_X,j]
 
             # SECOND-ORDER SAFETY FALLBACK:
             _, _, Pc_candidate = GetPrimitive( ρc[N_X,j], ρu_Xc[N_X,j], ρu_Yc[N_X,j], Ec[N_X,j], γad[N_X,j] )
-            if Shock[N_X,j] == Shock_HLL_and_PLM|| Steep == 1 || ρc[N_X,j] ≤ ρ_floor || ρdc[N_X,j] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate)
+            if Shock[N_X,j] == Shock_HLL_and_PLM || ρc[N_X,j] ≤ ρ_floor || ρdc[N_X,j] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate) 
                 ρc[N_X,j]      = max( ρ[N_X,j], ρ_floor )
                 ρu_Xc[N_X,j]   = ρu_X[N_X,j]
                 ρu_Yc[N_X,j]   = ρu_Y[N_X,j]
@@ -785,35 +848,43 @@ end
 
             # RECONSTRUCT ⟨ρ⟩ⱼ → ρ(Ycⱼ) AT j = 1:
             ρc[i,1]      = w_j_m1_Y[1] * ρ_0  +  w_j_0_Y[1] * ρ[i,1]  +  w_j_p1_Y[1] * ρ[i,2]
-            Steep_ρ      = SteepOrNot( ρc[i,1], ρ_0, ρ[i,1], ρ[i,2] )
+            τ_ρ          = SteepOrNot( ρc[i,1], ρ_0, ρ[i,1], ρ[i,2] )
 
             ρdc[i,1]     = w_j_m1_Y[1] * ρd_0  +  w_j_0_Y[1] * ρd[i,1]  +  w_j_p1_Y[1] * ρd[i,2]  # Dust 
-            Steep_ρd     = SteepOrNot( ρdc[i,1], ρd_0, ρd[i,1], ρd[i,2] )
+            τ_ρd         = SteepOrNot( ρdc[i,1], ρd_0, ρd[i,1], ρd[i,2] )
 
             # RECONSTRUCT ⟨ρu_X⟩ⱼ → ρu_X(Ycⱼ) AT j = 1:
             ρu_Xc[i,1]   = w_j_m1_Y[1] * ρu_X_0  +  w_j_0_Y[1] * ρu_X[i,1]  +  w_j_p1_Y[1] * ρu_X[i,2]
-            Steep_ρu_X   = SteepOrNot( ρu_Xc[i,1], ρu_X_0, ρu_X[i,1], ρu_X[i,2] )
+            τ_ρu_X       = SteepOrNot( ρu_Xc[i,1], ρu_X_0, ρu_X[i,1], ρu_X[i,2] )
 
             ρdud_Xc[i,1] = w_j_m1_Y[1] * ρdud_X_0  +  w_j_0_Y[1] * ρdud_X[i,1]  +  w_j_p1_Y[1] * ρdud_X[i,2]  # Dust 
-            Steep_ρdud_X = SteepOrNot( ρdud_Xc[i,1], ρdud_X_0, ρdud_X[i,1], ρdud_X[i,2] )
+            τ_ρdud_X     = SteepOrNot( ρdud_Xc[i,1], ρdud_X_0, ρdud_X[i,1], ρdud_X[i,2] )
 
             # RECONSTRUCT ⟨ρu_Y⟩ⱼ → ρu_Y(Ycⱼ) AT j = 1:
             ρu_Yc[i,1]   = w_j_m1_Y[1] * ρu_Y_0  +  w_j_0_Y[1] * ρu_Y[i,1]  +  w_j_p1_Y[1] * ρu_Y[i,2]
-            Steep_ρu_Y   = SteepOrNot( ρu_Yc[i,1], ρu_Y_0, ρu_Y[i,1], ρu_Y[i,2] )
+            τ_ρu_Y       = SteepOrNot( ρu_Yc[i,1], ρu_Y_0, ρu_Y[i,1], ρu_Y[i,2] )
 
             ρdud_Yc[i,1] = w_j_m1_Y[1] * ρdud_Y_0  +  w_j_0_Y[1] * ρdud_Y[i,1]  +  w_j_p1_Y[1] * ρdud_Y[i,2]  # Dust 
-            Steep_ρdud_Y = SteepOrNot( ρdud_Yc[i,1], ρdud_Y_0, ρdud_Y[i,1], ρdud_Y[i,2] )
+            τ_ρdud_Y     = SteepOrNot( ρdud_Yc[i,1], ρdud_Y_0, ρdud_Y[i,1], ρdud_Y[i,2] )
 
             # RECONSTRUCT ⟨E⟩ⱼ → E(Ycⱼ) AT j = 1:
-            Ec[i,1]    = w_j_m1_Y[1] * E_0  +  w_j_0_Y[1] * E[i,1]  +  w_j_p1_Y[1] * E[i,2]
-            Steep_E    = SteepOrNot( Ec[i,1], E_0, E[i,1], E[i,2] )
+            Ec[i,1]      = w_j_m1_Y[1] * E_0  +  w_j_0_Y[1] * E[i,1]  +  w_j_p1_Y[1] * E[i,2]
+            τ_E          = SteepOrNot( Ec[i,1], E_0, E[i,1], E[i,2] )
 
-            # GET STEEPNESS INDICATOR:
-            Steep = max( Steep_ρ, Steep_ρd, Steep_ρu_X, Steep_ρdud_X, Steep_ρu_Y, Steep_ρdud_Y, Steep_E )
+            # SAFETY CORRECT FOR STEEPENESS:
+            τ            = min( τ_ρ, τ_ρd, τ_ρu_X, τ_ρdud_X, τ_ρu_Y, τ_ρdud_Y, τ_E )
+            OneMinusτ    = max( 1.0 - τ, 0.0 )
+            ρc[i,1]      = ρc[i,1]      * τ  +  OneMinusτ * ρ[i,1]
+            ρdc[i,1]     = ρdc[i,1]     * τ  +  OneMinusτ * ρd[i,1]
+            ρu_Xc[i,1]   = ρu_Xc[i,1]   * τ  +  OneMinusτ * ρu_X[i,1]
+            ρdud_Xc[i,1] = ρdud_Xc[i,1] * τ  +  OneMinusτ * ρdud_X[i,1]
+            ρu_Yc[i,1]   = ρu_Yc[i,1]   * τ  +  OneMinusτ * ρu_Y[i,1]
+            ρdud_Yc[i,1] = ρdud_Yc[i,1] * τ  +  OneMinusτ * ρdud_Y[i,1]
+            Ec[i,1]      = Ec[i,1]      * τ  +  OneMinusτ * E[i,1]
 
             # SECOND-ORDER SAFETY FALLBACK:
             _, _, Pc_candidate = GetPrimitive( ρc[i,1], ρu_Xc[i,1], ρu_Yc[i,1], Ec[i,1], γad[i,1] )
-            if Shock[i,1] == Shock_HLL_and_PLM || Steep == 1 || ρc[i,1] ≤ ρ_floor || ρdc[i,1] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate)
+            if Shock[i,1] == Shock_HLL_and_PLM || ρc[i,1] ≤ ρ_floor || ρdc[i,1] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate) 
                 ρc[i,1]      = max( ρ[i,1], ρ_floor )
                 ρu_Xc[i,1]   = ρu_X[i,1]
                 ρu_Yc[i,1]   = ρu_Y[i,1]
@@ -831,35 +902,43 @@ end
         @inbounds @simd for i in dN_X
             # RECONSTRUCT ⟨ρ⟩ⱼ → ρ(Ycⱼ):
             ρc[i,j]      = w_j_m1_Y[j] * ρ[i,j-1]  +  w_j_0_Y[j] * ρ[i,j]  +  w_j_p1_Y[j] * ρ[i,j+1]
-            Steep_ρ      = SteepOrNot( ρc[i,j], ρ[i,j-1], ρ[i,j], ρ[i,j+1] )
+            τ_ρ          = SteepOrNot( ρc[i,j], ρ[i,j-1], ρ[i,j], ρ[i,j+1] )
 
             ρdc[i,j]     = w_j_m1_Y[j] * ρd[i,j-1]  +  w_j_0_Y[j] * ρd[i,j]  +  w_j_p1_Y[j] * ρd[i,j+1]  # Dust 
-            Steep_ρd     = SteepOrNot( ρdc[i,j], ρd[i,j-1], ρd[i,j], ρd[i,j+1] )
+            τ_ρd         = SteepOrNot( ρdc[i,j], ρd[i,j-1], ρd[i,j], ρd[i,j+1] )
 
             # RECONSTRUCT ⟨ρu_X⟩ⱼ → ρu_X(Ycⱼ):
             ρu_Xc[i,j]   = w_j_m1_Y[j] * ρu_X[i,j-1]  +  w_j_0_Y[j] * ρu_X[i,j]  +  w_j_p1_Y[j] * ρu_X[i,j+1]
-            Steep_ρu_X   = SteepOrNot( ρu_Xc[i,j], ρu_X[i,j-1], ρu_X[i,j], ρu_X[i,j+1] )
+            τ_ρu_X       = SteepOrNot( ρu_Xc[i,j], ρu_X[i,j-1], ρu_X[i,j], ρu_X[i,j+1] )
 
             ρdud_Xc[i,j] = w_j_m1_Y[j] * ρdud_X[i,j-1]  +  w_j_0_Y[j] * ρdud_X[i,j]  +  w_j_p1_Y[j] * ρdud_X[i,j+1]  # Dust 
-            Steep_ρdud_X = SteepOrNot( ρdud_Xc[i,j], ρdud_X[i,j-1], ρdud_X[i,j], ρdud_X[i,j+1] )
+            τ_ρdud_X     = SteepOrNot( ρdud_Xc[i,j], ρdud_X[i,j-1], ρdud_X[i,j], ρdud_X[i,j+1] )
 
             # RECONSTRUCT ⟨ρu_Y⟩ⱼ → ρu_Y(Ycⱼ):
             ρu_Yc[i,j]   = w_j_m1_Y[j] * ρu_Y[i,j-1]  +  w_j_0_Y[j] * ρu_Y[i,j]  +  w_j_p1_Y[j] * ρu_Y[i,j+1]
-            Steep_ρu_Y   = SteepOrNot( ρu_Yc[i,j], ρu_Y[i,j-1], ρu_Y[i,j], ρu_Y[i,j+1] )
+            τ_ρu_Y       = SteepOrNot( ρu_Yc[i,j], ρu_Y[i,j-1], ρu_Y[i,j], ρu_Y[i,j+1] )
 
             ρdud_Yc[i,j] = w_j_m1_Y[j] * ρdud_Y[i,j-1]  +  w_j_0_Y[j] * ρdud_Y[i,j]  +  w_j_p1_Y[j] * ρdud_Y[i,j+1]  # Dust 
-            Steep_ρdud_Y = SteepOrNot( ρdud_Yc[i,j], ρdud_Y[i,j-1], ρdud_Y[i,j], ρdud_Y[i,j+1] )
+            τ_ρdud_Y     = SteepOrNot( ρdud_Yc[i,j], ρdud_Y[i,j-1], ρdud_Y[i,j], ρdud_Y[i,j+1] )
 
             # RECONSTRUCT ⟨E⟩ⱼ → E(Ycⱼ):
-            Ec[i,j]    = w_j_m1_Y[j] * E[i,j-1]  +  w_j_0_Y[j] * E[i,j]  +  w_j_p1_Y[j] * E[i,j+1]
-            Steep_E    = SteepOrNot( Ec[i,j], E[i,j-1], E[i,j], E[i,j+1] )
+            Ec[i,j]      = w_j_m1_Y[j] * E[i,j-1]  +  w_j_0_Y[j] * E[i,j]  +  w_j_p1_Y[j] * E[i,j+1]
+            τ_E          = SteepOrNot( Ec[i,j], E[i,j-1], E[i,j], E[i,j+1] )
 
-            # GET STEEPNESS INDICATOR:
-            Steep = max( Steep_ρ, Steep_ρu_X, Steep_ρu_Y, Steep_E )
+            # SAFETY CORRECT FOR STEEPENESS:
+            τ            = min( τ_ρ, τ_ρd, τ_ρu_X, τ_ρdud_X, τ_ρu_Y, τ_ρdud_Y, τ_E )
+            OneMinusτ    = max( 1.0 - τ, 0.0 )
+            ρc[i,j]      = ρc[i,j]      * τ  +  OneMinusτ * ρ[i,j]
+            ρdc[i,j]     = ρdc[i,j]     * τ  +  OneMinusτ * ρd[i,j]
+            ρu_Xc[i,j]   = ρu_Xc[i,j]   * τ  +  OneMinusτ * ρu_X[i,j]
+            ρdud_Xc[i,j] = ρdud_Xc[i,j] * τ  +  OneMinusτ * ρdud_X[i,j]
+            ρu_Yc[i,j]   = ρu_Yc[i,j]   * τ  +  OneMinusτ * ρu_Y[i,j]
+            ρdud_Yc[i,j] = ρdud_Yc[i,j] * τ  +  OneMinusτ * ρdud_Y[i,j]
+            Ec[i,j]      = Ec[i,j]      * τ  +  OneMinusτ * E[i,j]
 
             # SECOND-ORDER SAFETY FALLBACK:
             _, _, Pc_candidate = GetPrimitive( ρc[i,j], ρu_Xc[i,j], ρu_Yc[i,j], Ec[i,j], γad[i,j] )
-            if Shock[i,j] == Shock_HLL_and_PLM || Steep == 1 || ρc[i,j] ≤ ρ_floor || ρdc[i,j] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate)
+            if Shock[i,j] == Shock_HLL_and_PLM || ρc[i,j] ≤ ρ_floor || ρdc[i,j] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate) 
                 ρc[i,j]      = max( ρ[i,j], ρ_floor )
                 ρu_Xc[i,j]   = ρu_X[i,j]
                 ρu_Yc[i,j]   = ρu_Y[i,j]
@@ -909,35 +988,43 @@ end
 
             # RECONSTRUCT ⟨ρ⟩ⱼ → ρ(Ycⱼ) AT j = N_Y:
             ρc[i,N_Y]      = w_j_m1_Y[N_Y] * ρ[i,N_Y-1]  +  w_j_0_Y[N_Y] * ρ[i,N_Y]  +  w_j_p1_Y[N_Y] * ρ_Np1
-            Steep_ρ        = SteepOrNot( ρc[i,N_Y], ρ[i,N_Y-1], ρ[i,N_Y], ρ_Np1 )
+            τ_ρ            = SteepOrNot( ρc[i,N_Y], ρ[i,N_Y-1], ρ[i,N_Y], ρ_Np1 )
 
             ρdc[i,N_Y]     = w_j_m1_Y[N_Y] * ρd[i,N_Y-1]  +  w_j_0_Y[N_Y] * ρd[i,N_Y]  +  w_j_p1_Y[N_Y] * ρd_Np1  # Dust 
-            Steep_ρd       = SteepOrNot( ρdc[i,N_Y], ρd[i,N_Y-1], ρd[i,N_Y], ρd_Np1 )
+            τ_ρd           = SteepOrNot( ρdc[i,N_Y], ρd[i,N_Y-1], ρd[i,N_Y], ρd_Np1 )
 
             # RECONSTRUCT ⟨ρu_X⟩ⱼ → ρu_X(Ycⱼ) AT j = N_Y:
             ρu_Xc[i,N_Y]   = w_j_m1_Y[N_Y] * ρu_X[i,N_Y-1]  +  w_j_0_Y[N_Y] * ρu_X[i,N_Y]  +  w_j_p1_Y[N_Y] * ρu_X_Np1
-            Steep_ρu_X     = SteepOrNot( ρu_Xc[i,N_Y], ρu_X[i,N_Y-1], ρu_X[i,N_Y], ρu_X_Np1 )
+            τ_ρu_X         = SteepOrNot( ρu_Xc[i,N_Y], ρu_X[i,N_Y-1], ρu_X[i,N_Y], ρu_X_Np1 )
 
             ρdud_Xc[i,N_Y] = w_j_m1_Y[N_Y] * ρdud_X[i,N_Y-1]  +  w_j_0_Y[N_Y] * ρdud_X[i,N_Y]  +  w_j_p1_Y[N_Y] * ρdud_X_Np1  # Dust 
-            Steep_ρdud_X   = SteepOrNot( ρdud_Xc[i,N_Y], ρdud_X[i,N_Y-1], ρdud_X[i,N_Y], ρdud_X_Np1 )
+            τ_ρdud_X       = SteepOrNot( ρdud_Xc[i,N_Y], ρdud_X[i,N_Y-1], ρdud_X[i,N_Y], ρdud_X_Np1 )
 
             # RECONSTRUCT ⟨ρu_Y⟩ⱼ → ρu_Y(Ycⱼ) AT j = N_Y:
             ρu_Yc[i,N_Y]   = w_j_m1_Y[N_Y] * ρu_Y[i,N_Y-1]  +  w_j_0_Y[N_Y] * ρu_Y[i,N_Y]  +  w_j_p1_Y[N_Y] * ρu_Y_Np1
-            Steep_ρu_Y     = SteepOrNot( ρu_Yc[i,N_Y], ρu_Y[i,N_Y-1], ρu_Y[i,N_Y], ρu_Y_Np1 )
+            τ_ρu_Y         = SteepOrNot( ρu_Yc[i,N_Y], ρu_Y[i,N_Y-1], ρu_Y[i,N_Y], ρu_Y_Np1 )
 
             ρdud_Yc[i,N_Y] = w_j_m1_Y[N_Y] * ρdud_Y[i,N_Y-1]  +  w_j_0_Y[N_Y] * ρdud_Y[i,N_Y]  +  w_j_p1_Y[N_Y] * ρdud_Y_Np1  # Dust 
-            Steep_ρdud_Y   = SteepOrNot( ρdud_Yc[i,N_Y], ρdud_Y[i,N_Y-1], ρdud_Y[i,N_Y], ρdud_Y_Np1 )
+            τ_ρdud_Y       = SteepOrNot( ρdud_Yc[i,N_Y], ρdud_Y[i,N_Y-1], ρdud_Y[i,N_Y], ρdud_Y_Np1 )
 
             # RECONSTRUCT ⟨E⟩ⱼ → E(Ycⱼ) AT j = N_Y:
             Ec[i,N_Y]      = w_j_m1_Y[N_Y] * E[i,N_Y-1]  +  w_j_0_Y[N_Y] * E[i,N_Y]  +  w_j_p1_Y[N_Y] * E_Np1
-            Steep_E        = SteepOrNot( Ec[i,N_Y], E[i,N_Y-1], E[i,N_Y], E_Np1 )
+            τ_E            = SteepOrNot( Ec[i,N_Y], E[i,N_Y-1], E[i,N_Y], E_Np1 )
 
-            # GET STEEPNESS INDICATOR:
-            Steep = max( Steep_ρ, Steep_ρd, Steep_ρu_X, Steep_ρdud_X, Steep_ρu_Y, Steep_ρdud_Y, Steep_E )
+            # SAFETY CORRECT FOR STEEPENESS:
+            τ              = min( τ_ρ, τ_ρd, τ_ρu_X, τ_ρdud_X, τ_ρu_Y, τ_ρdud_Y, τ_E )
+            OneMinusτ      = max( 1.0 - τ, 0.0 )
+            ρc[i,N_Y]      = ρc[i,N_Y]      * τ  +  OneMinusτ * ρ[i,N_Y]
+            ρdc[i,N_Y]     = ρdc[i,N_Y]     * τ  +  OneMinusτ * ρd[i,N_Y]
+            ρu_Xc[i,N_Y]   = ρu_Xc[i,N_Y]   * τ  +  OneMinusτ * ρu_X[i,N_Y]
+            ρdud_Xc[i,N_Y] = ρdud_Xc[i,N_Y] * τ  +  OneMinusτ * ρdud_X[i,N_Y]
+            ρu_Yc[i,N_Y]   = ρu_Yc[i,N_Y]   * τ  +  OneMinusτ * ρu_Y[i,N_Y]
+            ρdud_Yc[i,N_Y] = ρdud_Yc[i,N_Y] * τ  +  OneMinusτ * ρdud_Y[i,N_Y]
+            Ec[i,N_Y]      = Ec[i,N_Y]      * τ  +  OneMinusτ * E[i,N_Y]
 
             # SECOND-ORDER SAFETY FALLBACK:
             _, _, Pc_candidate = GetPrimitive( ρc[i,N_Y], ρu_Xc[i,N_Y], ρu_Yc[i,N_Y], Ec[i,N_Y], γad[i,N_Y] )
-            if Shock[i,N_Y] == Shock_HLL_and_PLM || Steep == 1 || ρc[i,N_Y] ≤ ρ_floor || ρdc[i,N_Y] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate)
+            if Shock[i,N_Y] == Shock_HLL_and_PLM || ρc[i,N_Y] ≤ ρ_floor || ρdc[i,N_Y] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate) 
                 ρc[i,N_Y]      = max( ρ[i,N_Y], ρ_floor )
                 ρu_Xc[i,N_Y]   = ρu_X[i,N_Y]
                 ρu_Yc[i,N_Y]   = ρu_Y[i,N_Y]
@@ -1051,25 +1138,31 @@ end
             end
             
             u_X[1,j]    = q_i_m1_X[1] * u_Xc_0  +  q_i_0_X[1] * u_Xc[1,j]  +  q_i_p1_X[1] * u_Xc[2,j]
-            Steep_u_X   = SteepOrNot( u_X[1,j], u_Xc_0, u_Xc[1,j], u_Xc[2,j] )
+            τ_u_X       = SteepOrNot( u_X[1,j], u_Xc_0, u_Xc[1,j], u_Xc[2,j] )
 
             u_Y[1,j]    = q_i_m1_X[1] * u_Yc_0  +  q_i_0_X[1] * u_Yc[1,j]  +  q_i_p1_X[1] * u_Yc[2,j]
-            Steep_u_Y   = SteepOrNot( u_Y[1,j], u_Yc_0, u_Yc[1,j], u_Yc[2,j] )
+            τ_u_Y       = SteepOrNot( u_Y[1,j], u_Yc_0, u_Yc[1,j], u_Yc[2,j] )
 
             P[1,j]      = q_i_m1_X[1] * Pc_0  +  q_i_0_X[1] * Pc[1,j]  +  q_i_p1_X[1] * Pc[2,j]
-            Steep_P     = SteepOrNot( P[1,j], Pc_0, Pc[1,j], Pc[2,j] )
+            τ_P         = SteepOrNot( P[1,j], Pc_0, Pc[1,j], Pc[2,j] )
 
             ud_X[1,j]   = q_i_m1_X[1] * ud_Xc_0  +  q_i_0_X[1] * ud_Xc[1,j]  +  q_i_p1_X[1] * ud_Xc[2,j]  # Dust 
-            Steep_ud_X  = SteepOrNot( ud_X[1,j], ud_Xc_0, ud_Xc[1,j], ud_Xc[2,j] )
+            τ_ud_X      = SteepOrNot( ud_X[1,j], ud_Xc_0, ud_Xc[1,j], ud_Xc[2,j] )
 
             ud_Y[1,j]   = q_i_m1_X[1] * ud_Yc_0  +  q_i_0_X[1] * ud_Yc[1,j]  +  q_i_p1_X[1] * ud_Yc[2,j]
-            Steep_ud_Y  = SteepOrNot( ud_Y[1,j], ud_Yc_0, ud_Yc[1,j], ud_Yc[2,j] )
+            τ_ud_Y      = SteepOrNot( ud_Y[1,j], ud_Yc_0, ud_Yc[1,j], ud_Yc[2,j] )
 
-            # GET STEEPNESS INDICATOR:
-            Steep = max( Steep_u_X, Steep_ud_X, Steep_u_Y, Steep_ud_Y, Steep_P )
+            # SAFETY CORRECT FOR STEEPENESS:
+            τ           = min( τ_u_X, τ_ud_X, τ_u_Y, τ_ud_Y, τ_P )
+            OneMinusτ   = max( 1.0 - τ, 0.0 )
+            u_X[1,j]    = u_X[1,j]  * τ  +  OneMinusτ * u_Xc[1,j]
+            ud_X[1,j]   = ud_X[1,j] * τ  +  OneMinusτ * ud_Xc[1,j]
+            u_Y[1,j]    = u_Y[1,j]  * τ  +  OneMinusτ * u_Yc[1,j]
+            ud_Y[1,j]   = ud_Y[1,j] * τ  +  OneMinusτ * ud_Yc[1,j]
+            P[1,j]      = P[1,j]    * τ  +  OneMinusτ * Pc[1,j]
 
             # SECOND-ORDER SAFETY FALLBACK:
-            if Shock[1,j] == Shock_HLL_and_PLM || Steep == 1 || P[1,j] ≤ P_floor || !isfinite(P[1,j])
+            if Shock[1,j] == Shock_HLL_and_PLM || P[1,j] ≤ P_floor || !isfinite(P[1,j]) 
                 u_X[1,j]  = u_Xc[1,j] 
                 u_Y[1,j]  = u_Yc[1,j]
                 P[1,j]    = Pc[1,j] 
@@ -1085,25 +1178,31 @@ end
         @inbounds @simd for i in dN_Xint
 
             u_X[i,j]    = q_i_m1_X[i] * u_Xc[i-1,j]  +  q_i_0_X[i] * u_Xc[i,j]  +  q_i_p1_X[i] * u_Xc[i+1,j]
-            Steep_u_X   = SteepOrNot( u_X[i,j], u_Xc[i-1,j], u_Xc[i,j], u_Xc[i+1,j] )
+            τ_u_X       = SteepOrNot( u_X[i,j], u_Xc[i-1,j], u_Xc[i,j], u_Xc[i+1,j] )
 
             u_Y[i,j]    = q_i_m1_X[i] * u_Yc[i-1,j]  +  q_i_0_X[i] * u_Yc[i,j]  +  q_i_p1_X[i] * u_Yc[i+1,j]
-            Steep_u_Y   = SteepOrNot( u_Y[i,j], u_Yc[i-1,j], u_Yc[i,j], u_Yc[i+1,j] )
+            τ_u_Y       = SteepOrNot( u_Y[i,j], u_Yc[i-1,j], u_Yc[i,j], u_Yc[i+1,j] )
 
             P[i,j]      = q_i_m1_X[i] * Pc[i-1,j]  +  q_i_0_X[i] * Pc[i,j]  +  q_i_p1_X[i] * Pc[i+1,j]
-            Steep_P     = SteepOrNot( P[i,j], Pc[i-1,j], Pc[i,j], Pc[i+1,j] )
+            τ_P         = SteepOrNot( P[i,j], Pc[i-1,j], Pc[i,j], Pc[i+1,j] )
 
             ud_X[i,j]   = q_i_m1_X[i] * ud_Xc[i-1,j]  +  q_i_0_X[i] * ud_Xc[i,j]  +  q_i_p1_X[i] * ud_Xc[i+1,j]  # Dust 
-            Steep_ud_X  = SteepOrNot( ud_X[i,j], ud_Xc[i-1,j], ud_Xc[i,j], ud_Xc[i+1,j] )
+            τ_ud_X      = SteepOrNot( ud_X[i,j], ud_Xc[i-1,j], ud_Xc[i,j], ud_Xc[i+1,j] )
 
             ud_Y[i,j]   = q_i_m1_X[i] * ud_Yc[i-1,j]  +  q_i_0_X[i] * ud_Yc[i,j]  +  q_i_p1_X[i] * ud_Yc[i+1,j]
-            Steep_ud_Y  = SteepOrNot( ud_Y[i,j], ud_Yc[i-1,j], ud_Yc[i,j], ud_Yc[i+1,j] )
+            τ_ud_Y      = SteepOrNot( ud_Y[i,j], ud_Yc[i-1,j], ud_Yc[i,j], ud_Yc[i+1,j] )
 
-            # GET STEEPNESS INDICATOR:
-            Steep = max( Steep_u_X, Steep_ud_X, Steep_u_Y, Steep_ud_Y, Steep_P )
+            # SAFETY CORRECT FOR STEEPENESS:
+            τ           = min( τ_u_X, τ_ud_X, τ_u_Y, τ_ud_Y, τ_P )
+            OneMinusτ   = max( 1.0 - τ, 0.0 )
+            u_X[i,j]    = u_X[i,j]  * τ  +  OneMinusτ * u_Xc[i,j]
+            ud_X[i,j]   = ud_X[i,j] * τ  +  OneMinusτ * ud_Xc[i,j]
+            u_Y[i,j]    = u_Y[i,j]  * τ  +  OneMinusτ * u_Yc[i,j]
+            ud_Y[i,j]   = ud_Y[i,j] * τ  +  OneMinusτ * ud_Yc[i,j]
+            P[i,j]      = P[i,j]    * τ  +  OneMinusτ * Pc[i,j]
 
             # SECOND-ORDER SAFETY FALLBACK:
-            if Shock[i,j] == Shock_HLL_and_PLM || Steep == 1 || P[i,j] ≤ P_floor || !isfinite(P[i,j])
+            if Shock[i,j] == Shock_HLL_and_PLM || P[i,j] ≤ P_floor || !isfinite(P[i,j]) 
                 u_X[i,j]  = u_Xc[i,j] 
                 u_Y[i,j]  = u_Yc[i,j]
                 P[i,j]    = Pc[i,j] 
@@ -1144,25 +1243,31 @@ end
             end
             
             u_X[N_X,j]   = q_i_m1_X[N_X] * u_Xc[N_X-1,j]  +  q_i_0_X[N_X] * u_Xc[N_X,j]  +  q_i_p1_X[N_X] * u_Xc_Np1
-            Steep_u_X    = SteepOrNot( u_X[N_X,j], u_Xc[N_X-1,j], u_Xc[N_X,j], u_Xc_Np1 )
+            τ_u_X        = SteepOrNot( u_X[N_X,j], u_Xc[N_X-1,j], u_Xc[N_X,j], u_Xc_Np1 )
 
             u_Y[N_X,j]   = q_i_m1_X[N_X] * u_Yc[N_X-1,j]  +  q_i_0_X[N_X] * u_Yc[N_X,j]  +  q_i_p1_X[N_X] * u_Yc_Np1
-            Steep_u_Y    = SteepOrNot( u_Y[N_X,j], u_Yc[N_X-1,j], u_Yc[N_X,j], u_Yc_Np1 )
+            τ_u_Y        = SteepOrNot( u_Y[N_X,j], u_Yc[N_X-1,j], u_Yc[N_X,j], u_Yc_Np1 )
 
             P[N_X,j]     = q_i_m1_X[N_X] * Pc[N_X-1,j]  +  q_i_0_X[N_X] * Pc[N_X,j]  +  q_i_p1_X[N_X] * Pc_Np1
-            Steep_P      = SteepOrNot( P[N_X,j], Pc[N_X-1,j], Pc[N_X,j], Pc_Np1 )
+            τ_P          = SteepOrNot( P[N_X,j], Pc[N_X-1,j], Pc[N_X,j], Pc_Np1 )
 
             ud_X[N_X,j]  = q_i_m1_X[N_X] * ud_Xc[N_X-1,j]  +  q_i_0_X[N_X] * ud_Xc[N_X,j]  +  q_i_p1_X[N_X] * ud_Xc_Np1  # Dust 
-            Steep_ud_X   = SteepOrNot( ud_X[N_X,j], ud_Xc[N_X-1,j], ud_Xc[N_X,j], ud_Xc_Np1 )
+            τ_ud_X       = SteepOrNot( ud_X[N_X,j], ud_Xc[N_X-1,j], ud_Xc[N_X,j], ud_Xc_Np1 )
 
             ud_Y[N_X,j]  = q_i_m1_X[N_X] * ud_Yc[N_X-1,j]  +  q_i_0_X[N_X] * ud_Yc[N_X,j]  +  q_i_p1_X[N_X] * ud_Yc_Np1
-            Steep_ud_Y   = SteepOrNot( ud_Y[N_X,j], ud_Yc[N_X-1,j], ud_Yc[N_X,j], ud_Yc_Np1 )
+            τ_ud_Y       = SteepOrNot( ud_Y[N_X,j], ud_Yc[N_X-1,j], ud_Yc[N_X,j], ud_Yc_Np1 )
 
-            # GET STEEPNESS INDICATOR:
-            Steep = max( Steep_u_X, Steep_ud_X, Steep_u_Y, Steep_ud_Y, Steep_P )
+            # SAFETY CORRECT FOR STEEPENESS:
+            τ            = min( τ_u_X, τ_ud_X, τ_u_Y, τ_ud_Y, τ_P )
+            OneMinusτ    = max( 1.0 - τ, 0.0 )
+            u_X[N_X,j]   = u_X[N_X,j]  * τ  +  OneMinusτ * u_Xc[N_X,j]
+            ud_X[N_X,j]  = ud_X[N_X,j] * τ  +  OneMinusτ * ud_Xc[N_X,j]
+            u_Y[N_X,j]   = u_Y[N_X,j]  * τ  +  OneMinusτ * u_Yc[N_X,j]
+            ud_Y[N_X,j]  = ud_Y[N_X,j] * τ  +  OneMinusτ * ud_Yc[N_X,j]
+            P[N_X,j]     = P[N_X,j]    * τ  +  OneMinusτ * Pc[N_X,j]
 
             # SECOND-ORDER SAFETY FALLBACK:
-            if Shock[N_X,j] == Shock_HLL_and_PLM || Steep == 1 || P[N_X,j] ≤ P_floor || !isfinite(P[N_X,j])
+            if Shock[N_X,j] == Shock_HLL_and_PLM || P[N_X,j] ≤ P_floor || !isfinite(P[N_X,j]) 
                 u_X[N_X,j]  = u_Xc[N_X,j] 
                 u_Y[N_X,j]  = u_Yc[N_X,j]
                 P[N_X,j]    = Pc[N_X,j] 
@@ -1235,25 +1340,31 @@ end
             end
             
             u_X[i,1]    = q_j_m1_Y[1] * u_Xc_0  +  q_j_0_Y[1] * u_Xc[i,1]  +  q_j_p1_Y[1] * u_Xc[i,2]
-            Steep_u_X   = SteepOrNot( u_X[i,1], u_Xc_0, u_Xc[i,1], u_Xc[i,2] )
+            τ_u_X       = SteepOrNot( u_X[i,1], u_Xc_0, u_Xc[i,1], u_Xc[i,2] )
 
             u_Y[i,1]    = q_j_m1_Y[1] * u_Yc_0  +  q_j_0_Y[1] * u_Yc[i,1]  +  q_j_p1_Y[1] * u_Yc[i,2]
-            Steep_u_Y   = SteepOrNot( u_Y[i,1], u_Yc_0, u_Yc[i,1], u_Yc[i,2] )
+            τ_u_Y       = SteepOrNot( u_Y[i,1], u_Yc_0, u_Yc[i,1], u_Yc[i,2] )
 
             P[i,1]      = q_j_m1_Y[1] * Pc_0  +  q_j_0_Y[1] * Pc[i,1]  +  q_j_p1_Y[1] * Pc[i,2]
-            Steep_P     = SteepOrNot( P[i,1], Pc_0, Pc[i,1], Pc[i,2] )
+            τ_P         = SteepOrNot( P[i,1], Pc_0, Pc[i,1], Pc[i,2] )
 
             ud_X[i,1]   = q_j_m1_Y[1] * ud_Xc_0  +  q_j_0_Y[1] * ud_Xc[i,1]  +  q_j_p1_Y[1] * ud_Xc[i,2]  # Dust 
-            Steep_ud_X  = SteepOrNot( ud_X[i,1], ud_Xc_0, ud_Xc[i,1], ud_Xc[i,2] )
+            τ_ud_X      = SteepOrNot( ud_X[i,1], ud_Xc_0, ud_Xc[i,1], ud_Xc[i,2] )
 
             ud_Y[i,1]   = q_j_m1_Y[1] * ud_Yc_0  +  q_j_0_Y[1] * ud_Yc[i,1]  +  q_j_p1_Y[1] * ud_Yc[i,2]
-            Steep_ud_Y  = SteepOrNot( ud_Y[i,1], ud_Yc_0, ud_Yc[i,1], ud_Yc[i,2] )
+            τ_ud_Y      = SteepOrNot( ud_Y[i,1], ud_Yc_0, ud_Yc[i,1], ud_Yc[i,2] )
 
-            # GET STEEPNESS INDICATOR:
-            Steep = max( Steep_u_X, Steep_ud_X, Steep_u_Y, Steep_ud_Y, Steep_P )
+            # SAFETY CORRECT FOR STEEPENESS:
+            τ           = min( τ_u_X, τ_ud_X, τ_u_Y, τ_ud_Y, τ_P )
+            OneMinusτ   = max( 1.0 - τ, 0.0 )
+            u_X[i,1]    = u_X[i,1]  * τ  +  OneMinusτ * u_Xc[i,1]
+            ud_X[i,1]   = ud_X[i,1] * τ  +  OneMinusτ * ud_Xc[i,1]
+            u_Y[i,1]    = u_Y[i,1]  * τ  +  OneMinusτ * u_Yc[i,1]
+            ud_Y[i,1]   = ud_Y[i,1] * τ  +  OneMinusτ * ud_Yc[i,1]
+            P[i,1]      = P[i,1]    * τ  +  OneMinusτ * Pc[i,1]
 
             # SECOND-ORDER SAFETY FALLBACK:
-            if Shock[i,1] == Shock_HLL_and_PLM || Steep == 1 || P[i,1] ≤ P_floor || !isfinite(P[i,1])
+            if Shock[i,1] == Shock_HLL_and_PLM || P[i,1] ≤ P_floor || !isfinite(P[i,1]) 
                 u_X[i,1]  = u_Xc[i,1] 
                 u_Y[i,1]  = u_Yc[i,1]
                 P[i,1]    = Pc[i,1] 
@@ -1269,25 +1380,31 @@ end
         @inbounds @simd for i in dN_X
 
             u_X[i,j]    = q_j_m1_Y[j] * u_Xc[i,j-1]  +  q_j_0_Y[j] * u_Xc[i,j]  +  q_j_p1_Y[j] * u_Xc[i,j+1]
-            Steep_u_X   = SteepOrNot( u_X[i,j], u_Xc[i,j-1], u_Xc[i,j], u_Xc[i,j+1] )
+            τ_u_X       = SteepOrNot( u_X[i,j], u_Xc[i,j-1], u_Xc[i,j], u_Xc[i,j+1] )
 
             u_Y[i,j]    = q_j_m1_Y[j] * u_Yc[i,j-1]  +  q_j_0_Y[j] * u_Yc[i,j]  +  q_j_p1_Y[j] * u_Yc[i,j+1]
-            Steep_u_Y   = SteepOrNot( u_Y[i,j], u_Yc[i,j-1], u_Yc[i,j], u_Yc[i,j+1] )
+            τ_u_Y       = SteepOrNot( u_Y[i,j], u_Yc[i,j-1], u_Yc[i,j], u_Yc[i,j+1] )
 
             P[i,j]      = q_j_m1_Y[j] * Pc[i,j-1]  +  q_j_0_Y[j] * Pc[i,j]  +  q_j_p1_Y[j] * Pc[i,j+1]
-            Steep_P     = SteepOrNot( P[i,j], Pc[i,j-1], Pc[i,j], Pc[i,j+1] )
+            τ_P         = SteepOrNot( P[i,j], Pc[i,j-1], Pc[i,j], Pc[i,j+1] )
 
             ud_X[i,j]   = q_j_m1_Y[j] * ud_Xc[i,j-1]  +  q_j_0_Y[j] * ud_Xc[i,j]  +  q_j_p1_Y[j] * ud_Xc[i,j+1]  # Dust 
-            Steep_ud_X  = SteepOrNot( ud_X[i,j], ud_Xc[i,j-1], ud_Xc[i,j], ud_Xc[i,j+1] )
+            τ_ud_X      = SteepOrNot( ud_X[i,j], ud_Xc[i,j-1], ud_Xc[i,j], ud_Xc[i,j+1] )
 
             ud_Y[i,j]   = q_j_m1_Y[j] * ud_Yc[i,j-1]  +  q_j_0_Y[j] * ud_Yc[i,j]  +  q_j_p1_Y[j] * ud_Yc[i,j+1]
-            Steep_ud_Y  = SteepOrNot( ud_Y[i,j], ud_Yc[i,j-1], ud_Yc[i,j], ud_Yc[i,j+1] )
+            τ_ud_Y      = SteepOrNot( ud_Y[i,j], ud_Yc[i,j-1], ud_Yc[i,j], ud_Yc[i,j+1] )
 
-            # GET STEEPNESS INDICATOR:
-            Steep = max( Steep_u_X, Steep_ud_X, Steep_u_Y, Steep_ud_Y, Steep_P )
+            # SAFETY CORRECT FOR STEEPENESS:
+            τ           = min( τ_u_X, τ_ud_X, τ_u_Y, τ_ud_Y, τ_P )
+            OneMinusτ   = max( 1.0 - τ, 0.0 )
+            u_X[i,j]    = u_X[i,j]  * τ  +  OneMinusτ * u_Xc[i,j]
+            ud_X[i,j]   = ud_X[i,j] * τ  +  OneMinusτ * ud_Xc[i,j]
+            u_Y[i,j]    = u_Y[i,j]  * τ  +  OneMinusτ * u_Yc[i,j]
+            ud_Y[i,j]   = ud_Y[i,j] * τ  +  OneMinusτ * ud_Yc[i,j]
+            P[i,j]      = P[i,j]    * τ  +  OneMinusτ * Pc[i,j]
 
             # SECOND-ORDER SAFETY FALLBACK:
-            if Shock[i,j] == Shock_HLL_and_PLM || Steep == 1 || P[i,j] ≤ P_floor || !isfinite(P[i,j])
+            if Shock[i,j] == Shock_HLL_and_PLM || P[i,j] ≤ P_floor || !isfinite(P[i,j]) 
                 u_X[i,j]  = u_Xc[i,j] 
                 u_Y[i,j]  = u_Yc[i,j]
                 P[i,j]    = Pc[i,j] 
@@ -1328,25 +1445,31 @@ end
             end
             
             u_X[i,N_Y]  = q_j_m1_Y[N_Y] * u_Xc[i,N_Y-1]  +  q_j_0_Y[N_Y] * u_Xc[i,N_Y]  +  q_j_p1_Y[N_Y] * u_Xc_Np1
-            Steep_u_X   = SteepOrNot( u_X[i,N_Y], u_Xc[i,N_Y-1], u_Xc[i,N_Y], u_Xc_Np1 )
+            τ_u_X       = SteepOrNot( u_X[i,N_Y], u_Xc[i,N_Y-1], u_Xc[i,N_Y], u_Xc_Np1 )
 
             u_Y[i,N_Y]  = q_j_m1_Y[N_Y] * u_Yc[i,N_Y-1]  +  q_j_0_Y[N_Y] * u_Yc[i,N_Y]  +  q_j_p1_Y[N_Y] * u_Yc_Np1
-            Steep_u_Y   = SteepOrNot( u_Y[i,N_Y], u_Yc[i,N_Y-1], u_Yc[i,N_Y], u_Yc_Np1 )
+            τ_u_Y       = SteepOrNot( u_Y[i,N_Y], u_Yc[i,N_Y-1], u_Yc[i,N_Y], u_Yc_Np1 )
 
             P[i,N_Y]    = q_j_m1_Y[N_Y] * Pc[i,N_Y-1]  +  q_j_0_Y[N_Y] * Pc[i,N_Y]  +  q_j_p1_Y[N_Y] * Pc_Np1
-            Steep_P     = SteepOrNot( P[i,N_Y], Pc[i,N_Y-1], Pc[i,N_Y], Pc_Np1 )
+            τ_P         = SteepOrNot( P[i,N_Y], Pc[i,N_Y-1], Pc[i,N_Y], Pc_Np1 )
 
             ud_X[i,N_Y] = q_j_m1_Y[N_Y] * ud_Xc[i,N_Y-1]  +  q_j_0_Y[N_Y] * ud_Xc[i,N_Y]  +  q_j_p1_Y[N_Y] * ud_Xc_Np1  # Dust
-            Steep_ud_X  = SteepOrNot( ud_X[i,N_Y], ud_Xc[i,N_Y-1], ud_Xc[i,N_Y], ud_Xc_Np1 )
+            τ_ud_X      = SteepOrNot( ud_X[i,N_Y], ud_Xc[i,N_Y-1], ud_Xc[i,N_Y], ud_Xc_Np1 )
 
             ud_Y[i,N_Y] = q_j_m1_Y[N_Y] * ud_Yc[i,N_Y-1]  +  q_j_0_Y[N_Y] * ud_Yc[i,N_Y]  +  q_j_p1_Y[N_Y] * ud_Yc_Np1
-            Steep_ud_Y  = SteepOrNot( ud_Y[i,N_Y], ud_Yc[i,N_Y-1], ud_Yc[i,N_Y], ud_Yc_Np1 )
+            τ_ud_Y      = SteepOrNot( ud_Y[i,N_Y], ud_Yc[i,N_Y-1], ud_Yc[i,N_Y], ud_Yc_Np1 )
 
-            # GET STEEPNESS INDICATOR:
-            Steep = max( Steep_u_X, Steep_ud_X, Steep_u_Y, Steep_ud_Y, Steep_P )
+            # SAFETY CORRECT FOR STEEPENESS:
+            τ           = min( τ_u_X, τ_ud_X, τ_u_Y, τ_ud_Y, τ_P )
+            OneMinusτ   = max( 1.0 - τ, 0.0 )
+            u_X[i,N_Y]  = u_X[i,N_Y]  * τ  +  OneMinusτ * u_Xc[i,N_Y]
+            ud_X[i,N_Y] = ud_X[i,N_Y] * τ  +  OneMinusτ * ud_Xc[i,N_Y]
+            u_Y[i,N_Y]  = u_Y[i,N_Y]  * τ  +  OneMinusτ * u_Yc[i,N_Y]
+            ud_Y[i,N_Y] = ud_Y[i,N_Y] * τ  +  OneMinusτ * ud_Yc[i,N_Y]
+            P[i,N_Y]    = P[i,N_Y]    * τ  +  OneMinusτ * Pc[i,N_Y]
 
             # SECOND-ORDER SAFETY FALLBACK:
-            if Shock[i,N_Y] == Shock_HLL_and_PLM || Steep == 1 || P[i,N_Y] ≤ P_floor || !isfinite(P[i,N_Y])
+            if Shock[i,N_Y] == Shock_HLL_and_PLM || P[i,N_Y] ≤ P_floor || !isfinite(P[i,N_Y]) 
                 u_X[i,N_Y]  = u_Xc[i,N_Y] 
                 u_Y[i,N_Y]  = u_Yc[i,N_Y]
                 P[i,N_Y]    = Pc[i,N_Y] 
@@ -2096,6 +2219,111 @@ end
 end
 
 
+""" This function computes HLL fluxes for
+    the conserved variables: 
+
+    - F_ρ  (density), 
+    - F_ρu (momentum), 
+    - F_ρv (transverse momentum)
+    - F_E  (energy) 
+
+    Also returns the contact speed, and wave speeds. """
+function GetFlux_HLL( ρ_L::Float64, 
+                      ρ_R::Float64, 
+                      u_L::Float64, 
+                      u_R::Float64,
+                      v_L::Float64,     
+                      v_R::Float64, 
+                      P_L::Float64,  
+                      P_R::Float64, 
+                    γad_L::Float64,
+                    γad_R::Float64
+                  )
+
+    if DEBUG_Hydro
+        @assert P_L ≥ 0.0 && isfinite(P_L) "P_L must be ≥ 0 in the HLL flux. Here P_L = $(P_L), γad_R = $(γad_R), γad_L = $(γad_L). "
+        @assert P_R ≥ 0.0 && isfinite(P_R) "P_R must be ≥ 0 in the HLL flux. Here P_R = $(P_R), γad_R = $(γad_R), γad_L = $(γad_L). "
+        @assert ρ_L ≥ 0.0 && isfinite(ρ_L) "ρ_L must be ≥ 0 in the HLL flux. Here ρ_L = $(ρ_L). "
+        @assert ρ_R ≥ 0.0 && isfinite(ρ_R) "ρ_R must be ≥ 0 in the HLL flux. Here ρ_R = $(ρ_R)"
+        @assert isfinite(u_L) "u_L must be finite in the HLL flux. Here u_L = $(u_L). "
+        @assert isfinite(u_R) "u_R must be finite in the HLL flux. Here u_R = $(u_R). "
+        @assert isfinite(v_L) "v_L must be finite in the HLL flux. Here v_L = $(v_L). "
+        @assert isfinite(v_R) "v_R must be finite in the HLL flux. Here v_R = $(v_R). "
+    end
+    
+    # Left & right energies:
+    E_L    = P_L / (γad_L - 1)  +  0.5 * ρ_L * (u_L^2 + v_L^2)
+    E_R    = P_R / (γad_R - 1)  +  0.5 * ρ_R * (u_R^2 + v_R^2)
+
+    # Estimate wave speeds S_L and S_R:
+    S_L, S_R = GetGasWaveSpeeds( ρ_L, ρ_R,
+                                 u_L, u_R,
+                                 P_L, P_R,
+                                 γad_L, γad_R )
+
+    @assert isfinite(S_L) 
+    @assert isfinite(S_R)
+
+    # Conserved variables:
+    ρu_L   = ρ_L * u_L 
+    ρu_R   = ρ_R * u_R 
+    ρv_L   = ρ_L * v_L   # Transverse momentum in left state
+    ρv_R   = ρ_R * v_R   # Transverse momentum in right state 
+
+    # Compute fluxes for left state:
+    F_ρ_L  = ρu_L 
+    F_ρu_L = ρ_L * u_L^2  +  P_L  
+    F_ρv_L = ρv_L * u_L 
+    F_E_L  = u_L * (E_L + P_L)
+
+    # Compute fluxes for right state:
+    F_ρ_R  = ρu_R 
+    F_ρu_R = ρ_R * u_R^2  +  P_R 
+    F_ρv_R = ρv_R * u_R
+    F_E_R  = u_R * (E_R + P_R)
+
+    if S_L ≥ 0.0
+        # In this case, all waves move right, so use left state fluxes:
+        F_ρ  = F_ρ_L 
+        F_ρu = F_ρu_L 
+        F_ρv = F_ρv_L
+        F_E  = F_E_L
+    elseif S_R ≤ 0.0
+        # In this case, all waves move left, so use right state fluxes:
+        F_ρ  = F_ρ_R
+        F_ρu = F_ρu_R 
+        F_ρv = F_ρv_R
+        F_E  = F_E_R 
+    else
+        # In this case we have a mixed case, and use the HLL formula:
+        inv_denom = 1 / ( S_R  -  S_L )
+        F_ρ       = ( S_R * F_ρ_L  - S_L * F_ρ_R  + S_L * S_R * (ρ_R  - ρ_L)  ) * inv_denom
+        F_ρu      = ( S_R * F_ρu_L - S_L * F_ρu_R + S_L * S_R * (ρu_R - ρu_L) ) * inv_denom
+        F_ρv      = ( S_R * F_ρv_L - S_L * F_ρv_R + S_L * S_R * (ρv_R - ρv_L) ) * inv_denom
+        F_E       = ( S_R * F_E_L  - S_L * F_E_R  + S_L * S_R * (E_R - E_L)   ) * inv_denom
+
+    end
+
+    # Estimate wave speed in star region (contact speed). This is not needed in 
+    # the HLL flux itself, but will be needed in the M1 RT advection:
+    S_L_minus_u_L = S_L - u_L
+    S_R_minus_u_R = S_R - u_R
+
+    S_star = ( ( P_R - P_L ) + ( ρu_L * S_L_minus_u_L - ρu_R * S_R_minus_u_R ) ) / 
+             ( ρ_L * S_L_minus_u_L - ρ_R * S_R_minus_u_R )
+
+    if !isfinite(S_star)
+        # In case we get e.g. division by zero, use expected physical 
+        # value:
+        S_star = ( ρ_L * u_L  +  ρ_R * u_R ) / ( ρ_L + ρ_R )
+    end
+
+    S_star = clamp( S_star, S_L, S_R ) 
+
+    return F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R
+end
+
+
 """ This function computes HLLC fluxes for
     the conserved variables: 
 
@@ -2138,7 +2366,6 @@ function GetFlux_HLLC( ρ_L::Float64,
                                  P_L, P_R,
                                  γad_L, γad_R )
 
-
     # Conserved variables:
     ρu_L   = ρ_L * u_L 
     ρu_R   = ρ_R * u_R 
@@ -2146,8 +2373,11 @@ function GetFlux_HLLC( ρ_L::Float64,
     ρv_R   = ρ_R * v_R   # Transverse momentum in right state 
 
     # Estimate wave speed in star region (contact speed):
-    S_star = ( P_R - P_L + ρu_L * (S_L - u_L) - ρu_R * (S_R - u_R)  ) / 
-             ( ρ_L * (S_L - u_L) - ρ_R * (S_R - u_R) )
+    S_L_minus_u_L = S_L - u_L
+    S_R_minus_u_R = S_R - u_R
+
+    S_star = ( ( P_R - P_L ) + ( ρu_L * S_L_minus_u_L - ρu_R * S_R_minus_u_R ) ) / 
+             ( ρ_L * S_L_minus_u_L - ρ_R * S_R_minus_u_R )
 
     if !isfinite(S_star)
         # In case we get e.g. division by zero, use expected physical 
@@ -2156,6 +2386,12 @@ function GetFlux_HLLC( ρ_L::Float64,
     end
 
     S_star = clamp( S_star, S_L, S_R ) 
+
+    # Exit early and use HLL, if the wave speeds would produce undefined HLLC flux:
+    ϵS = 1e-12 * max( 1.0, abs(S_L), abs(S_R), abs(S_star), abs(u_L), abs(u_R) )
+    if !(S_L < S_star < S_R) || abs(S_L - S_star) ≤ ϵS || abs(S_R - S_star) ≤ ϵS
+        return GetFlux_HLL( ρ_L, ρ_R, u_L, u_R, v_L, v_R, P_L, P_R, γad_L, γad_R )
+    end
 
     # Compute fluxes for left state:
     F_ρ_L  = ρu_L 
@@ -2167,7 +2403,7 @@ function GetFlux_HLLC( ρ_L::Float64,
     F_ρ_R  = ρu_R 
     F_ρu_R = ρ_R * u_R^2  +  P_R 
     F_ρv_R = ρv_R * u_R
-    F_E_R  = u_R * (E_R + P_R )
+    F_E_R  = u_R * (E_R + P_R)
 
     # Now, based on wave speeds, compute the HLLC flux:
     if S_L ≥ 0.0
@@ -2213,104 +2449,11 @@ function GetFlux_HLLC( ρ_L::Float64,
         F_E       = S_R * ( E_R_star - E_R )    +  F_E_R 
     end
 
-    return F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R
-end
-
-
-""" This function computes HLL fluxes for
-    the conserved variables: 
-
-    - F_ρ  (density), 
-    - F_ρu (momentum), 
-    - F_ρv (transverse momentum)
-    - F_E  (energy) 
-
-    Also returns the contact speed, and wave speeds. """
-function GetFlux_HLL( ρ_L::Float64, 
-                      ρ_R::Float64, 
-                      u_L::Float64, 
-                      u_R::Float64,
-                      v_L::Float64,     
-                      v_R::Float64, 
-                      P_L::Float64,  
-                      P_R::Float64, 
-                    γad_L::Float64,
-                    γad_R::Float64
-                  )
-
-    if DEBUG_Hydro
-        @assert P_L ≥ 0.0 && isfinite(P_L) "P_L must be ≥ 0 in the HLL flux. Here P_L = $(P_L), γad_R = $(γad_R), γad_L = $(γad_L). "
-        @assert P_R ≥ 0.0 && isfinite(P_R) "P_R must be ≥ 0 in the HLL flux. Here P_R = $(P_R), γad_R = $(γad_R), γad_L = $(γad_L). "
-        @assert ρ_L ≥ 0.0 && isfinite(ρ_L) "ρ_L must be ≥ 0 in the HLL flux. Here ρ_L = $(ρ_L). "
-        @assert ρ_R ≥ 0.0 && isfinite(ρ_R) "ρ_R must be ≥ 0 in the HLL flux. Here ρ_R = $(ρ_R)"
-        @assert isfinite(u_L) "u_L must be finite in the HLL flux. Here u_L = $(u_L). "
-        @assert isfinite(u_R) "u_R must be finite in the HLL flux. Here u_R = $(u_R). "
-        @assert isfinite(v_L) "v_L must be finite in the HLL flux. Here v_L = $(v_L). "
-        @assert isfinite(v_R) "v_R must be finite in the HLL flux. Here v_R = $(v_R). "
+    # Make a final check that the fluxes are finite. If not, fall back 
+    # to HLL:
+    if !( isfinite(F_ρ) && isfinite(F_ρu) && isfinite(F_ρv) && isfinite(F_E) )
+        return GetFlux_HLL( ρ_L, ρ_R, u_L, u_R, v_L, v_R, P_L, P_R, γad_L, γad_R )
     end
-    
-    # Left & right energies:
-    E_L    = P_L / (γad_L - 1)  +  0.5 * ρ_L * (u_L^2 + v_L^2)
-    E_R    = P_R / (γad_R - 1)  +  0.5 * ρ_R * (u_R^2 + v_R^2)
-
-    # Estimate wave speeds S_L and S_R:
-    S_L, S_R = GetGasWaveSpeeds( ρ_L, ρ_R,
-                                 u_L, u_R,
-                                 P_L, P_R,
-                                 γad_L, γad_R )
-
-    # Conserved variables:
-    ρu_L   = ρ_L * u_L 
-    ρu_R   = ρ_R * u_R 
-    ρv_L   = ρ_L * v_L   # Transverse momentum in left state
-    ρv_R   = ρ_R * v_R   # Transverse momentum in right state 
-
-    # Compute fluxes for left state:
-    F_ρ_L  = ρu_L 
-    F_ρu_L = ρ_L * u_L^2  +  P_L  
-    F_ρv_L = ρv_L * u_L 
-    F_E_L  = u_L * (E_L + P_L)
-
-    # Compute fluxes for right state:
-    F_ρ_R  = ρu_R 
-    F_ρu_R = ρ_R * u_R^2  +  P_R 
-    F_ρv_R = ρv_R * u_R
-    F_E_R  = u_R * (E_R + P_R)
-
-    if S_L ≥ 0.0
-        # In this case, all waves move right, so use left state fluxes:
-        F_ρ  = F_ρ_L 
-        F_ρu = F_ρu_L 
-        F_ρv = F_ρv_L
-        F_E  = F_E_L
-    elseif S_R ≤ 0.0
-        # In this case, all waves move left, so use right state fluxes:
-        F_ρ  = F_ρ_R
-        F_ρu = F_ρu_R 
-        F_ρv = F_ρv_R
-        F_E  = F_E_R 
-    else
-        # In this case we have a mixed case, and use the HLL formula:
-        inv_denom = 1 / ( S_R  -  S_L )
-        F_ρ       = ( S_R * F_ρ_L  - S_L * F_ρ_R  + S_L * S_R * (ρ_R  - ρ_L)  ) * inv_denom
-        F_ρu      = ( S_R * F_ρu_L - S_L * F_ρu_R + S_L * S_R * (ρu_R - ρu_L) ) * inv_denom
-        F_ρv      = ( S_R * F_ρv_L - S_L * F_ρv_R + S_L * S_R * (ρv_R - ρv_L) ) * inv_denom
-        F_E       = ( S_R * F_E_L  - S_L * F_E_R  + S_L * S_R * (E_R - E_L)   ) * inv_denom
-
-    end
-
-    # Estimate wave speed in star region (contact speed). This is not needed in 
-    # the HLL flux itself, but will be needed in the M1 RT advection:
-    S_star = ( P_R - P_L + ρu_L * (S_L - u_L) - ρu_R * (S_R - u_R)  ) / 
-             ( ρ_L * (S_L - u_L) - ρ_R * (S_R - u_R) )
-
-    if !isfinite(S_star)
-        # In case we get e.g. division by zero, use expected physical 
-        # value:
-        S_star = ( ρ_L * u_L  +  ρ_R * u_R ) / ( ρ_L + ρ_R )
-    end
-
-    S_star = clamp( S_star, S_L, S_R ) 
 
     return F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R
 end
@@ -2402,7 +2545,7 @@ end
     F_ρvd_L = ρdvd_L * ud_L
     F_ρvd_R = ρdvd_R * ud_R
 
-    # (12): gas fan fully to the right
+    # Eq. (12) in Verrier et al. (2025):
     if Sg_L > 0.0
         if ud_L > 0.0 && ud_R > 0.0
             return F_ρ_L, F_ρud_L, F_ρvd_L
@@ -2411,7 +2554,7 @@ end
         end
     end
 
-    # (13): gas fan fully to the left
+    # Eq. (13) in Verrier et al. (2025):
     if Sg_R < 0.0
         if ud_L < 0.0 && ud_R < 0.0
             return F_ρ_R, F_ρud_R, F_ρvd_R
@@ -2420,7 +2563,7 @@ end
         end
     end
 
-    # (14): mixed gas fan; use HLL(d) only if BOTH dust normal velocities lie inside the gas fan
+    # Eq. (14) in Verrier et al. (2025):
     if (Sg_L < ud_L < Sg_R) && (Sg_L < ud_R < Sg_R)
         return GetHLLFlux_Dust( ρd_L, ρd_R, ud_L, ud_R, vd_L, vd_R, Sg_L, Sg_R )
     else
@@ -2669,7 +2812,21 @@ end
                                            F_R::Float64
                                              )
 
-    Qnew = Q  +  S * Δt  -  (Δt * inv_ΔV) * ( A_R * F_R  -  A_L * F_L )
+    FluxTerms = 0.0
+    if A_L > 0.0
+        # Add flux from left state if the left interface area 
+        # is non-zero:
+        FluxTerms -=  A_L * F_L
+    end
+
+    if A_R > 0.0
+        # Add flux from right state if the right interface area 
+        # is non-zero:
+        FluxTerms +=  A_R * F_R 
+    end
+
+    Qnew = Q  +  S * Δt  -  (Δt * inv_ΔV) * FluxTerms
+
     return Qnew
 end
 
@@ -2757,7 +2914,10 @@ function UpdateConserved_X!( ρ::AbstractMatrix{Float64},
                     @assert isfinite(ρ[i,j])    "ρ[$(i),$(j)] = $(ρ[i,j]) following the update in UpdateConserved_X!."
                     @assert isfinite(ρu_X[i,j]) "ρu_X[$(i),$(j)] = $(ρu_X[i,j]) following the update in UpdateConserved_X!."
                     @assert isfinite(ρu_Y[i,j]) "ρu_Y[$(i),$(j)] = $(ρu_Y[i,j]) following the update in UpdateConserved_X!."
-                    @assert isfinite(E[i,j])    "E[$(i),$(j)] = $(E[i,j]) following the update in UpdateConserved_X!."
+                    @assert isfinite(E[i,j])    """ E[$(i),$(j)] = $(E[i,j]) following the update in UpdateConserved_X!. More info:
+                                                    E_old[$(i),$(j)]   = $(E_old[i,j])
+                                                    F_E_X[$(i),$(j)]   = $(F_E_X[i,j])
+                                                    F_E_X[$(i+1),$(j)] = $(F_E_X[i+1,j]). """
 
                     @assert isfinite(ρd[i,j])     "ρd[$(i),$(j)] = $(ρd[i,j]) following the update in UpdateConserved_X!."
                     @assert isfinite(ρdud_X[i,j]) "ρdud_X[$(i),$(j)] = $(ρdud_X[i,j]) following the update in UpdateConserved_X!."
@@ -2861,7 +3021,10 @@ function UpdateConserved_X!( ρ::AbstractMatrix{Float64},
                     @assert isfinite(ρ[i,j])    "ρ[$(i),$(j)] = $(ρ[i,j]) following the update in UpdateConserved_X!."
                     @assert isfinite(ρu_X[i,j]) "ρu_X[$(i),$(j)] = $(ρu_X[i,j]) following the update in UpdateConserved_X!."
                     @assert isfinite(ρu_Y[i,j]) "ρu_Y[$(i),$(j)] = $(ρu_Y[i,j]) following the update in UpdateConserved_X!."
-                    @assert isfinite(E[i,j])    "E[$(i),$(j)] = $(E[i,j]) following the update in UpdateConserved_X!."
+                    @assert isfinite(E[i,j])    """ E[$(i),$(j)] = $(E[i,j]) following the update in UpdateConserved_X!. More info:
+                                                    E_old[$(i),$(j)]   = $(E_old[i,j])
+                                                    F_E_X[$(i),$(j)]   = $(F_E_X[i,j])
+                                                    F_E_X[$(i+1),$(j)] = $(F_E_X[i+1,j]). """
 
                     @assert isfinite(ρd[i,j])     "ρd[$(i),$(j)] = $(ρd[i,j]) following the update in UpdateConserved_X!."
                     @assert isfinite(ρdud_X[i,j]) "ρdud_X[$(i),$(j)] = $(ρdud_X[i,j]) following the update in UpdateConserved_X!."
@@ -2949,7 +3112,10 @@ function UpdateConserved_Y!( ρ::AbstractMatrix{Float64},
                     @assert isfinite(ρ[i,j])    "ρ[$(i),$(j)] = $(ρ[i,j]) following the update in UpdateConserved_X!."
                     @assert isfinite(ρu_X[i,j]) "ρu_X[$(i),$(j)] = $(ρu_X[i,j]) following the update in UpdateConserved_X!."
                     @assert isfinite(ρu_Y[i,j]) "ρu_Y[$(i),$(j)] = $(ρu_Y[i,j]) following the update in UpdateConserved_X!."
-                    @assert isfinite(E[i,j])    "E[$(i),$(j)] = $(E[i,j]) following the update in UpdateConserved_X!."
+                    @assert isfinite(E[i,j])    "E[$(i),$(j)] = $(E[i,j]) following the update in UpdateConserved_X!. More info:
+                                                 E_old[$(i),$(j)]   = $(E_old[i,j])
+                                                 F_E_Y[$(i),$(j)]   = $(F_E_Y[i,j])
+                                                 F_E_Y[$(i),$(j+1)] = $(F_E_Y[i,j+1])."
 
                     @assert isfinite(ρd[i,j])     "ρd[$(i),$(j)] = $(ρd[i,j]) following the update in UpdateConserved_X!."
                     @assert isfinite(ρdud_X[i,j]) "ρdud_X[$(i),$(j)] = $(ρdud_X[i,j]) following the update in UpdateConserved_X!."
@@ -5049,19 +5215,25 @@ function UpdateHydro!( Δt::Float64,
 end
 
 
+""" This function updates the gravitational potential Φ (by calling the 
+    Poisson solver), and does a gravity kick to the hydro + dust variables.
+    
+    Only if the density has changed sufficiently is the gravity solver called,
+    which can save computing time. """
 function GravitySolveAndKick!( Δt::Float64,
                        HydroState::HydrodynamicsState,
                         GravState::GravityState,
                        GravCoeffs::GravityCoeffs,
-                               ΔV::AbstractArray{Float64},
-                             XCoM::AbstractArray{Float64}, 
-                             YCoM::AbstractArray{Float64} )
+                               ΔV::AbstractArray{Float64, 2},
+                                X::AbstractArray{Float64, 1},
+                                Y::AbstractArray{Float64, 1},
+                             XCoM::AbstractArray{Float64, 1}, 
+                             YCoM::AbstractArray{Float64, 1} )
 
     # Unpack some hydro & dust variables for convenience:
     ρu_X     = HydroState.ρu_X
     ρu_Y     = HydroState.ρu_Y 
-    ρ        = HydroState.ρ       # Latest densities from after hydro advecton step 
-    ρ0       = HydroState.ρ0      # Old densities from *before* hydro advecton step 
+    ρ        = HydroState.ρ       # Latest densities 
     E        = HydroState.E
     ρdud_X   = HydroState.ρdud_X
     ρdud_Y   = HydroState.ρdud_Y
@@ -5078,31 +5250,30 @@ function GravitySolveAndKick!( Δt::Float64,
     dN_X       = 1:N_X
     dN_Y       = 1:N_Y 
 
-    # Fill ρ0 with the estimated ρ^(n+1/2), similarly for dust:
-    @. ρ0      = 0.5 * ( ρ0  + ρ )
-    @. ρd0     = 0.5 * ( ρd0 + ρd )
-
     # Check whether we should update Φ or not:
     ShouldWeUpdate = ShouldWeUpdateΦ( GravState.Φ, 
-                                      ρ0, ρd, ρ_bg,
+                                      ρ, ρd, ρ_bg,
                                       GravCoeffs.RPoiss_ijp, GravCoeffs.RPoiss_ij, GravCoeffs.RPoiss_ijm,
-                                      GravCoeffs.ZPoiss_ijp, GravCoeffs.ZPoiss_ij, GravCoeffs.ZPoiss_ijm )
+                                      GravCoeffs.ZPoiss_ijp, GravCoeffs.ZPoiss_ij, GravCoeffs.ZPoiss_ijm,
+                                      BC_Z_bot )
 
     # If ShouldWeUpdate = true, we solve the Poisson equation for the updated 
     # potential Φ, and the updated gravitational acceleration:
     if ShouldWeUpdate 
         Update_Φ!( GravState.Φ, GravState.Φ_half, GravState.Φ_old, GravState.Φ_snapshot, 
-                   ρtot, ρ0, ρd0, ρ_bg,
+                   ρtot, ρ, ρd, ρ_bg,
                    GravCoeffs.RPoiss_ijp, GravCoeffs.RPoiss_ij, GravCoeffs.RPoiss_ijm,
                    GravCoeffs.ZPoiss_ijp, GravCoeffs.ZPoiss_ij, GravCoeffs.ZPoiss_ijm, 
                    GravCoeffs.Δτ_max, GravCoeffs.Δτ_min,
                    ΔV, XCoM, YCoM, GravState.Q, GravState.P, GravState.ℓmax, BC_Z_bot )
                            
         Update_∇Φ!( GravState.∂Φ∂r, GravState.∂Φ∂Z, GravState.Φ, 
-                    GravState.f_gravity_r, GravState.f_gravity_Z, ρ, XCoM, YCoM )
+                    GravState.f_gravity_r, GravState.f_gravity_Z, ρ,
+                    X, Y, XCoM, YCoM, GravState.P, GravState.Q,
+                    BC_Z_bot, GravState.ℓmax )
     end
 
-    # Finally, we perform a second-order in time gravity kick to the
+    # Finally, we perform a gravity kick to the
     # hydro variables:
     @threads for j in dN_Y 
         @inbounds for i in dN_X
@@ -5112,8 +5283,8 @@ function GravitySolveAndKick!( Δt::Float64,
             e_adv        =  E[i,j]  -  (ρu_X[i,j]^2  +  ρu_Y[i,j]^2) * Inv_2ρ 
 
             # Update momenta to second-order accuracy, using ρ0 = ρ^(n+1/2): 
-            ρu_X[i,j]   -=  ρ0[i,j] * GravState.∂Φ∂r[i,j] * Δt 
-            ρu_Y[i,j]   -=  ρ0[i,j] * GravState.∂Φ∂Z[i,j] * Δt 
+            ρu_X[i,j]   -=  ρ[i,j] * GravState.∂Φ∂r[i,j] * Δt 
+            ρu_Y[i,j]   -=  ρ[i,j] * GravState.∂Φ∂Z[i,j] * Δt 
 
             # Update gas energy, ensuring the internal energy remains unchanged:
             E[i,j]       =  e_adv  +  (ρu_X[i,j]^2  +  ρu_Y[i,j]^2) * Inv_2ρ  

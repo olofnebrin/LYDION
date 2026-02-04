@@ -6,28 +6,28 @@ using .RHDSolver.ConstantsAndFunctions   # For constants (e.g. unit conversions)
 using  Dates                             # To have date in the file name for convenience
 
 
-tmax::Float64                      =  3e5 * yr     # Stop simulation at t = tmax (unless it stops automatically earlier)
-Nsaved::Int                        =  300          # Target number of saved time-steps (if saving is turned on -- see below)
-Nminsteps::Int                     =  300          # Minimum number of time-steps taken in simulation 
-Nmaxsteps::Int                     =  100000       # Maximum number of time-steps taken in simulation 
+tmax::Float64                      =  3e5 * yr      # Stop simulation at t = tmax (unless it stops automatically earlier)
+Nsaved::Int                        =  300           # Target number of saved time-steps (if saving is turned on -- see below)
+Nminsteps::Int                     =  300           # Minimum number of time-steps taken in simulation 
+Nmaxsteps::Int                     =  100000        # Maximum number of time-steps taken in simulation 
 
 #########################################################################
 #################  S T E L L A R  P R O P E R T I E S  ##################
 #########################################################################
 
 mstarZAMS::Float64                 =  35            # Initial mass of the star (M⊙)
-Zstar_Zsun::Float64                =  0.0           # Metallicity of the star in Solar units 
-σstar_cell::Float64                =  4             # Gaussian size of stellar emission region in cell size units (≳ 4 for approximately spherical H II regions)
+Zstar_Zsun::Float64                =  1.0           # Metallicity of the star in Solar units 
+σstar_cell::Float64                =  5             # Gaussian size of stellar emission region in cell size units (≳ 5 for approximately spherical H II regions)
 
 #########################################################################
 ######  C L O U D  P R O P E R T I E S  &  S P A T I A L  G R I D  ######
 #########################################################################
 
 z::Float64                         =  0.0           # Redshift 
-DG₀::Float64                       =  0.0 * DGsun   # Dust-to-gas ratio (NOTE: *not* normalized to Solar value. To get e.g. Solar, set DG₀ = DGsun)
+DG₀::Float64                       =  1.0 * DGsun   # Dust-to-gas ratio (NOTE: *not* normalized to Solar value. To get e.g. Solar, set DG₀ = DGsun)
 Zgas_Zsun::Float64                 =  Zstar_Zsun    # Gas metallicity in Solar units 
 nH₀::Float64                       =  3e3           # Initial cloud density (cm⁻³)
-nH_ext::Float64                    =  1e-5 * nH₀    # Initial density far outside the cloud (cm⁻³)
+nH_ext::Float64                    =  1e-7 * nH₀    # Initial density far outside the cloud (cm⁻³)
 T₀::Float64                        =  500           # Initial cloud temperature (K)
 T_ext::Float64                     =  500           # Temperature outside the cloud 
 Rcl::Float64                       =  2 * pc        # Radius of cloud (i.e. high-density region)
@@ -44,8 +44,8 @@ Rmax_lin::Float64                  =  6 * pc        # Uniform/linear grid out to
 LZ_uniform::Float64                =  6 * pc        # Total extent of uniform grid along the Z-axis.  
 Rmax::Float64                      =  6 * pc        # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
 Zmax::Float64                      =  6 * pc        # Maximum extent along Z-axis. Should be ≥ LZ_uniform.
-N_r_lin::Int                       =  64            # Number of cells along r-direction in the uniform grid section 
-N_Z_lin::Int                       =  64            # Number of cells along Z-direction in the uniform grid section 
+N_r_lin::Int                       =  128           # Number of cells along r-direction in the uniform grid section 
+N_Z_lin::Int                       =  128           # Number of cells along Z-direction in the uniform grid section 
 N_r_log::Int                       =  0             # Number of cells along r-direction in the logarithmic grid section 
 N_Z_log_side::Int                  =  0             # Number of cells along Z-direction (per side if BC_Z_bot = :Outflow) in the logarithmic grid section  
  
