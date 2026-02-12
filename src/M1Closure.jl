@@ -10,7 +10,8 @@ using .ConstantsAndFunctions  # For constants like OneThird = 1/3
 using Base.Threads            # For CPU acceleration
 
 # Export functions:
-export Compute_D_Edd, Update_D_Edd!, Update_D_Edd_Serial!, Update_D_Edd_Threaded!,
+export Compute_D_Edd, Compute_D_Edd_from_f_n,
+       Update_D_Edd!, Update_D_Edd_Serial!, Update_D_Edd_Threaded!,
        M1WaveSpeeds_r, M1WaveSpeeds_Z
 
 # Export constants:
@@ -30,8 +31,9 @@ const DEBUG_M1Closure = false
 end
 
  
-const fmin::Float64         = 1e-15      
-const fmax::Float64         = 1.0 - 1e-15  # To avoid rounding errors from calculation of χ 
+const fmin::Float64         = 1e-10     
+const fmax::Float64         = 1.0 - 1e-10  # To avoid rounding errors from calculation of χ 
+const fmin_squared::Float64 = fmin * fmin 
 const Jeps::Float64         = 1e-60
 const Heps::Float64         = 1e-100
 const Heps_squared::Float64 = Heps * Heps 
@@ -46,7 +48,7 @@ const Heps_squared::Float64 = Heps * Heps
     # Squared magnitude of H:
     Hmag_squared = H_r * H_r  +  H_Z * H_Z
 
-    if J ≤ Jeps || Hmag_squared ≤ Heps_squared 
+    if J ≤ Jeps || Hmag_squared ≤ Heps_squared || Hmag_squared ≤ fmin_squared * J * J
         # If the flux is near zero, or if we have ≈ no intensity at all,
         # we assume isotropic intensity:
         D_rr = OneThird
@@ -78,6 +80,43 @@ const Heps_squared::Float64 = Heps * Heps
 end
 
 
+""" This function computes & returns Eddington tensor (D) components D_rr, D_ZZ, D_rZ 
+    for a given cell or cell interface having reduced flux f and flux direction vetors 
+    nr and nZ. Assumes the Levermore M1 closure. 
+    
+    This form is useful in the M1 reconstruction of D at interfaces. """
+@inline @fastmath function Compute_D_Edd_from_f_n( f::Float64, 
+                                                  nr::Float64, 
+                                                  nZ::Float64 )
+       
+    # Compute f:
+    #f = clamp( f, fmin, fmax )
+    if f > fmin
+        f = min( f, fmax )
+        χ = χ_L84( f )
+
+        # Convenient factors:
+        a = (1  -  χ) * 0.5
+        b = (3 * χ  -  1) * 0.5
+
+        # Get the components of D:
+        D_rr = a  +  b * nr * nr
+        D_ZZ = a  +  b * nZ * nZ
+        D_rZ = b * nr * nZ
+
+        return D_rr, D_ZZ, D_rZ
+    else
+        D_rr = OneThird
+        D_ZZ = OneThird
+        D_rZ = 0.0
+
+        return D_rr, D_ZZ, D_rZ
+    end
+
+end
+
+
+
 """ Updates the relevant Eddington factors D = K / J, for a single 
     frequency bin. This version does *not* use threading over spatial cells. """
 @fastmath function Update_D_Edd_Serial!( D_rr::AbstractArray{TypeOfD, 2},  # rr-component of D (N_r x N_Z elements)
@@ -101,6 +140,7 @@ end
         end # End of i-loop
     end # End of j-loop 
 
+    return nothing 
 end
 
 
@@ -156,7 +196,9 @@ const TwoThirds::Float64 = 2 / 3
         @assert min(λ1, λ3) ≥ - 1.0 "min(λ1, λ3) = $(min(λ1, λ3))"
     end
 
-    return λ1, λ3
+    return -1.0, 1.0
+
+    #return λ1, λ3
 end 
 
 

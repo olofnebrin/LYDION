@@ -13,7 +13,6 @@ BLAS.set_num_threads(1)       # Ensure the tridiagonal solver is not threaded (w
 
 # Some basic underlying files:
 include( "./WENO3.jl" )
-include( "./ExponentialScheme.jl" )
 include( "./TridiagonalSolver.jl" )
 include( "./M1Closure.jl" ) 
 include( "./AdvectJandH.jl" )
@@ -249,8 +248,7 @@ function UpdateRHD!( Δt_Hydro::Float64,
                                              chemstate,
                                              duststate,
                                              z, CoolingHeating,
-                                             inv_ΔV, A_r, A_Z, 
-                                             r, rCoM, Z, ZCoM, inv_r_cell,
+                                             geometry,
                                              u_r_star_r, u_Z_star_Z, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r, 
                                              LyaState, Lyα, 
                                              RadPressure )
@@ -377,9 +375,10 @@ end
 function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                             Zstar_Zsun::Float64,  # Stellar metallicity Z_star / Z⊙
                                    DG₀::Float64,  # Dust-to-gas ratio (*not* normalized to Solar value)
-                                   nH₀::Float64,  # H density (cm⁻³) inside cloud 
+                               nH_core::Float64,  # H density (cm⁻³) inside cloud core 
                                 nH_ext::Float64,  # H density (cm⁻³) far outside cloud 
-                                   Rcl::Float64,  # Radius of 'cloud', i.e. higher density region
+                                 Rcore::Float64,  # Radius of 'cloud core', i.e. higher density region
+                                   Rcl::Float64,  # Radius of 'cloud'
                             σstar_cell::Float64,  # Gaussian σ (in units of cell size) that determines extent of spatially smeared star
                               Rmax_lin::Float64,
                             LZ_uniform::Float64,
@@ -387,6 +386,8 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                                   Zmax::Float64,
                                     T₀::Float64,  # Temperature within cloud 
                                  T_ext::Float64,  # Temperature outside cloud 
+                    POWER_LAW_ENVELOPE::Bool,     # Whether to use a power law envelope density profile outside
+                            p_ENVELOPE::Float64,  # Power law for envelope, ρ ∝ r^(-p_ENVELOPE), if used 
                                   tmax::Float64,
                                  xHII₀::Float64,  # H II fraction inside the cloud 
                                   xH2₀::Float64,  # H₂ fraction inside the cloud 
@@ -442,8 +443,12 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
 
     PrintLYDIONLogo()
 
+    if POWER_LAW_ENVELOPE
+        @assert p_ENVELOPE ≥ 0.0 "Density should drop off at large radii, i.e. p_ENVELOPE ≥ 0.0. "
+    end
+
     # Initialize the RSL for M1 stellar & Lyα RT (will be updated adaptively each time-step)
-    c̃          = 300 * kms  
+    c̃          = 30 * kms  
 
     # Setup cylindrical grid:
     LZ_uniform = min( LZ_uniform, Zmax )
@@ -477,14 +482,15 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
 
 
     if print_info
-        println("Number of threads used: $(Threads.nthreads())"); flush(stdout)
-        println()
+        println(""" Number of threads used: $(Threads.nthreads())
+                    Julia version:          $(VERSION) """); flush(stdout)
+        println("---------------------------------")
         if SaveData
             println("Data will be saved to HDF5 file: $(FileName)."); flush(stdout)
             println()
         end
         print(""" Simulation setup: A $(mstarZAMS) M⊙ star in a cloud of 
-                  initial density nH = $(nH₀) cm⁻³, metallicity Z/Z⊙ = $(Zgas_Zsun),
+                  initial maximum density nH = $(nH_core) cm⁻³, metallicity Z/Z⊙ = $(Zgas_Zsun),
                   dust-to-gas ratio D/D⊙ = $(DG₀/DGsun). Initial turbulent RMS velocity 
                   is $(u_RMSturb/1e5) km s⁻¹.
 
@@ -492,10 +498,12 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                   
                   PHYSICS SETTINGS:
                   
-                  Hydrodynamics:              $(Hydro)
-                  Gravity:                    $(Gravity)
-                  Lyα RT:                     $(Lyα)
-                  On-the-spot approximation:  $(OTS)
+                  Hydrodynamics:               $(Hydro)
+                  Gravity:                     $(Gravity)
+                  Lyα RT:                      $(Lyα)
+                  Radiation pressure feedback: $(RadPressure)
+                  Dust growth & destruction:   $(DustGrowthDestruction)
+                  On-the-spot approximation:   $(OTS)
 
                   """)
     end
@@ -547,13 +555,13 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     chemstate = InitializeChemistryArrays( N_r, N_Z, Zgas_Zsun, true )
 
     # Cloud density properties:
-    ρcl  = max( Get_ρ_From_nH( nH₀, Zgas_Zsun, true ),    10 * ρ_floor )    # Density within cloud 
-    ρext = max( Get_ρ_From_nH( nH_ext, Zgas_Zsun, true ), 10 * ρ_floor )    # Density far outside the cloud
-    δr   = max( 2 * max( minimum(diff(r)), minimum(diff(Z)) ), 0.05 * Rcl ) # Determines fall-off in density outside cloud
+    ρcore  = max( Get_ρ_From_nH( nH_core, Zgas_Zsun, true ),  10 * ρ_floor )    # Density within cloud core
+    ρext   = max( Get_ρ_From_nH( nH_ext, Zgas_Zsun, true ),   10 * ρ_floor )    # Density far outside the cloud
+    δr     = max( 2 * max( minimum(diff(r)), minimum(diff(Z)) ), 0.05 * Rcl )   # Determines fall-off in density outside cloud, in case power law is not used
 
-    if ρcl < 1e3 * ρ_floor 
-        @warn "The initial cloud density ρcl is only $(ρcl/ρ_floor) times the density floor. Consider making 
-               ρcl larger, or take a look at the density floor ρ_floor in the Hydrodynamics.jl file."
+    if ρcore < 1e3 * ρ_floor 
+        @warn "The initial core density ρcore is only $(ρcore/ρ_floor) times the density floor. Consider making 
+               ρcore larger, or take a look at the density floor ρ_floor in the Hydrodynamics.jl file."
     end
 
     # Initialize cloud properties:
@@ -565,11 +573,11 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                 R = sqrt( r[i+1]^2  +   (Z[j+1] - Zcl_pos)^2 )
 
                 # Gas density & chemistry:
-                if R < Rcl 
-                    # Gas density set to cloud density:
-                    ρ[i,j] = ρcl
+                if R < Rcore 
+                    # Gas density set to core density:
+                    ρ[i,j] = ρcore
 
-                    # Initial chemical abundances in the cloud:
+                    # Initial chemical abundances in the core:
                     chemstate.xHII[i,j]   = xHII₀
                     chemstate.xH2[i,j]    = xH2₀
                     chemstate.xHeII[i,j]  = xHeII₀
@@ -586,10 +594,22 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                     # Adiabatic index:
                     γad[i,j] = Getγad( xHII₀, xH2₀, xHeII₀, xHeIII₀ )
                 else
-                    # Gas density much lower outside the cloud:
-                    ρ[i,j] = max( ρcl * exp( - ((R - Rcl)/δr)^2 ), ρext )
 
-                    # Initial chemical abundances outside the cloud:
+                    if POWER_LAW_ENVELOPE
+                        # Power law envelope out to Rcl:
+                        if R < Rcl
+                            ρ_env  = ρcore / ( (R / Rcore)^p_ENVELOPE )
+                            ρ[i,j] = max( ρ_env, ρext )
+                        else
+                            ρ[i,j] = ρext
+                        end
+
+                    else
+                        # Fast, gaussian exponential fall-off:
+                        ρ[i,j] = max( ρcore * exp( - ((R - Rcore)/δr)^2 ), ρext )
+                    end
+
+                    # Initial chemical abundances outside the core:
                     chemstate.xHII[i,j]   = xHII_ext
                     chemstate.xH2[i,j]    = xH2_ext
                     chemstate.xHeII[i,j]  = xHeII_ext

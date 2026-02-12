@@ -28,7 +28,7 @@ Nmaxsteps::Int                     =  100000        # Maximum number of time-ste
 
 Teff::Float64                      =  1e5           # Effective temperature of black-body 
 dNdt_LyC::Float64                  =  5e48          # Total ionizing photon emission rate 
-σstar_cell::Float64                =  5             # Gaussian size of stellar emission region in cell size units (≳ 4 for approximately spherical H II regions)
+σstar_cell::Float64                =  3             # Gaussian size of stellar emission region in cell size units (≳ 4 for approximately spherical H II regions)
 
 # Compute the emission rates in the three ionizing bands:
 dNdt_EUV1, dNdt_EUV2, dNdt_EUV3    =  GetBlackBodyIonizingEmission( dNdt_LyC, Teff )

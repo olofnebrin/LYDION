@@ -6,10 +6,19 @@ from matplotlib.colors import LogNorm
 from matplotlib.gridspec import GridSpec
 import matplotlib.patheffects as pe
 from matplotlib.ticker import MultipleLocator  # kept (unused, but you had it)
+from pathlib import Path
+import sys
+
+repo_root = Path(__file__).resolve().parent
+cmastro_src = repo_root / "src" / "cmastro" / "src"
+
+sys.path.insert(0, str(cmastro_src))
+
+import cmastro
 
 # ---------------- user inputs ----------------
-filename_noLya = "RHDSim_noLya_2025-12-23.h5"     # Run ignoring Lyα feedback
-filename_Lya   = "RHDSim_Lya_2025-12-23.h5"       # Run with Lyα feedback
+filename_noLya = "Aaron_RHDSimGC_NoLya_128.h5"     # Run ignoring Lyα feedback
+filename_Lya   = "Aaron_RHDSimGC_Lya_128.h5"       # Run with Lyα feedback
 
 frameskip = 1                  # use >1 to skip frames
 save_mp4  = True               # True to save mp4 instead of interactive show
@@ -203,7 +212,7 @@ ax21.set_title("With Lyα feedback", pad = 20)
 
 # --- density (no Lyα) ---
 ax11.set_ylabel("Z (pc)", labelpad=12)
-im_nH_L = ax11.pcolormesh(R, ZZ, runL["nH_hist"][0].T, norm=norm_nH, shading='auto', cmap='viridis')
+im_nH_L = ax11.pcolormesh(R, ZZ, runL["nH_hist"][0].T, norm=norm_nH, shading='auto', cmap='cma:laguna')
 cb1 = fig.colorbar(im_nH_L, ax=ax11, pad=0.02)
 cb1.set_ticks([10, 1e3, 1e5])
 cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$'])
@@ -220,7 +229,7 @@ ax12.text(0.9, 0.9, "T (K)", transform=ax12.transAxes, **panel_label_style)
 
 # --- density (with Lyα) ---
 ax21.tick_params(labelleft=False)
-im_nH_R = ax21.pcolormesh(R, ZZ, runR["nH_hist"][0].T, norm=norm_nH, shading='auto', cmap='viridis')
+im_nH_R = ax21.pcolormesh(R, ZZ, runR["nH_hist"][0].T, norm=norm_nH, shading='auto', cmap='cma:laguna')
 cb3 = fig.colorbar(im_nH_R, ax=ax21, pad=0.02)
 cb3.set_ticks([10, 1e3, 1e5])
 cb3.set_ticklabels(['10', '10$^{3}$', '10$^{5}$'])
@@ -237,8 +246,8 @@ ax22.text(0.9, 0.9, "T (K)", transform=ax22.transAxes, **panel_label_style)
 
 # shared limits
 for ax in (ax11, ax12, ax21, ax22):
-    ax.set_xlim(r[0]/pc, r[-1]/pc)
-    ax.set_ylim(Z[0]/pc, Z[-1]/pc)
+    ax.set_xlim(r[0]/pc, 0.8 * r[-1]/pc)
+    ax.set_ylim(0.1 * Z[-1]/pc, 0.9 * Z[-1]/pc)
     ax.set_aspect('equal', adjustable='box') # Ensure correct aspect ratio of panels 
 
 # --- time label (put in top-left like your original; same style) ---

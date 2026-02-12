@@ -3,7 +3,7 @@ module Structs
 
 export LyαArrays, StellarRTArrays, HydrodynamicsState, ChemistryState,
        GhostPaddedGrid, StellarRTArrays, GeometryCylindrical, GeometryCartesian,
-       GravityState, GravityCoeffs
+       GravityState, GravityCoeffs, DustState
 
 
 """ A useful struct for storing all Lyα related arrays/quantities/settings. """
@@ -59,9 +59,19 @@ mutable struct LyαArrays
     νC::Array{Float64, 1}
     Δν::Array{Float64, 1}
 
+    # Store δν ≡ ν - νLyα and δνC ≡ νC - νLyα, which are needed in the Voigt parameter 
+    # calculations:
+    δν::Array{Float64, 1}
+    δνC::Array{Float64, 1}
+
     # Also store inverses of νC and Δν, which are used in the frequency factors update:
     inv_Δν::Array{Float64, 1}
     inv_νC::Array{Float64, 1}
+
+    # Voigt parameter and Doppler widths, and its inverse, for each cell:
+    a::Array{Float64, 2}
+    ΔνD::Array{Float64, 2}
+    inv_ΔνD::Array{Float64, 2}
 
     # Bounds on the min and max bin indices to consider in M1 advection: 
     kcore_min::Int 
@@ -92,6 +102,12 @@ mutable struct LyαArrays
     M_F_antigravity::Float64       # Force multiplier anti-parallel to gravity 
     L_Lyα::Float64
     f_esc_Lyα::Float64
+
+    # Save number of frequency bins N_ν, dN_ν = 1:N_ν, and dN_ν_int = 2:(N_ν-1),
+    # which are used repeatedly:
+    N_ν::Int 
+    dN_ν::UnitRange{Int}
+    dN_ν_int::UnitRange{Int}
 
 end
 
@@ -584,6 +600,51 @@ struct GeometryCylindrical{T<:AbstractFloat}
 
     w_plus_j_p1::Array{T, 1}      # length N_Z
     w_minus_j_p1::Array{T, 1}     # length N_Z
+
+    # Below are various intervals & inverse intervals 
+    # that are needed in the M1 advection. It is efficient to 
+    # compute them once and store them, especially for the Lyα RT
+    # to avoid lots of repeated calculations:
+
+    Δr_L::Array{T, 1}           # r[i+1]    - rCoM[i] for interior cells 
+    Δr_R::Array{T, 1}           # rCoM[i+1] - r[i+1]  for interior cells 
+    inv_dr_i_im1::Array{T, 1}   # 1 / ( rCoM[i]   - rCoM[i-1] ) for interior cells 
+    inv_dr_ip1_i::Array{T, 1}   # 1 / ( rCoM[i+1] - rCoM[i]   ) for interior cells 
+    inv_dr_ip2_ip1::Array{T, 1} # 1 / ( rCoM[i+2] - rCoM[i+1] ) for interior cells 
+
+    # Corresponding values at inner & outer r-boundaries:
+    inv_dr_i_im1_InnerBoundary::T
+    inv_dr_ip1_i_InnerBoundary::T
+    inv_dr_ip2_ip1_InnerBoundary::T
+    Δr_L_InnerBoundary::T
+    Δr_R_InnerBoundary::T
+
+    inv_dr_i_im1_OuterBoundary::T
+    inv_dr_ip1_i_OuterBoundary::T
+    inv_dr_ip2_ip1_OuterBoundary::T
+    Δr_L_OuterBoundary::T 
+    Δr_R_OuterBoundary::T
+
+    # Similarly for Z-intervals:
+    ΔZ_L::Array{T, 1}           # Z[j+1]    - ZCoM[j] for interior cells 
+    ΔZ_R::Array{T, 1}           # ZCoM[j+1] - Z[j+1]  for interior cells 
+    inv_dZ_j_jm1::Array{T, 1}   # 1 / ( ZCoM[j]   - ZCoM[j-1] ) for interior cells 
+    inv_dZ_jp1_j::Array{T, 1}   # 1 / ( ZCoM[j+1] - ZCoM[j]   ) for interior cells 
+    inv_dZ_jp2_jp1::Array{T, 1} # 1 / ( ZCoM[j+2] - ZCoM[j+1] ) for interior cells 
+
+    # Corresponding values at inner & outer Z-boundaries:
+    inv_dZ_j_jm1_InnerBoundary::T
+    inv_dZ_jp1_j_InnerBoundary::T
+    inv_dZ_jp2_jp1_InnerBoundary::T
+    ΔZ_L_InnerBoundary::T
+    ΔZ_R_InnerBoundary::T
+
+    inv_dZ_j_jm1_OuterBoundary::T
+    inv_dZ_jp1_j_OuterBoundary::T
+    inv_dZ_jp2_jp1_OuterBoundary::T
+    ΔZ_L_OuterBoundary::T
+    ΔZ_R_OuterBoundary::T
+
 end
 
 

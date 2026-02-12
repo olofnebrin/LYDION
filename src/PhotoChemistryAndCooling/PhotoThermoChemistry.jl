@@ -5,12 +5,13 @@
     
 """
 
-using .Structs: LyαArrays, StellarRTArrays, ChemistryState, HydrodynamicsState
+using .Structs: LyαArrays, StellarRTArrays, ChemistryState, 
+       HydrodynamicsState, DustState, GeometryCylindrical, GeometryCartesian
 using .ConstantsAndFunctions
 using  Base.Threads               # For CPU acceleration
 using  SpecialFunctions           # For erf
 
-include(joinpath(@__DIR__, "..", "FreqFactorsAndGrid.jl"))
+include(joinpath(@__DIR__, "..", "FreqFactors.jl"))
 include(joinpath(@__DIR__, "..", "LymanAlphaEmission.jl"))
 include(joinpath(@__DIR__, "..", "LymanAlphaDestruction.jl"))
 include("./GasChemistryRates.jl")
@@ -32,8 +33,92 @@ export CFL_RT, UpdateRTandThermoChemistry!, StellarRTArrays,
 
 
 
-const ϵ_RSL::Float64 = 5.0        # RSL is ≥ ϵ_RSL × max(|u|, c_s) (Default: 5.0)
-const c̃_min::Float64 = 100 * kms  # Lower bound on RSL, regardless of gas conditions (Default: 100 km/s)
+
+""" This function updates the line center opacity (α), continuum absorption &
+    flux opacities (αc, α_F), destruction probability pd, Voigt profile (Hvoigt), 
+    emission profile (ϕ_ν), and Lyα emissivity. 
+    
+    All for a single cell (i,j).
+    
+    Useful in sub-cycling for RHD simulations. """
+@views function UpdateLyαRelatedFactors_cell!( Lyα::LyαArrays,    # The Lyα state/arrays,
+                                              Dust::DustState,    # Contains dust opacities 
+                                      UpdateHvoigt::Bool,         # Whether to update the Voigt profile & emission profile or not
+                                                 T::Float64,      # Gas temperature for this cell 
+                                                ρd::Float64,      # Dust density 
+                                                 i::Int,          # Cell r-index 
+                                                 j::Int,          # Cell Z-index 
+                                               nHI::Float64,
+                                               nH2::Float64,
+                                              nHII::Float64,
+                                              nHeI::Float64,
+                                                ne::Float64,
+                                                 z::Float64,      # Redshift 
+                                               OTS::Bool,         # Whether to use on-the-spot approximation for recombinations
+                                               )
+
+    # Update α (H I opacity @ line center, nHI × σ0):
+    Lyα.α_Lyα[i,j]  = nHI * Compute_σ0( T )
+
+    # Use the result below:
+    α_Lyα           = Lyα.α_Lyα[i,j]
+
+    # Lyα dust absorption & flux opacities:
+    @fastmath αd_abs_Lyα      = ρd * Dust.κd_abs_Lyα   # Lyα dust absorption opacity 
+    @fastmath αd_F_Lyα        = ρd * Dust.κd_F_Lyα     # Lyα dust flux opacity 
+
+    # Get total Lyα continuum opacity for J (dust absorption + H₂ Raman scattering):
+    @fastmath αc_Raman        = nH2 * σRaman
+    @fastmath Lyα.αc_Lyα[i,j] = αd_abs_Lyα  +  αc_Raman
+
+    # Compute the destruction probability for this cell:
+    if Lyα.LyαDestruction 
+        Lyα.pd[i,j] = pd_Lyα( nHII, ne, nHI, nHeI, nH2, T, z )
+    else
+        Lyα.pd[i,j] = 0.0
+    end
+
+    # Compute the Voigt parameter a, the Doppler width and its inverse,
+    # for this cell:
+    a_ij              = Compute_a( T )
+    Δν_D_ij           = Compute_ΔνD( T )
+    inv_Δν_D_ij       = 1.0 / Δν_D_ij
+
+    Lyα.a[i,j]        = a_ij
+    Lyα.Δν_D[i,j]     = Δν_D_ij
+    Lyα.inv_Δν_D[i,j] = inv_Δν_D_ij
+
+    # Make views once:
+    Hvoigt_ij = Lyα.Hvoigt[i,j,:]
+    ϕ_ν_ij    = Lyα.ϕ_ν[i,j,:]
+
+    # Update the Voigt profile & emission profile:
+    if UpdateHvoigt 
+        # Update Hvoigt[i,j,k] for cell (i,j):
+        Update_Hvoigt_cell!( Hvoigt_ij, Lyα.δν, Lyα.δνC, a_ij, inv_Δν_D_ij )
+
+        # Update the normalized emission line profile ϕ_ν[i,j,k] for cell (i,j):
+        Update_ϕν_cell!( ϕ_ν_ij, Lyα.Δν, Hvoigt_ij, Lyα.kcore_min, Lyα.kcore_max )
+    end
+
+    # Get the total Lyα flux opacity (Lyα scattering + dust extinction + Raman scattering):
+
+    @fastmath αc_F  = αd_F_Lyα  +  αc_Raman  # Continuum flux opacity
+
+    @fastmath @inbounds @simd for k in Lyα.dN_ν
+        Lyα.α_F_Lyα[i,j,k] = α_Lyα * Hvoigt_ij[k] + αc_F 
+    end
+
+    # Update the frequency integrated emissivity: 
+    Lyα.∫dν_js_Lyα[i,j] = ( ∫dν_js_recLyα( T, nHII, ne, OTS )
+                        +   ∫dν_js_collLyα( T, nHI, ne ) )
+
+    return nothing 
+end
+
+
+const ϵ_RSL::Float64 = 5.0         # RSL is ≥ ϵ_RSL × max(|u|, c_s) (Default: 5.0)
+const c̃_min::Float64 = 100 * kms   # Lower bound on RSL, regardless of gas conditions (Default: 100 km/s)
 
 """ This function determines a reduced speed of light c̃ for 
     stellar RT, such that it is comfortably larger than all gas 
@@ -122,7 +207,7 @@ function FindRSL_LyαRT_TODO( c̃_Lyα::Float64,                   # Old reduced
             nHI   = xHI * X_over_mH * ρ[i,j]
 
             # Lyα opacity at line center for the cell:
-            α     = nHI * σ0(T[i,j])
+            α     = nHI * Compute_σ0(T[i,j])
 
             # Lyα cell optical depth estimate:
             ΔX    = max( Δr, ΔZ )
@@ -199,14 +284,14 @@ function FindRSL_LyαRT( c̃_Lyα::Float64,                   # Old reduced spee
             nHI   = xHI * X_over_mH * ρ[i,j]
 
             # Lyα opacity at line center for the cell:
-            α     = nHI * σ0(T[i,j])
+            α     = nHI * Compute_σ0(T[i,j])
 
             # Lyα cell optical depth estimate:
             ΔX    = max( Δr, ΔZ )
             τcell = α * ΔX
 
             # Get aτ:
-            aτ    = a(T[i,j]) * τcell
+            aτ    = Compute_a(T[i,j]) * τcell
 
             # Compute minimum RSL for accuracy in this cell to be ~ ϵ_RSL × (t_trap/t_light) × gas velocity:
             c̃_min_cell  = ϵ_RSL * max( 1, (aτ^OneThird) ) * max( abs(u_r[i,j]), abs(u_Z[i,j]), c_s )
@@ -2028,14 +2113,7 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                                  CoolingHeating::Bool,
 
                                            # Geometry:
-                                         inv_ΔV::AbstractArray{Float64, 2},
-                                            A_r::AbstractArray{Float64, 2},
-                                            A_Z::AbstractArray{Float64, 2},
-                                              r::AbstractArray{Float64, 1},
-                                           rCoM::AbstractArray{Float64, 1},
-                                              Z::AbstractArray{Float64, 1},
-                                           ZCoM::AbstractArray{Float64, 1},
-                                     inv_r_cell::AbstractArray{Float64, 1},
+                                       geometry::Union{GeometryCylindrical, GeometryCartesian},
 
                                           # Gas velocity field:
                                        u_r_star::AbstractArray{Float64,2},
@@ -2055,6 +2133,15 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                                     RadPressure::Bool = true  
 
                                               )
+
+    if geometry isa GeometryCylindrical
+        r = geometry.r;  rCoM = geometry.rCoM
+        Z = geometry.Z;  ZCoM = geometry.ZCoM
+    else
+        # Cartesian otherwise:
+        r = geometry.X;  rCoM = geometry.XCoM
+        Z = geometry.Y;  rCoM = geometry.YCoM
+    end
 
     c̃         = RT.c̃
     Δt_CFL_RT = GetRHDCFLTimeStep( r, Z, c̃, HydroState.u_X, HydroState.u_Y, CFL_RT ) 
@@ -2146,9 +2233,9 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                   RT.F_r_IR,         RT.F_Z_IR,
                   RT.F_r_Hr_IR,      RT.F_Z_Hr_IR, 
                   RT.F_r_HZ_IR,      RT.F_Z_HZ_IR, 
-                  inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
+                  geometry,
                   u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  UpdateStellarJold, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
                   RT.rfirst_StellarRT, Val(:Threaded) )
 
     # Advect optical photons:
@@ -2158,9 +2245,9 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                   RT.F_r_opt,         RT.F_Z_opt,
                   RT.F_r_Hr_opt,      RT.F_Z_Hr_opt, 
                   RT.F_r_HZ_opt,      RT.F_Z_HZ_opt, 
-                  inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
+                  geometry,
                   u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  UpdateStellarJold, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
                   RT.rfirst_StellarRT, Val(:Threaded) )
 
     # Advect FUV photons:
@@ -2170,9 +2257,9 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                   RT.F_r_FUV,         RT.F_Z_FUV,
                   RT.F_r_Hr_FUV,      RT.F_Z_Hr_FUV, 
                   RT.F_r_HZ_FUV,      RT.F_Z_HZ_FUV, 
-                  inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
+                  geometry,
                   u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  UpdateStellarJold, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
                   RT.rfirst_StellarRT, Val(:Threaded) )
 
     # Advect LW photons:
@@ -2182,9 +2269,9 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                   RT.F_r_LW,         RT.F_Z_LW,
                   RT.F_r_Hr_LW,      RT.F_Z_Hr_LW, 
                   RT.F_r_HZ_LW,      RT.F_Z_HZ_LW, 
-                  inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
+                  geometry,
                   u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  UpdateStellarJold, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
                   RT.rfirst_StellarRT, Val(:Threaded) )
 
     # Advect EUV1 photons:
@@ -2194,9 +2281,9 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                   RT.F_r_EUV1,         RT.F_Z_EUV1,
                   RT.F_r_Hr_EUV1,      RT.F_Z_Hr_EUV1, 
                   RT.F_r_HZ_EUV1,      RT.F_Z_HZ_EUV1, 
-                  inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
+                  geometry,
                   u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  UpdateStellarJold, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
                   RT.rfirst_StellarRT, Val(:Threaded) )
 
     # Advect EUV2 photons:
@@ -2206,9 +2293,9 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                   RT.F_r_EUV2,         RT.F_Z_EUV2,
                   RT.F_r_Hr_EUV2,      RT.F_Z_Hr_EUV2, 
                   RT.F_r_HZ_EUV2,      RT.F_Z_HZ_EUV2, 
-                  inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
+                  geometry,
                   u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  UpdateStellarJold, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
                   RT.rfirst_StellarRT, Val(:Threaded) )
 
     # Advect EUV3 photons:
@@ -2218,9 +2305,9 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                   RT.F_r_EUV3,         RT.F_Z_EUV3,
                   RT.F_r_Hr_EUV3,      RT.F_Z_Hr_EUV3, 
                   RT.F_r_HZ_EUV3,      RT.F_Z_HZ_EUV3, 
-                  inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
+                  geometry,
                   u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                  UpdateStellarJold, true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
+                  UpdateStellarJold, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top,
                   RT.rfirst_StellarRT, Val(:Threaded) )
     
 
@@ -2422,7 +2509,7 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                 T[i,j]   = e[i,j] * μ * (γad - 1) * mH / ( ρ[i,j] * kB )
 
                 # Update α (H I opacity @ line center, nHI × σ0):
-                LyaState.α_Lyα[i,j]  = nHI * σ0( T[i,j] )
+                LyaState.α_Lyα[i,j]  = nHI * Compute_σ0( T[i,j] )
 
                 # Update pd (Lyα destruction probability):
                 if LyaState.LyαDestruction 
@@ -2466,9 +2553,9 @@ function UpdateRTandThermoChemistry!( Δt_RT_max::Float64,
                                       c̃, Δt_RT )
 
         # Lyα Advection + frequency diffusion & Doppler shift:
-        UpdateLyαJandH!( Δt_RT, c̃, LyaState, inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell, T,
+        UpdateLyαJandH!( Δt_RT, c̃, LyaState, geometry, T,
                          u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                         true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top )
+                         BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top )
 
     end # End of Lyα update 
 

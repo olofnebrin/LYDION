@@ -9,9 +9,8 @@ yr   = 3.1556926e7
 kyr  = 1e3 * yr
 kms  = 1e5
 
-filename_Lya =  "RHDSim_Lya_64x64_2026-01-25.h5"
-#filename_Lya =  "StaticCloudTest.h5"
-#filename_Lya =  "RHDSim_Lya_2025-12-23.h5"
+#filename_Lya =  "Aaron_RHDSim_Solar_Lya_256.h5"
+filename_Lya =  "RHDSim_Lya_64x64_2026-02-12.h5"
 
 with h5py.File(filename_Lya, "r") as file:
     M_F       = file["M_F_History"][:]
@@ -105,7 +104,6 @@ ax.semilogy( t[0:last_idx]/kyr, f_esc_Lya[0:last_idx], linewidth = 2.5, color = 
 ax.semilogy( t[0:last_idx]/kyr, M_F[0:last_idx], linewidth = 2.5, color = "crimson",
              linestyle = 'dashed', dash_capstyle = 'round' )
 ax.semilogy( t[0:last_idx]/kyr, M_F_anti[0:last_idx], linewidth = 2.5, color = "crimson" )
-#ax.axhline( 18.4, color = "crimson", linestyle = "dashed", linewidth = 2.0)
  
 ax.semilogy( t[0:last_idx]/kyr, L_Lya[0:last_idx]/(1e4*Lsun), linewidth = 2.5, color = "black" )
 

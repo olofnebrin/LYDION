@@ -11,15 +11,14 @@
 """
 
 
-using .Structs: LyαArrays
+using .Structs: LyαArrays, GeometryCylindrical, GeometryCartesian
 using  Base.Threads               # For CPU acceleration
 
 
 export Initialize_ν_Scratch2D!, UpdateLyαJandH! 
 
-const DEBUG_Lyα::Bool = true         # For debugging/ensuring correct array sizes 
-const LOG_LYA_TIMES   = Ref(false)   # set true to print per-step timings
-
+const DEBUG_Lyα::Bool     = true    # For debugging/ensuring correct array sizes 
+const LOG_LYA_TIMES::Bool = false   # Set true to print per-step timings, only useful for benchmarking performance
 
 
 const scratch_ν = Ref{Vector{NTuple{7, Vector{Float64}}}}(Vector{NTuple{7, Vector{Float64}}}())
@@ -48,8 +47,6 @@ end
 @views @fastmath function FrequencyUpdateJLyα!( Δw::Float64, 
                                                  J::AbstractArray{Float64},
                                               Jold::AbstractArray{Float64},
-                                               H_r::AbstractArray{Float64},
-                                               H_Z::AbstractArray{Float64},
                                             Fij_kp::AbstractArray{Float64}, 
                                              Fij_k::AbstractArray{Float64}, 
                                             Fij_km::AbstractArray{Float64},
@@ -62,11 +59,10 @@ end
                                           Dprime_ν::AbstractArray{Float64},
                                                x_ν::AbstractArray{Float64},  # Holds the tridiagonal solution (length N_ν - 2)
                                           dN_ν_int::UnitRange,               # Must be 2:(N_ν-1), where N_ν is the number of frequency bins
-                                              dN_ν::UnitRange,               # Must be 1:N_ν, where N_ν is the number of frequency bins
                                                )
 
     @inbounds begin 
-        # Lower diagonal:
+        # Lower diagonal (copyto! is slightly better than .=):
         A_ν         .= Fij_km[dN_ν_int]
         # Diagonal:
         B_ν         .= .- ( Fij_k[dN_ν_int] .+ Δw )
@@ -78,37 +74,7 @@ end
         # Solve tridiagonal system:
         J[dN_ν_int] .= TridiagonalSolve( A_ν, B_ν, C_ν, D_ν, Cprime_ν, Dprime_ν, x_ν )
 
-        # Enforce floor J ≥ Jeps:
-        J[1]         = max( J[1],   Jeps )
-        J[end]       = max( J[end], Jeps )
-
-        @simd for k in dN_ν_int
-            J[k] = max( J[k], Jeps )
-        end
-
     end
-
-    # Update H such that the reduced flux f = |H|/J stay constant (consistent with the fixed-D 
-    # assumption in the frequency update):
-    @simd for k in dN_ν
-        @inbounds begin 
-            invJold = 1 / max( Jold[k], Jeps )
-            Ratio   = J[k]   * invJold
-            H_r[k]  = H_r[k] * Ratio
-            H_Z[k]  = H_Z[k] * Ratio 
-
-            # Also enforce causality f ≤ 1 (can change D slightly if triggered):
-            Hmag_squared = H_r[k] * H_r[k]  +  H_Z[k] * H_Z[k]
-            if Hmag_squared > J[k] * J[k]
-                ScaleFact  = J[k] / sqrt( Hmag_squared ) 
-                H_r[k]     = H_r[k] * ScaleFact 
-                H_Z[k]     = H_Z[k] * ScaleFact 
-            end 
-        end
-    end
-
-    # Finally, update Jold to the latest, new values of J:
-    Jold .= J 
     
     return nothing 
 end
@@ -167,6 +133,7 @@ const ϵ_Active::Float64 = 1e-10
 end
 
 
+
 """ This function updates the Lyα mean intensity J(r,Z,ν) and first moment components,
     H_r(r,Z,ν) and H_Z(r,Z,ν), over a time-step Δt. Advection and frequency 
     diffusion + Doppler shifting are operator split. 
@@ -185,14 +152,7 @@ end
 @views function UpdateLyαJandH!( Δt::Float64,                   # Reduced speed of light (c̃ ≤ c) × time-step 
                                   c̃::Float64,                   # Reduced speed of light 
                                 Lyα::LyαArrays,                 # The Lyα state/arrays 
-                             inv_ΔV::AbstractArray{Float64, 2}, # Inverse cell volumes 1 / ΔV         (N_r   x N_Z)
-                                A_r::AbstractArray{Float64, 2}, # Cell interface areas in r-direction (N_r+1 x N_Z)
-                                A_Z::AbstractArray{Float64, 2}, # Cell interface areas in Z-direction (N_r   x N_Z+1)
-                                  r::AbstractArray{Float64},    # r-interface values                  (N_r+1)
-                               rCoM::AbstractArray{Float64},    # r-center values                     (N_r)
-                                  Z::AbstractArray{Float64},    # Z-interface values                  (N_Z+1)
-                               ZCoM::AbstractArray{Float64},    # Z-center values                     (N_Z)
-                         inv_r_cell::AbstractArray{Float64},    # ⟨1/r⟩ for every cell                (N_r)
+                           geometry::Union{GeometryCylindrical, GeometryCartesian},
 
                                   T::AbstractArray{Float64, 2}, # Gas temperature for every cell      (N_r   x N_Z)
 
@@ -205,7 +165,6 @@ end
                              ∂u_Z_∂Z::AbstractArray{Float64,2},
                           u_r_over_r::AbstractArray{Float64,2},
 
-                   CylindricalCoords::Bool         = true,       # Cylindrical coordinates assumed if true, otherwise Cartesian 
                            BC_r_left::Symbol       = :Reflect,   # Boundary condition at i = 1/2 
                           BC_r_right::Symbol       = :Outflow,   # Boundary condition at i = N_r + 1/2
                             BC_Z_bot::Symbol       = :Reflect,   # Boundary condition at j = 1/2 
@@ -235,12 +194,109 @@ end
     # Arrays for frequency diffusion:
     Fij_kp = Lyα.Fij_kp;   Fij_k = Lyα.Fij_k;   Fij_km = Lyα.Fij_km
 
+    # Needed geoetry (intervals, areas etc):
+    inv_ΔV     = geometry.inv_ΔV
+    inv_r_cell = geometry.inv_r_cell  # Same signature for both cylindrical & Cartesian, but only used in former
+
+    if geometry isa GeometryCylindrical
+        # We have cylindrical coordinates:
+        CylindricalCoords = true 
+
+        # Interface areas:
+        A_r        = geometry.A_r 
+        A_Z        = geometry.A_Z
+
+        # r-intervals:
+        Δr_L            = geometry.Δr_L
+        Δr_R            = geometry.Δr_R
+        inv_dr_i_im1    = geometry.inv_dr_i_im1
+        inv_dr_ip1_i    = geometry.inv_dr_ip1_i
+        inv_dr_ip2_ip1  = geometry.inv_dr_ip2_ip1
+                             
+        Δr_L_InnerBoundary           = geometry.Δr_L_InnerBoundary
+        Δr_R_InnerBoundary           = geometry.Δr_R_InnerBoundary
+        inv_dr_i_im1_InnerBoundary   = geometry.inv_dr_i_im1_InnerBoundary
+        inv_dr_ip1_i_InnerBoundary   = geometry.inv_dr_ip1_i_InnerBoundary
+        inv_dr_ip2_ip1_InnerBoundary = geometry.inv_dr_ip2_ip1_InnerBoundary
+                             
+        Δr_L_OuterBoundary           = geometry.Δr_L_OuterBoundary
+        Δr_R_OuterBoundary           = geometry.Δr_R_OuterBoundary
+        inv_dr_i_im1_OuterBoundary   = geometry.inv_dr_i_im1_OuterBoundary
+        inv_dr_ip1_i_OuterBoundary   = geometry.inv_dr_ip1_i_OuterBoundary
+        inv_dr_ip2_ip1_OuterBoundary = geometry.inv_dr_ip2_ip1_OuterBoundary
+
+        # Z-intervals:
+        ΔZ_L            = geometry.ΔZ_L
+        ΔZ_R            = geometry.ΔZ_R
+        inv_dZ_j_jm1    = geometry.inv_dZ_j_jm1
+        inv_dZ_jp1_j    = geometry.inv_dZ_jp1_j
+        inv_dZ_jp2_jp1  = geometry.inv_dZ_jp2_jp1
+                             
+        ΔZ_L_InnerBoundary           = geometry.ΔZ_L_InnerBoundary
+        ΔZ_R_InnerBoundary           = geometry.ΔZ_R_InnerBoundary
+        inv_dZ_j_jm1_InnerBoundary   = geometry.inv_dZ_j_jm1_InnerBoundary
+        inv_dZ_jp1_j_InnerBoundary   = geometry.inv_dZ_jp1_j_InnerBoundary
+        inv_dZ_jp2_jp1_InnerBoundary = geometry.inv_dZ_jp2_jp1_InnerBoundary
+                             
+        ΔZ_L_OuterBoundary           = geometry.ΔZ_L_OuterBoundary
+        ΔZ_R_OuterBoundary           = geometry.ΔZ_R_OuterBoundary
+        inv_dZ_j_jm1_OuterBoundary   = geometry.inv_dZ_j_jm1_OuterBoundary
+        inv_dZ_jp1_j_OuterBoundary   = geometry.inv_dZ_jp1_j_OuterBoundary
+        inv_dZ_jp2_jp1_OuterBoundary = geometry.inv_dZ_jp2_jp1_OuterBoundary
+    elseif geometry isa GeometryCartesian
+        # We don't have cylindrical coordinates (we have Cartesian):
+        CylindricalCoords = false 
+
+        # Interface areas:
+        A_r        = geometry.A_X 
+        A_Z        = geometry.A_Y
+
+        # X-intervals:
+        Δr_L            = geometry.ΔX_L
+        Δr_R            = geometry.ΔX_R
+        inv_dr_i_im1    = geometry.inv_dX_i_im1
+        inv_dr_ip1_i    = geometry.inv_dX_ip1_i
+        inv_dr_ip2_ip1  = geometry.inv_dX_ip2_ip1
+                             
+        Δr_L_InnerBoundary           = geometry.ΔX_L_InnerBoundary
+        Δr_R_InnerBoundary           = geometry.ΔX_R_InnerBoundary
+        inv_dr_i_im1_InnerBoundary   = geometry.inv_dX_i_im1_InnerBoundary
+        inv_dr_ip1_i_InnerBoundary   = geometry.inv_dX_ip1_i_InnerBoundary
+        inv_dr_ip2_ip1_InnerBoundary = geometry.inv_dX_ip2_ip1_InnerBoundary
+                             
+        Δr_L_OuterBoundary           = geometry.ΔX_L_OuterBoundary
+        Δr_R_OuterBoundary           = geometry.ΔX_R_OuterBoundary
+        inv_dr_i_im1_OuterBoundary   = geometry.inv_dX_i_im1_OuterBoundary
+        inv_dr_ip1_i_OuterBoundary   = geometry.inv_dX_ip1_i_OuterBoundary
+        inv_dr_ip2_ip1_OuterBoundary = geometry.inv_dX_ip2_ip1_OuterBoundary
+
+        # Y-intervals:
+        ΔZ_L            = geometry.ΔY_L
+        ΔZ_R            = geometry.ΔY_R
+        inv_dZ_j_jm1    = geometry.inv_dY_j_jm1
+        inv_dZ_jp1_j    = geometry.inv_dY_jp1_j
+        inv_dZ_jp2_jp1  = geometry.inv_dY_jp2_jp1
+                             
+        ΔZ_L_InnerBoundary           = geometry.ΔY_L_InnerBoundary
+        ΔZ_R_InnerBoundary           = geometry.ΔY_R_InnerBoundary
+        inv_dZ_j_jm1_InnerBoundary   = geometry.inv_dY_j_jm1_InnerBoundary
+        inv_dZ_jp1_j_InnerBoundary   = geometry.inv_dY_jp1_j_InnerBoundary
+        inv_dZ_jp2_jp1_InnerBoundary = geometry.inv_dY_jp2_jp1_InnerBoundary
+                             
+        ΔZ_L_OuterBoundary           = geometry.ΔY_L_OuterBoundary
+        ΔZ_R_OuterBoundary           = geometry.ΔY_R_OuterBoundary
+        inv_dZ_j_jm1_OuterBoundary   = geometry.inv_dY_j_jm1_OuterBoundary
+        inv_dZ_jp1_j_OuterBoundary   = geometry.inv_dY_jp1_j_OuterBoundary
+        inv_dZ_jp2_jp1_OuterBoundary = geometry.inv_dY_jp2_jp1_OuterBoundary
+    end
+
+
     # Grid size & intervals:
     N_r, N_Z, N_ν  = size( J )               # Grid size 
     dN_r           = 1:N_r                   # Useful r-interval 
     dN_Z           = 1:N_Z                   # Useful Z-interval
-    dN_ν           = 1:N_ν                   # Useful ν-interval
-    dN_ν_int       = 2:(N_ν-1)               # Useful ν-interval for the frequency update 
+    dN_ν           = Lyα.dN_ν                # 1:N_ν, useful ν-interval
+    dN_ν_int       = Lyα.dN_ν_int            # 2:(N_ν-1), useful ν-interval for the frequency update 
     c̃Δt            = @fastmath c̃ * Δt        # Convenient variable 
     Δw             = @fastmath 1 / c̃Δt       # Useful constant for frequency diffusion/advection
 
@@ -257,6 +313,11 @@ end
         @assert size( F_Z_HZ, 3 )      == nthreads
     end
 
+    t_activebin   = 0.0
+    t_advect      = 0.0
+    t_freqfactors = 0.0
+    t_freqsolve   = 0.0
+
     ################################################################################
     ############                                     ###############################
     ############          1. ADVECTION STEP          ###############################
@@ -267,8 +328,16 @@ end
 
     UpdateLyaJold = true  # We also want to update Jold to J when the advection step is finished 
 
+    if LOG_LYA_TIMES
+        t0 = time_ns()
+    end
+
     # Find frequency bins that are active (non-negligible J):
     kmin, kmax    = FindActiveBins( Lyα, inv_ΔV )
+
+    if LOG_LYA_TIMES
+        t_activebin += (time_ns() - t0)
+    end
 
     # Select Strang-split order:
     if Lyα.rfirst_Lyα == true 
@@ -279,9 +348,13 @@ end
         Lyα.rfirst_Lyα = true
     end
 
+    if LOG_LYA_TIMES
+        t0 = time_ns()
+    end
+
     # Update old H components:
-    H_r_old .= H_r 
-    H_Z_old .= H_Z
+    copyto!( H_r_old, H_r )
+    copyto!( H_Z_old, H_Z )
 
     @threads :static for k in kmin:kmax
         # Get thread ID for the interface flux & Kϕϕ scratch arrays:
@@ -298,8 +371,42 @@ end
                           F_r[:,:,tid],         F_Z[:,:,tid],                     # Fluxes of J 
                           F_r_Hr[:,:,tid],      F_Z_Hr[:,:,tid],                  # Fluxes of H_r 
                           F_r_HZ[:,:,tid],      F_Z_HZ[:,:,tid],                  # Fluxes of H_Z 
-                          inv_ΔV,  A_r,  A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
+                          inv_ΔV,  A_r,  A_Z, inv_r_cell,
                           u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+                          # Intervals & inverse intervals, needed for interface reconstruction 
+                          # & cell optical depths:
+                          Δr_L, Δr_R,
+                          inv_dr_i_im1,
+                          inv_dr_ip1_i,
+                          inv_dr_ip2_ip1,
+                             
+                          Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+                          inv_dr_i_im1_InnerBoundary,
+                          inv_dr_ip1_i_InnerBoundary,
+                          inv_dr_ip2_ip1_InnerBoundary,
+                             
+                          Δr_L_OuterBoundary, Δr_R_OuterBoundary,
+                          inv_dr_i_im1_OuterBoundary,
+                          inv_dr_ip1_i_OuterBoundary,
+                          inv_dr_ip2_ip1_OuterBoundary,
+
+                          ΔZ_L, ΔZ_R,
+                          inv_dZ_j_jm1,
+                          inv_dZ_jp1_j,
+                          inv_dZ_jp2_jp1,
+
+                          ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+                          inv_dZ_j_jm1_InnerBoundary,
+                          inv_dZ_jp1_j_InnerBoundary,
+                          inv_dZ_jp2_jp1_InnerBoundary,
+                             
+                          ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary,
+                          inv_dZ_j_jm1_OuterBoundary,
+                          inv_dZ_jp1_j_OuterBoundary,
+                          inv_dZ_jp2_jp1_OuterBoundary,
+
+                          # Other stuff:
                           UpdateLyaJold, 
                           CylindricalCoords,
                           BC_r_left,  BC_r_right,  BC_Z_bot,  BC_Z_top,
@@ -308,11 +415,19 @@ end
         end
     end
 
+    if LOG_LYA_TIMES
+        t_advect += (time_ns() - t0)
+    end
+
     ################################################################################
     ############                                     ###############################
     ############          2. FREQUENCY STEP          ###############################
     ############                                     ###############################
     ################################################################################
+
+    if LOG_LYA_TIMES
+        t0 = time_ns()
+    end
 
     # Update frequency leakage factors so that they use the latest, post-advection, 
     # Eddington factors D:
@@ -325,6 +440,10 @@ end
                  u_r_over_r, # ⟨u_r / r⟩ 
                       )
 
+    if LOG_LYA_TIMES
+        t_freqfactors += (time_ns() - t0)
+    end
+
     # Initialize the scratch arrays on the very first call 
     # (or if the thread count changed):
     if isempty(scratch_ν[]) || length(scratch_ν[]) != Threads.maxthreadid() || length(scratch_ν[][1][1]) != N_ν-2
@@ -332,32 +451,86 @@ end
     end
     local_scratch = scratch_ν[]
 
+    if LOG_LYA_TIMES
+        t0 = time_ns()
+    end
+
     # Solve the frequency diffusion for every cell (i,j):
-    #t0 = time_ns()
     @threads for j in dN_Z
 
         tid  = Threads.threadid()
         A_ν, B_ν, C_ν, D_ν, Cprime_ν, Dprime_ν, x_ν = local_scratch[tid] # Scratch arrays
 
-        for i in dN_r
+        @simd for i in dN_r
             @inbounds begin
                 # Update J by frequency diffusion & Doppler shifting:
                 FrequencyUpdateJLyα!( Δw, 
                                       J[i,j,:],       Jold[i,j,:], 
-                                      H_r[i,j,:],     H_Z[i,j,:],
                                       Fij_kp[i,j,:],  Fij_k[i,j,:], Fij_km[i,j,:],
                                       A_ν, B_ν, C_ν, D_ν, Cprime_ν, Dprime_ν, x_ν, 
-                                      dN_ν_int, dN_ν )
+                                      dN_ν_int )
 
             end
-        end
+        end # End of i-loop 
+    end # End of j-loop 
+
+    # Update H such that the reduced flux f = |H|/J stay constant (consistent with the fixed-D 
+    # assumption in the frequency update), and also update Jold: 
+    @threads for k in dN_ν
+        for j in dN_Z
+            @inbounds @simd for i in dN_r
+
+                @fastmath begin
+                    # Enforce floor J ≥ Jeps::
+                    J[i,j,k] = max( J[i,j,k], Jeps )
+
+                    # Load values of J (again, but floored), H_r, and H_Z: 
+                    J_ijk    = J[i,j,k]
+                    Hr_ijk   = H_r[i,j,k]
+                    HZ_ijk   = H_Z[i,j,k]
+
+                    # Preliminary re-scaling of H_r and H_Z:
+                    invJold  = 1 / max( Jold[i,j,k], Jeps )
+                    Ratio    = J_ijk * invJold
+                    Hr_ijk   = Hr_ijk * Ratio
+                    HZ_ijk   = HZ_ijk * Ratio 
+
+                    # Also enforce causality f ≤ 1 (can change D slightly if triggered):
+                    Hmag_squared = Hr_ijk * Hr_ijk  +  HZ_ijk * HZ_ijk
+                    if Hmag_squared > J_ijk * J_ijk
+                        ScaleFact  = J_ijk / sqrt( Hmag_squared ) 
+                        Hr_ijk = Hr_ijk * ScaleFact 
+                        HZ_ijk = HZ_ijk * ScaleFact 
+                    end 
+
+                    # Save updated H_r and H_Z:
+                    H_r[i,j,k]     = Hr_ijk
+                    H_Z[i,j,k]     = HZ_ijk
+
+                    # Finally, update Jold:
+                    Jold[i,j,k]    = J_ijk
+
+                    # Also update H_r_old and H_Z_old a final time:
+                    H_r_old[i,j,k] = Hr_ijk
+                    H_Z_old[i,j,k] = HZ_ijk
+
+                end # End of fastmath 
+
+            end # End of i-loop 
+        end # End of j-loop 
+    end # End of k-loop 
+
+    if LOG_LYA_TIMES
+        t_freqsolve += (time_ns() - t0)
+
+        println("Active bins:  ", t_activebin*1e-9,  " s")
+        println("Advection:  ", t_advect*1e-9, " s")
+        println("Freq factors:  ", t_freqfactors*1e-9, " s")
+        println("Freq solve:  ", t_freqsolve*1e-9, " s")
+        println("-------------------")
     end
-
-    # Update old H components a final time:
-    H_r_old .= H_r 
-    H_Z_old .= H_Z
-
 
     return nothing 
 end
+
 

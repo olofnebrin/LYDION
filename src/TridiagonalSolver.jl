@@ -47,7 +47,7 @@ export TridiagonalSolve
 
     # gtsv! overwrites its RHS argument with the solution,
     # so we protect the original RHS, D, by copying it to xnew first:
-    copyto!(xnew, D)         
+    @inbounds copyto!(xnew, D)         
 
     # Since B has the right length, we don't need a scratch array for it, 
     # and use it directly:

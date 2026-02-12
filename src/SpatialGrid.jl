@@ -505,6 +505,85 @@ function Get_WENO3_CellAvCenter_weights_Cylindrical!( w_i_m1_r::AbstractArray{T}
 end
 
 
+""" This function computes various grid intervals & their inverses,
+    which are called every M1 advection step (in the reconstruction). 
+    It is therefore good to pre-compute once.
+    
+    NOTE: This function works not only for cylindrical r, but Z, and 
+          for Cartesian X and Y. """
+function Compute_Grid_Differences!( Δr_L::AbstractVector{T},
+                                    Δr_R::AbstractVector{T},
+                            inv_dr_i_im1::AbstractVector{T},
+                            inv_dr_ip1_i::AbstractVector{T},
+                          inv_dr_ip2_ip1::AbstractVector{T},
+                                       r::AbstractVector{T},
+                                    rCoM::AbstractVector{T}
+                                     ) where {T<:AbstractFloat}
+
+    N_r = length( rCoM )
+    @assert length( r )              == N_r + 1
+    @assert length( inv_dr_i_im1 )   == N_r
+    @assert length( inv_dr_ip1_i )   == N_r
+    @assert length( inv_dr_ip2_ip1 ) == N_r
+    @assert length( Δr_L )           == N_r
+    @assert length( Δr_R )           == N_r
+
+    @inbounds begin 
+        # Ghost rCoM's:
+        rCoM_0   = r[1] - (rCoM[1] - r[1])             # Mirror around r[1] = r_{1/2}
+        rCoM_m1  = r[1] - (rCoM[2] - r[1])             # Mirror around r[1] = r_{1/2}
+        rCoM_Np1 = r[N_r+1] + (r[N_r+1] - rCoM[N_r])   # Extrapolation around r[N_r+1] = r_{N_r+1/2} 
+        rCoM_Np2 = r[N_r+1] + (r[N_r+1] - rCoM[N_r-1]) # Extrapolation around r[N_r+1] = r_{N_r+1/2} 
+
+        # For interface i = 1/2, i.e. r[1], we need the following intervals:
+        inv_dr_i_im1_InnerBoundary   = one(T) / ( rCoM_0   - rCoM_m1 )
+        inv_dr_ip1_i_InnerBoundary   = one(T) / ( rCoM[1]  - rCoM_0 )
+        inv_dr_ip2_ip1_InnerBoundary = one(T) / ( rCoM[2]  - rCoM[1] )
+        Δr_L_InnerBoundary           = r[1]     - rCoM_0
+        Δr_R_InnerBoundary           = rCoM[1]  - r[1]
+
+        # For interior interfaces i = 3/2 to i = N_r - 1/2, we need the following 
+        # intervals:
+        for i in 1:N_r 
+            # Get rCoM[i-1]:
+            rCoM_im1 = (i == 1)  ? rCoM_0   : rCoM[i-1]
+            # Get rCoM[i+1]
+            rCoM_ip1 = (i == N_r) ? rCoM_Np1 : rCoM[i+1]
+            # Get rCoM[i+2]
+            rCoM_ip2 = (i ≤ N_r-2) ? rCoM[i+2] : (i == N_r-1 ? rCoM_Np1 : rCoM_Np2)
+
+            # Intervals:
+            dr_i_im1   = rCoM[i]   - rCoM_im1
+            dr_ip1_i   = rCoM_ip1  - rCoM[i]
+            dr_ip2_ip1 = rCoM_ip2  - rCoM_ip1
+
+            # Precompute inverses of intervals:
+            inv_dr_i_im1[i]   = one(T) / dr_i_im1[i]
+            inv_dr_ip1_i[i]   = one(T) / dr_ip1_i[i]
+            inv_dr_ip2_ip1[i] = one(T) / dr_ip2_ip1[i]
+
+            # Intervals needed for left & right optical depths in the M1 transport: 
+            Δr_L[i] = r[i+1]   - rCoM[i]
+            Δr_R[i] = rCoM_ip1 - r[i+1]
+        end
+
+        # For outer boundary interface i = N_r + 1/2:
+        inv_dr_i_im1_OuterBoundary   = one(T) / ( rCoM[N_r] - rCoM[N_r-1] )
+        inv_dr_ip1_i_OuterBoundary   = one(T) / ( rCoM_Np1  - rCoM[N_r] )
+        inv_dr_ip2_ip1_OuterBoundary = one(T) / ( rCoM_Np2  - rCoM_Np1 )
+        Δr_L_OuterBoundary           = r[N_r+1]  - rCoM[N_r]
+        Δr_R_OuterBoundary           = rCoM_Np1  - r[N_r+1]
+
+    end # End of inbounds 
+
+    return inv_dr_i_im1_InnerBoundary, inv_dr_ip1_i_InnerBoundary, inv_dr_ip2_ip1_InnerBoundary,
+           Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+
+           inv_dr_i_im1_OuterBoundary, inv_dr_ip1_i_OuterBoundary, inv_dr_ip2_ip1_OuterBoundary,
+           Δr_L_OuterBoundary, Δr_R_OuterBoundary
+end
+
+
 """ This function creates a cylindrical grid,
     for r ∈ [0, rmax], Z ∈ [0, Zmax]. 
 
@@ -772,6 +851,38 @@ function SetupCylindricalGrid( rmax::T,      rmax_lin::T,
     Get_WENO3_w_plus_w_minus_r!( r, w_plus_i_p1, w_minus_i_p1 )
     Get_WENO3_w_plus_w_minus_Z!( Z, w_plus_j_p1, w_minus_j_p1 )
 
+    # Get grid r-intervals (and inverse intervals) needed for M1 advection:
+    Δr_L           = zeros( T, N_r ) # r[i+1]    - rCoM[i]
+    Δr_R           = zeros( T, N_r ) # rCoM[i+1] - r[i+1]
+    inv_dr_i_im1   = zeros( T, N_r ) # 1 / ( rCoM[i]   - rCoM[i-1] )
+    inv_dr_ip1_i   = zeros( T, N_r ) # 1 / ( rCoM[i+1] - rCoM[i]   )
+    inv_dr_ip2_ip1 = zeros( T, N_r ) # 1 / ( rCoM[i+2] - rCoM[i+1] )
+
+    # Fill the intervals for interior cells, and return the boundary values:
+
+    inv_dr_i_im1_InnerBoundary, inv_dr_ip1_i_InnerBoundary, inv_dr_ip2_ip1_InnerBoundary,
+    Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+    inv_dr_i_im1_OuterBoundary, inv_dr_ip1_i_OuterBoundary, inv_dr_ip2_ip1_OuterBoundary,
+    Δr_L_OuterBoundary, Δr_R_OuterBoundary = Compute_Grid_Differences!( Δr_L, Δr_R, 
+                                             inv_dr_i_im1, inv_dr_ip1_i, inv_dr_ip2_ip1,
+                                             r, rCoM )
+
+    # Get grid Z-intervals (and inverse intervals) needed for M1 advection:
+    ΔZ_L           = zeros( T, N_Z ) # Z[j+1]    - ZCoM[j]
+    ΔZ_R           = zeros( T, N_Z ) # ZCoM[j+1] - Z[j+1]
+    inv_dZ_j_jm1   = zeros( T, N_Z ) # 1 / ( ZCoM[j]   - ZCoM[j-1] )
+    inv_dZ_jp1_j   = zeros( T, N_Z ) # 1 / ( ZCoM[j+1] - ZCoM[j]   )
+    inv_dZ_jp2_jp1 = zeros( T, N_Z ) # 1 / ( ZCoM[j+2] - ZCoM[j+1] )
+
+    # Fill the intervals for interior cells, and return the boundary values:
+
+    inv_dZ_j_jm1_InnerBoundary, inv_dZ_jp1_j_InnerBoundary, inv_dZ_jp2_jp1_InnerBoundary,
+    ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+    inv_dZ_j_jm1_OuterBoundary, inv_dZ_jp1_j_OuterBoundary, inv_dZ_jp2_jp1_OuterBoundary,
+    ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary = Compute_Grid_Differences!( ΔZ_L, ΔZ_R, 
+                                             inv_dZ_j_jm1, inv_dZ_jp1_j, inv_dZ_jp2_jp1,
+                                             Z, ZCoM )
+
     # Get 1 / ΔV:
     inv_ΔV  .= T(1.0) ./ ΔV
 
@@ -783,7 +894,21 @@ function SetupCylindricalGrid( rmax::T,      rmax_lin::T,
                                    w_i_m1_r, w_i_0_r, w_i_p1_r, w_j_m1_Z, w_j_0_Z, w_j_p1_Z,
                                    q_i_m1_r, q_i_0_r, q_i_p1_r, q_j_m1_Z, q_j_0_Z, q_j_p1_Z,
                                    w_plus_i_p1, w_minus_i_p1, 
-                                   w_plus_j_p1, w_minus_j_p1  )
+                                   w_plus_j_p1, w_minus_j_p1,
+
+                                   Δr_L, Δr_R, inv_dr_i_im1, inv_dr_ip1_i, inv_dr_ip2_ip1,
+                                   inv_dr_i_im1_InnerBoundary, inv_dr_ip1_i_InnerBoundary, inv_dr_ip2_ip1_InnerBoundary,
+                                   Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+                                   inv_dr_i_im1_OuterBoundary, inv_dr_ip1_i_OuterBoundary, inv_dr_ip2_ip1_OuterBoundary,
+                                   Δr_L_OuterBoundary, Δr_R_OuterBoundary,
+
+                                   ΔZ_L, ΔZ_R, inv_dZ_j_jm1, inv_dZ_jp1_j, inv_dZ_jp2_jp1,
+                                   inv_dZ_j_jm1_InnerBoundary, inv_dZ_jp1_j_InnerBoundary, inv_dZ_jp2_jp1_InnerBoundary,
+                                   ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+                                   inv_dZ_j_jm1_OuterBoundary, inv_dZ_jp1_j_OuterBoundary, inv_dZ_jp2_jp1_OuterBoundary,
+                                   ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary
+                                   
+                                   )
 end
 
 

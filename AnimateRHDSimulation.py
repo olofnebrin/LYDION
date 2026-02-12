@@ -19,7 +19,7 @@ import cmastro
 
 
 # ---------------- user inputs ----------------
-filename = "RHDSim_NoLya_128x128_2026-02-03.h5"       
+filename = "RHDSim_NoLya_128x128_2026-02-10.h5"       
 frameskip = 1                 
 save_mp4 = True               
 outname = "density_T.mp4"
@@ -163,16 +163,14 @@ cb1 = fig.colorbar(im_nH, ax=ax1, pad=0.02)
 #cb1.set_ticks([1e3, 1e5, 1e7, 1e9])
 cb1.set_ticks([10, 1e3, 1e5])
 #cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$', '10$^{7}$', '10$^{9}$'])
-#cb1.set_ticklabels(['10$^{3}$', '10$^{5}$', '10$^{7}$', '10$^{9}$'])
+#cb1.set_ticklabels(['10$^{4}$', '10$^{6}$', '10$^{8}$'])
 cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$'])
 panel_label_style = dict(ha='right', va='top', color='black',
                          path_effects=[pe.withStroke(linewidth=3, foreground='white')])
 ax1.text(0.9, 0.2, "n$_{H}$ (cm$^{-3}$)", transform=ax1.transAxes, **panel_label_style)
 
-ax1.set_xlim(r[0]/pc, r[-1]/pc)
+ax1.set_xlim( r[0]/pc, r[-1]/pc )
 ax1.set_ylim( Z[0]/pc, Z[-1]/pc )
-#ax1.set_xlim(r[0]/pc, 0.001)
-#ax1.set_ylim(Z[0]/pc, 0.001)
 
 # --- temperature ---
 ax2.set_xlabel("r (pc)", labelpad=12)

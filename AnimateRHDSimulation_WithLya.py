@@ -6,22 +6,31 @@ from matplotlib.colors import LogNorm
 from matplotlib.gridspec import GridSpec
 import matplotlib.patheffects as pe
 from matplotlib.ticker import MultipleLocator  # if you want it later
+from pathlib import Path
+import sys
+
+repo_root = Path(__file__).resolve().parent
+cmastro_src = repo_root / "src" / "cmastro" / "src"
+
+sys.path.insert(0, str(cmastro_src))
+
+import cmastro
 
 # ---------------- user inputs ----------------
 #filename  = "RHDSim_Lya_64x64_2025-12-25.h5"
-filename  = "RHDSim_Lya_64x64_2026-01-20.h5"    
+filename  = "Aaron_RHDSimGC_Lya_256.h5"    
 frameskip = 1                  # use >1 to skip frames
 save_mp4  = True               # True to save mp4 instead of interactive show
 outname   = "density_T_withLyaSpec.mp4"
 fps       = 20
 
 # which Lyα edge spectra to plot (indices along J_Lya_EdgeSpectra axis 0)
-edge_indices = [0]            # e.g. [0, 5, 10]
+edge_indices = [50]            # e.g. [0, 5, 10]
 
 # ν-window settings for the spectrum panel
 use_nu_window       = True
 nu_Lya              = 2.466e15             # Hz
-nu_window_fraction  = 0.02                # total width = 2% of ν_Lya (±1% around center)
+nu_window_fraction  = 0.015                # total width, e.g. 0.02 = 2% of ν_Lya 
 # ---------------------------------------------
 
 # constants
@@ -182,7 +191,7 @@ plt.rcParams.update(params)
 plt.rcParams['mathtext.fontset'] = 'custom'
 plt.rcParams['mathtext.rm'] = 'GreekC'
 
-params = {'legend.fontsize': 19}
+params = {'legend.fontsize': 24}
 plt.rcParams.update(params)
 plt.rcParams["legend.markerscale"] = 0.75
 
@@ -267,14 +276,14 @@ panel_label_style = dict(
 
 # --- density ---
 ax1.set_ylabel("Z (pc)", labelpad=12)
-im_nH = ax1.pcolormesh(R, ZZ, nH_hist[0].T, norm=norm_nH, shading='auto', cmap='viridis')
+im_nH = ax1.pcolormesh(R, ZZ, nH_hist[0].T, norm=norm_nH, shading='auto', cmap='cma:laguna')
 cb1 = fig.colorbar(im_nH, ax=ax1, pad=0.02)
 cb1.set_ticks([10, 1e3, 1e5])
 cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$'])
 ax1.text(0.9, 0.2, "n$_{H}$ (cm$^{-3}$)", transform=ax1.transAxes, **panel_label_style)
 
-ax1.set_xlim(r[0]/pc, r[-1]/pc)
-ax1.set_ylim(Z[0]/pc, Z[-1]/pc)
+ax1.set_xlim(r[0]/pc, 0.8 * r[-1]/pc)
+ax1.set_ylim(0.1 * Z[-1]/pc, 0.9 * Z[-1]/pc)
 
 # --- temperature ---
 ax2.set_xlabel("r (pc)", labelpad=12)
@@ -290,7 +299,7 @@ ax3.tick_params(labelleft=False)
 im_Lya = ax3.pcolormesh(
     R, ZZ,
     np.clip(e_Lya_hist[0].T, vmin_Lya, vmax_Lya),
-    norm=norm_Lya, shading='auto', cmap='gnuplot2'
+    norm=norm_Lya, shading='auto', cmap='cma:emph'
 )
 cb3 = fig.colorbar(im_Lya, ax=ax3, pad=0.02)
 #cb3.set_ticks([1e-12, 1e-10, 1e-8, 1e-6])
@@ -311,7 +320,7 @@ cb4.set_ticklabels(['10$^{-8}$', '10$^{-6}$', '10$^{-4}$', '0.01', '1'])
 ax4.text(0.9, 0.9, "x$_{HI}$", transform=ax4.transAxes, **panel_label_style)
 
 # --- spectrum panel ---
-ax_spec.set_ylim(0.0, 0.25 * 1.2e-14)
+ax_spec.set_ylim(0.0, 1.75e-16)
 ax_spec.set_xlabel(r"$\nu$ (Hz)", labelpad=12)
 ax_spec.set_ylabel(r"$J_{Ly\alpha}$", labelpad=12)
 ax_spec.set_xlim(nuC_plot.min(), nuC_plot.max())
@@ -323,7 +332,7 @@ for idx in edge_indices:
     iz = edge_zidx[idx] - 1
     r_pc = rCoM[ir] / pc
     Z_pc = ZCoM[iz] / pc
-    label = fr"edge {idx} (r={r_pc:.2f} pc, Z={Z_pc:.2f} pc)"
+    label = fr"(r,Z) = ({r_pc:.2f}, {Z_pc:.2f}) pc"
     (line,) = ax_spec.plot(nuC_plot, J_edge_hist[k0, idx, nu_mask], label=label, 
                            linewidth = 3, color = 'crimson')
     spec_lines.append(line)

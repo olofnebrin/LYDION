@@ -10,13 +10,17 @@ module ConstantsAndFunctions
 
 __precompile__()
 
-using SpecialFunctions  # For Dawson integral
-using Base.Threads      # For CPU acceleration
-using Roots             # Needed for root-finding in the frequency grid setup 
-using QuadGK            # For numerical integration 
+include( "./FastInterpolations.jl" )
+using SpecialFunctions     # For Dawson integral
+using Base.Threads         # For CPU acceleration
+using Roots                # Needed for root-finding in the frequency grid setup 
+using QuadGK               # For numerical integration 
+using .FastInterpolations  # For fast interpolations of special/expensive functions 
 
-export LyαArrays, GenerateLyαArrays, H, Htophat, b, a, σ0, 
-       Update_Hvoigt!, Update_ϕν!, Update_e_Lyα!,
+export LyαArrays, GenerateLyαArrays, H, Htophat, 
+       Compute_b, Compute_ΔνD, Compute_a, Compute_σ0, 
+       Update_Hvoigt!, Update_Hvoigt_cell!, Update_ϕν!, 
+       Compute_e_Lyα, Update_e_Lyα!,
        AbsorptionUpdateJorH, LyαEmissionUpdate!, LyαEmissionAbsorptionUpdate!, 
        Update_f_Lyα_MF_L_Lyα!, Reset_Δρu!, AbsorptionUpdateH, 
        Update_∇u_RHD!, D_colon_∇u_Cylindrical, 
@@ -131,20 +135,22 @@ const DGsun::Float64      = 1 / 162                        # Solar dust-to-gas r
 const TCMB0::Float64      = 2.726                          # CMB temperature at redshift z = 0
 
 ####### CONVENIENT CONSTANTS ##############
-const OneThird::Float64      = 1 / 3
-const ThreeEights::Float64   = 3 / 8
-const ThreeFourths::Float64  = 3 / 4 
-const Four_π::Float64        = 4 * π 
-const inv_Four_π::Float64    = 1 / Four_π
-const Two_π::Float64         = 2 * π
-const Sqrt_π::Float64        = sqrt(π) 
-const Sqrt_2::Float64        = sqrt(2)
-const Four_π_over_c::Float64 = Four_π / c    
-const inv_c::Float64         = 1 / c   
-const X_over_mH::Float64     = X / mH    
-const Y_over_mHe::Float64    = Y / mHe   
-const X_D_over_mD::Float64   = X_D / mD
-const inv_Zsun::Float64      = 1 / Zsun
+const OneThird::Float64          = 1 / 3
+const ThreeEights::Float64       = 3 / 8
+const ThreeFourths::Float64      = 3 / 4 
+const Four_π::Float64            = 4 * π 
+const inv_Four_π::Float64        = 1 / Four_π
+const Two_π::Float64             = 2 * π
+const Sqrt_π::Float64            = sqrt(π) 
+const Sqrt_2::Float64            = sqrt(2)
+const Sqrt_π_over_2::Float64     = Sqrt_π / 2
+const inv_Sqrt_π_over_2::Float64 = 1 / Sqrt_π_over_2
+const Four_π_over_c::Float64     = Four_π / c    
+const inv_c::Float64             = 1 / c   
+const X_over_mH::Float64         = X / mH    
+const Y_over_mHe::Float64        = Y / mHe   
+const X_D_over_mD::Float64       = X_D / mD
+const inv_Zsun::Float64          = 1 / Zsun
 
 
 ####### BAND ENERGIES ####################
@@ -176,7 +182,7 @@ export c, h, G, kB, e, q_e, q_HII, q_HeII, q_HeIII,
 
        Lsun, Msun, AU, pc, kpc, Mpc, Gpc, kms, day, yr, Myr, Gyr, eV, Ang, nm, μm, F_Habing,
        OneThird, ThreeEights, ThreeFourths, Four_π, inv_Four_π, Two_π, Sqrt_π, Sqrt_2,
-       Four_π_over_c, inv_c, X_over_mH, Y_over_mHe, 
+       Sqrt_π_over_2, inv_Sqrt_π_over_2, Four_π_over_c, inv_c, X_over_mH, Y_over_mHe, 
 
        E_opt, E_FUV, E_LW, E_EUV1, E_EUV2, E_EUV3,
        inv_E_opt, inv_E_FUV, inv_E_LW, inv_E_EUV1, inv_E_EUV2, inv_E_EUV3
@@ -189,6 +195,10 @@ export c, h, G, kB, e, q_e, q_HII, q_HeII, q_HeIII,
 #######                                                 #######
 ###############################################################
 
+# Create look-up tables (LUTs) for expensive functions that 
+# are needed for the Voigt profile:
+const VoigtLUT = CreateVoigtLUTs()
+
 """ The Voigt profile. Arguments:
     x:  Frequency displacement in units of Doppler shift.
     a:  The Lyα Voigt parameter, a ≃ 4.7 × 10⁻⁴ T₄^(-0.5)
@@ -198,11 +208,14 @@ export c, h, G, kB, e, q_e, q_HII, q_HeII, q_HeIII,
 @inline function H( x::Float64,
                     a::Float64
                    )
-    xsq     = x^2
-    EXP_xsq = exp(-xsq)  # exp(-x²)
+
+    # Get expensive functions from look-up tables or asymptotic limits when needed:
+    EXP_xsq  = GaussianFast( x, VoigtLUT )            # exp(-x²) 
+    Dawson   = DawsonFast( x, VoigtLUT )              # dawson(x)
+    Stuff    = OneMinusx2GaussianFast( x, VoigtLUT )  # (1 - 2x²) exp(-x²)
 
     # Put it all together:
-    H       = EXP_xsq + (2*a/Sqrt_π)*(2*x*dawson(x) - 1) + (a^2)*EXP_xsq*(1 - 2*xsq)
+    H        = EXP_xsq  +  inv_Sqrt_π_over_2 * a * (2.0 * x * Dawson - 1)  +  (a * a) * Stuff
     return H
 end
 
@@ -214,7 +227,13 @@ end
 @inline function ∫dx_H( x::Float64, 
                         a::Float64
                        )
-    (Sqrt_π/2) * erf(x) - (2*a/Sqrt_π) * dawson(x) + (a^2)*x*exp(-x^2)
+
+    # Get expensive functions from look-up tables or asymptotic limits when needed:
+    Erf      = ErfFast( x, VoigtLUT )        # erf(x)
+    Dawson   = DawsonFast( x, VoigtLUT )     # dawson(x)
+    Stuff    = xGaussianFast( x, VoigtLUT )  # x exp(-x²)
+
+    return Sqrt_π_over_2 * Erf  -  inv_Sqrt_π_over_2 * a * Dawson  +  (a * a) * Stuff
 end
 
 
@@ -224,11 +243,11 @@ const Δx_crit::Float64 = 1e-5
     for a Voigt parameter a. See Eq. (14) in:
 
     Smith et al. (2018), 'Discrete diffusion Lyman α radiative transfer', MNRAS, 479, 2.  """
-function Htophat( x::Float64,
-               xmax::Float64,
-               xmin::Float64,
-                  a::Float64
-                 )
+@inline function Htophat( x::Float64,
+                       xmax::Float64,
+                       xmin::Float64,
+                          a::Float64
+                         )
     Δx = xmax - xmin # x_{j+1/2} - x_{j-1/2}
     if Δx > Δx_crit
         Htophat = ( ∫dx_H(xmax, a) - ∫dx_H(xmin, a) ) / Δx
@@ -245,8 +264,16 @@ const b_PREFACT::Float64 = sqrt( 2 * kB / mH )
 
 """ The thermal velocity b(T) (cm/s) as a function 
     of temperature T (K). """
-@inline @fastmath function b( T::Float64 )
+@inline @fastmath function Compute_b( T::Float64 )
     b_PREFACT * sqrt( T )
+end
+
+
+const νLyα_over_c::Float64 = νLyα / c
+
+""" The Doppler width as a function of temperature T (K). """
+@inline @fastmath function Compute_ΔνD( T::Float64 )
+    Compute_b(T) * νLyα_over_c
 end
 
 
@@ -254,8 +281,8 @@ const a_PREFACT::Float64 = ALyα / (Four_π * νLyα * 1/c)
 
 """ Lyα Voigt parameter (dimensionless) as a function
     of temperature T (K). """
-@inline @fastmath function a( T::Float64 )
-    a_PREFACT / b(T)
+@inline @fastmath function Compute_a( T::Float64 )
+    a_PREFACT / Compute_b(T)
 end
 
 
@@ -263,103 +290,192 @@ const σ0_PREFACT::Float64 = Sqrt_π * (e^2) * f_lu_Lyα / ( me * νLyα )
 
 """ Lyα cross-section at line center (cm²) as a function
     of temperature T (K). """
-@inline @fastmath function σ0( T::Float64 )
-    σ0_PREFACT / b(T)
+@inline @fastmath function Compute_σ0( T::Float64 )
+    σ0_PREFACT / Compute_b(T)
 end
 
-
-const νLyα_over_c::Float64 = νLyα / c
 
 """ Compute & update the (top-hat average) Voigt profile Hvoigt[i,j,k]
     for each cell. """
 function Update_Hvoigt!( Hvoigt::AbstractArray{Float64, 3}, # Top-hat average Voigt profile for each cell (UPDATED)
-                              ν::AbstractArray{Float64},   # Frequency interfaces 
-                             νC::AbstractArray{Float64},   # Frequency bin centers
-                              T::AbstractArray{Float64}    # Temperature in each cell
+                             δν::AbstractArray{Float64},    # Frequency interfaces displacement from line center 
+                            δνC::AbstractArray{Float64},    # Frequency bin centers displacement from line center
+                              a::AbstractArray{Float64, 2}, # Voigt parameters for each cell 
+                       inv_Δν_D::AbstractArray{Float64, 2}  # Inverse Doppler width for each cell 
                          )
 
     N_r, N_Z, N_ν = size( Hvoigt ) # Grid size 
     dN_r = 1:N_r
     dN_Z = 1:N_Z
-    dN_ν = 1:N_ν
+    dN_ν = 1:N_ν 
 
-    for k in dN_ν
-        νmax  = ν[k+1]   # Right interface frequency 
-        νmin  = ν[k]     # Left interface frequency
-        
-        @threads for j in dN_Z
-            @inbounds begin 
+    @threads for k in dN_ν
+        @inbounds begin 
+            δν_C   = δνC[k]
+            δν_max = δν[k+1]
+            δν_min = δν[k]
+            
+            for j in dN_Z
                 @simd for i in dN_r
-                    # Doppler width:
-                    Δν_D          = b(T[i,j]) * νLyα_over_c 
+                    # Inverse Doppler width:
+                    inv_ΔνD = inv_Δν_D[i,j]
 
                     # Bin-averaged Voigt profile:
-                    Hvoigt[i,j,k] = Htophat( (νC[k] - νLyα) / Δν_D, 
-                                             (νmax  - νLyα) / Δν_D, 
-                                             (νmin  - νLyα) / Δν_D,
-                                             a( T[i,j] ) )
-
+                    Hvoigt[i,j,k] = Htophat( δν_C   * inv_ΔνD, # x 
+                                             δν_max * inv_ΔνD, # xmax 
+                                             δν_min * inv_ΔνD, # xmin
+                                             a[i,j] )
+                                            
                 end # End of i-loop
-            end 
-        end # End of j-loop
+            end # End of j-loop
+
+        end # End of inbounds 
     end # End of k-loop
 
+    return nothing 
+end
+
+
+""" Compute & update the (top-hat average) Voigt profile Hvoigt
+    for a single cell. Convenient in the RHD sub-cycling. """
+function Update_Hvoigt_cell!( Hvoigt::AbstractArray{Float64, 1}, # Top-hat average Voigt profile for this cell (UPDATED)
+                                  δν::AbstractArray{Float64},    # Frequency interfaces displacement from line center 
+                                 δνC::AbstractArray{Float64},    # Frequency bin centers displacement from line center
+                                   a::Float64,                   # Voigt parameters for this cell 
+                            inv_Δν_D::Float64                    # Inverse Doppler width for this cell 
+                             )
+
+    N_ν = length( Hvoigt )
+
+    @simd for k in 1:N_ν
+        @inbounds begin 
+            # Get frequency displacements from line center:
+            δν_C   = δνC[k]
+            δν_max = δν[k+1]
+            δν_min = δν[k]
+
+            # Compute Hvoigt:
+            Hvoigt[k] = Htophat( δν_C   * inv_Δν_D, # x 
+                                 δν_max * inv_Δν_D, # xmax 
+                                 δν_min * inv_Δν_D, # xmin
+                                 a )
+        end
+    end
+
+    return nothing 
 end
 
 
 """ Compute & update the normalized emission profile ϕ_ν for each cell, 
     assuming ϕ_ν = Hvoigt / ∫dν Hvoigt ≈ Hvoigt[i,j,k] / ∑_k Δν[k] Hvoigt[i,j,k]. """
-@views function Update_ϕν!( ϕ_ν::AbstractArray{Float64, 3},  # Normalized emission line profile (UPDATED)
-                             Δν::AbstractArray{Float64, 1},  # Frequency bin widths
-                         Hvoigt::AbstractArray{Float64, 3},  # Voigt profile for each cell
-                           kmin::Int, 
-                           kmax::Int 
-                           )
-    N_r, N_Z, N_ν = size( Hvoigt )
+function Update_ϕν!( ϕ_ν::AbstractArray{Float64, 3},  # Normalized emission line profile (UPDATED)
+                      Δν::AbstractArray{Float64, 1},  # Frequency bin widths
+                  Hvoigt::AbstractArray{Float64, 3},  # Voigt profile for each cell
+                    kmin::Int, 
+                    kmax::Int 
+                   )
+    N_r, N_Z, _ = size( Hvoigt )
     dN_r = 1:N_r
     dN_Z = 1:N_Z
-    dN_ν = 1:N_ν
+    dk   = kmin:kmax 
 
     @threads for j in dN_Z
         @inbounds begin 
-            @simd for i in dN_r
+            for i in dN_r
 
-                SUM                 = sum( Δν[k] * Hvoigt[i,j, k] for k in kmin:kmax )
-                ϕ_ν[i,j,kmin:kmax] .= Hvoigt[i,j,kmin:kmax] ./ SUM
+                SUM = 0.0
+                @simd for k in dk 
+                    SUM += Δν[k] * Hvoigt[i,j,k]
+                end
+                inv_SUM = 1 / SUM
+                
+                @simd for k in dk 
+                    ϕ_ν[i,j,k] = Hvoigt[i,j,k] * inv_SUM
+                end
 
             end # End of i-loop
         end # End of inbounds
     end # End of j-loop
 
+    return nothing 
 end
 
 
+""" Compute & update the normalized emission profile ϕ_ν for a single cell, 
+    assuming ϕ_ν = Hvoigt / ∫dν Hvoigt ≈ Hvoigt[i,j,k] / ∑_k Δν[k] Hvoigt[i,j,k]. 
+    
+    Useful for sub-cycling in RHD simulations. """
+@inline function Update_ϕν_cell!( ϕ_ν::AbstractArray{Float64, 1},  # Normalized emission line profile for this cell (UPDATED)
+                                   Δν::AbstractArray{Float64, 1},  # Frequency bin widths
+                               Hvoigt::AbstractArray{Float64, 1},  # Voigt profile for this cell
+                                 kmin::Int, 
+                                 kmax::Int 
+                                 )
+
+    # Interval:
+    dk = kmin:kmax 
+
+    SUM = 0.0
+    @simd for k in dk 
+        @inbounds SUM += Δν[k] * Hvoigt[k]
+    end
+    inv_SUM = 1 / SUM
+
+    @simd for k in dk 
+        @inbounds ϕ_ν[k] = Hvoigt[k] * inv_SUM
+    end
+
+    return nothing 
+end
+
+
+""" This function computes the Lyα energy density, for a given cell/position. """
+@inline function Compute_e_Lyα( Δν::AbstractArray{Float64},
+                                 J::AbstractArray{Float64, 1} )
+
+    
+    N_ν = length( Δν )
+
+    ∫dν_J = 0.0 # Initialize the estimated integral
+    @inbounds for k in 1:N_ν
+        ∫dν_J += Δν[k] * J[k]
+    end
+
+    # Get Lyα energy density:
+    e_Lyα = Four_π_over_c * ∫dν_J
+
+    return e_Lyα
+end
+
+
+
 """ Update the Lyα energy density e_Lyα(r,Z) = 4π ∫dν J(r,Z,ν) / c. """
-function Update_e_Lyα!( e_Lyα::AbstractArray{Float64, 2}, 
-                           Δν::AbstractArray{Float64},
-                            J::AbstractArray{Float64, 3}
-                         )
+@inline function Update_e_Lyα!( e_Lyα::AbstractArray{Float64, 2}, 
+                                   Δν::AbstractArray{Float64},
+                                    J::AbstractArray{Float64, 3}
+                                )
 
     # Grid size & intervals:
     N_r, N_Z, N_ν = size( J )
     dN_r          = 1:N_r 
     dN_Z          = 1:N_Z 
-    dN_ν          = 1:N_ν 
+    dN_ν          = 1:N_ν
 
-    for i in dN_r
-        for j in dN_Z
+    @threads for j in dN_Z 
+        @inbounds for i in dN_r 
+
             ∫dν_J = 0.0 # Initialize the estimated integral
-
-            # Estimate the integral:
-            @inbounds for k in dN_ν
+            @simd for k in dN_ν
                 ∫dν_J += Δν[k] * J[i,j,k]
             end
 
             # Get Lyα energy density:
-            @inbounds e_Lyα[i,j] = Four_π_over_c * ∫dν_J
-        end
-    end # End of for-loop
+            e_Lyα[i,j] = Four_π_over_c * ∫dν_J
 
+        end # End of i-loop 
+    end # End of j-loop 
+
+    return nothing 
 end
 
 
@@ -836,7 +952,7 @@ function J_sphere_point( x::Float64,
                          T::Float64, 
                        τcl::Float64
                        )
-    aτ = a(T)*τcl
+    aτ = Compute_a(T)*τcl
     J  = sqrt(π^3 / 24) * (x^2 / aτ) * sech( sqrt(π^3 / 54) * abs.(x^3) / aτ )^2
     return J
 end
@@ -860,7 +976,7 @@ function J_sphere_uni( x::Float64,
                        T::Float64, 
                      τcl::Float64
                      )
-    aτ = a(T)*τcl
+    aτ = Compute_a(T)*τcl
     J  = - sqrt(6/π) * (x^2 / aτ) * log(1 - exp(-sqrt(2 * π^3 / 27) * abs.(x^3) / aτ))
     return J
 end
@@ -917,7 +1033,7 @@ function eLyα_sphere_point( r::AbstractVector{Float64},
                           )
     Rcl  = r[end]                         
     rbar = r ./ Rcl
-    aτ   = a(T)*τcl          
+    aτ   = Compute_a(T)*τcl          
 
     # Put it all together to compute e_Lyα:
     stuff  = (L_Lyα/(c * Rcl^2)) * gamma(1/3) * (2 * aτ)^(1/3) / (2 * π^(3/2))
@@ -950,7 +1066,7 @@ function eLyα_sphere_uni( r::AbstractVector{Float64},
                         )
 
     rbar = min.( r ./ Rcl, 1.0 )
-    aτ   = a(T)*τcl          
+    aτ   = Compute_a(T)*τcl          
 
     # Put it all together to compute e_Lyα:
     stuff = (3 * L_Lyα/(c * Rcl^2)) * gamma(1/3) * (2 * aτ)^(1/3) / (2 * π^(7/2))
@@ -1260,7 +1376,14 @@ end
 @inline function MinMod( A::Float64,
                          B::Float64 
                         )
-    0.5 * (sign(A) + sign(B)) * min( abs(A), abs(B) )
+
+    if A * B ≤ 0.0
+        return 0.0
+    else
+        # If abs(A) < abs(B) return A, otherwise 
+        # return B:
+        return ifelse( abs(A) < abs(B), A, B )
+    end
 end
 
 

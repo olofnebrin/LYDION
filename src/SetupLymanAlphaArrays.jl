@@ -20,11 +20,13 @@ function GenerateLyαArrays( c_Lyα::Float64,
                                 T::AbstractArray{Float64, 2}, # Array of gas temperatures (only sets initial Hvoigt values)
                            Recoil::Bool    = true,            # Atomic recoil (on if true, off if false)
                    LyαDestruction::Bool    = true,            # Lyα destruction, pd > 0 (on if true, off if false)
-                          Ncoarse::Int     = 200,             # Number of coarse bins (far from line center)
-                            Nfine::Int     = 100,             # Number of fine bins (near line center)
+                          Ncoarse::Int     = 200,             # Number of coarse bins (far from line center), default = 200
+                            Nfine::Int     = 100,             # Number of fine bins (near line center), default = 100
                     Δν_coarseband::Float64 = 1 * νLyα,        # Width of coarse grid in blue/red directions 
                              Tmin::Float64 = 30.0             # Temperature which sets Doppler width resolution near line center (default = 30 K)
                              )
+
+    N_r, N_Z = size( T )
 
     ###############################################################
     #######                                                 #######
@@ -37,7 +39,7 @@ function GenerateLyαArrays( c_Lyα::Float64,
     Ncoarse_div2 = div(Ncoarse, 2)
     Nfine_div2   = div(Nfine, 2)
     # Get fine grid resolution (= Doppler width @ temperature Tmin):
-    Δν_min       = (b(Tmin) / c) * νLyα
+    Δν_min       = (Compute_b(Tmin) / c) * νLyα
 
     # Get other needed factors:
     ν_fine_L     = νLyα - Nfine_div2 * Δν_min 
@@ -71,22 +73,37 @@ function GenerateLyαArrays( c_Lyα::Float64,
     # Get bin centers νC:
     νC  = ν[1:end-1] .+ (Δν ./ 2)
 
+    # Store δν ≡ ν - νLyα and δνC ≡ νC - νLyα, which are needed in the Voigt parameter 
+    # calculations:
+    δν  = ν  .- νLyα
+    δνC = νC .- νLyα
+
     # Store 1 / Δν and 1 / νC, since it is used in frequency factor calculations:
     inv_Δν = 1 ./ Δν
     inv_νC = 1 ./ νC
 
+    # Voigt parameter and Doppler widths, and its inverse, for each cell:
+    a        = zeros( Float64, N_r, N_Z )
+    ΔνD      = zeros( Float64, N_r, N_Z )
+    inv_ΔνD  = zeros( Float64, N_r, N_Z )
+
+    a       .= Compute_a.( T )
+    ΔνD     .= Compute_ΔνD.( T )
+    inv_ΔνD .= 1.0 ./ ΔνD
+
     # Get Voigt profile for each cell:
-    N_r    = size( T, 1 )
-    N_Z    = size( T, 2 )
-    Hvoigt = zeros( N_r, N_Z, N_ν )     # Initialize Hvoigt
-    Update_Hvoigt!( Hvoigt, ν, νC, T )  # Compute & fill the array with values
+    Hvoigt   = zeros( N_r, N_Z, N_ν )               # Initialize Hvoigt
+    Update_Hvoigt!( Hvoigt, δν, δνC, a, inv_ΔνD )   # Compute & fill the array with values
 
     # Save ~ core region for 3 × 10⁴ K, for fall-back use in advection,
     # where only "active" bins are advected:
-    Δν_D3e4   = (b(3e4) / c) * νLyα 
+    Δν_D3e4   = (Compute_b(3e4) / c) * νLyα 
     kcore_min = findfirst( ≥(νLyα - 4 * Δν_D3e4), νC )
     kcore_max = findlast( ≤(νLyα + 4 * Δν_D3e4), νC )
 
+    # Save dN_ν = 1:N_ν and dN_ν_int = 2:(N_ν-1) that are often called:
+    dN_ν     = 1:N_ν
+    dN_ν_int = 2:(N_ν-1)
 
     ###############################################################
     #######                                                 #######
@@ -178,11 +195,13 @@ function GenerateLyαArrays( c_Lyα::Float64,
                       D_rr_Lyα, D_ZZ_Lyα, D_rZ_Lyα, K_ϕϕ_iphalf_Lyα, K_ϕϕ_imhalf_Lyα, 
                       F_r_Lyα, F_Z_Lyα, F_r_Hr_Lyα, F_Z_Hr_Lyα, F_r_HZ_Lyα, F_Z_HZ_Lyα, 
                       α_Lyα, α_F_Lyα, αc_Lyα, pd, ∫dν_js_Lyα, Hvoigt, ϕ_ν, Fij_kp, Fij_k, Fij_km, 
-                      ν, νC, Δν, inv_Δν, inv_νC,
+                      ν, νC, Δν, δν, δνC, inv_Δν, inv_νC, 
+                      a, ΔνD, inv_ΔνD,
                       kcore_min, kcore_max,
                       Recoil, LyαDestruction, α_Lyα_floor, Δρu_Lyα_r, Δρu_Lyα_Z, f_Lyα_r, f_Lyα_Z,
                       rfirst_Lyα,
-                      M_F, M_F_antigravity, L_Lyα, f_esc_Lyα )
+                      M_F, M_F_antigravity, L_Lyα, f_esc_Lyα,
+                      N_ν, dN_ν, dN_ν_int )
 end
 
 
@@ -209,13 +228,27 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
     @assert length( r ) == N_r + 1
     @assert length( Z ) == N_Z + 1
 
+    # Store δν ≡ ν - νLyα and δνC ≡ νC - νLyα, which are needed in the Voigt parameter 
+    # calculations:
+    δν  = ν  .- νLyα
+    δνC = νC .- νLyα
+
+    # Voigt parameter and Doppler widths, and its inverse, for each cell:
+    a        = zeros( Float64, N_r, N_Z )
+    ΔνD      = zeros( Float64, N_r, N_Z )
+    inv_ΔνD  = zeros( Float64, N_r, N_Z )
+
+    a       .= Compute_a.( T )
+    ΔνD     .= Compute_ΔνD.( T )
+    inv_ΔνD .= 1.0 ./ ΔνD
+
     # Get Voigt profile for each cell:
-    Hvoigt = zeros( N_r, N_Z, N_ν )     # Initialize Hvoigt
-    Update_Hvoigt!( Hvoigt, ν, νC, T )  # Compute & fill the array with values
+    Hvoigt = zeros( N_r, N_Z, N_ν )                 # Initialize Hvoigt
+    Update_Hvoigt!( Hvoigt, δν, δνC, a, inv_Δν_D )  # Compute & fill the array with values
 
     # Save ~ core region for 3 × 10⁴ K, for fall-back use in advection,
     # where only "active" bins are advected:
-    Δν_D3e4   = (b(3e4) / c) * νLyα 
+    Δν_D3e4   = (Compute_b(3e4) / c) * νLyα 
     kcore_min = findfirst( ≥(νLyα - 4 * Δν_D3e4), νC )
     kcore_max = findlast( ≤(νLyα + 4 * Δν_D3e4), νC )
 
@@ -313,6 +346,5 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
                       Recoil, LyαDestruction, α_Lyα_floor, Δρu_Lyα_r, Δρu_Lyα_Z, f_Lyα_r, f_Lyα_Z,
                       rfirst_Lyα,
                       M_F, M_F_antigravity, L_Lyα, f_esc_Lyα )
-
 
 end

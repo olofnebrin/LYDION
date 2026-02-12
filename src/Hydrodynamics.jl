@@ -52,7 +52,7 @@ const P_floor::Float64     =  1e-30      # Gas pressure floor                   
 const γmon::Float64        =  5 / 3      # Adiabatic index of monoatomic gas
 const γdia::Float64        =  7 / 5      # Adiabatic index of diatomic gas
 const SteepFallBack::Bool  =  false      # Whether to use fall backs to cell centers = cell average (default: false)
-const DEBUG_Hydro::Bool    =  true       # Checks for non-physical values & errors, on if true      (default: true)
+const DEBUG_Hydro::Bool    =  false      # Checks for non-physical values & errors, on if true      (default: true)
 
 export CFL, C_Grav, C_RP, ρ_floor, ρd_floor, P_floor, γmon, γdia  
 
@@ -2260,9 +2260,6 @@ function GetFlux_HLL( ρ_L::Float64,
                                  u_L, u_R,
                                  P_L, P_R,
                                  γad_L, γad_R )
-
-    @assert isfinite(S_L) 
-    @assert isfinite(S_R)
 
     # Conserved variables:
     ρu_L   = ρ_L * u_L 
@@ -5549,13 +5546,55 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
     ΔX_R       = X[end] - X[end-1]   
     ΔY_L       = Y[2]   - Y[1]
     ΔY_R       = Y[end] - Y[end-1]  
-  
-    @inbounds for k in dng 
-      Xg[ng+1 - k]      = X[1]   - k * ΔX_L
-      Xg[ng+N_X+1 + k]  = X[end] + k * ΔX_R
-      Yg[ng+1 - k]      = Y[1]   - k * ΔY_L
-      Yg[ng+N_Y+1 + k]  = Y[end] + k * ΔY_R
+
+    if BC_X_left === :Reflect
+        # Mirror around X[1]:
+        @inbounds for k in dng
+            Xg[ng+1 - k] = 2 * X[1]  -  Xg[ng+1 + k]   
+        end
+    else
+        @inbounds for k in dng 
+            Xg[ng+1 - k] = X[1]  -  k * ΔX_L
+        end
     end
+
+    if BC_Y_left === :Reflect 
+        # Mirror around Y[1]:
+        @inbounds for k in dng
+            Yg[ng+1 - k] = 2 * Y[1]  -  Yg[ng+1 + k]  
+        end
+    else
+        @inbounds for k in dng 
+            Yg[ng+1 - k] = Y[1]  -  k * ΔY_L
+        end
+    end
+
+    if BC_X_right === :Reflect
+        # Mirror around X[end]:
+        i_last = ng + N_X
+        @inbounds for k in dng
+            Xg[i_last + 1 + k] = 2 * X[end]  -  Xg[i_last + 1 - k]
+        end
+    else
+        i_last = ng + N_X
+        @inbounds for k in dng 
+            Xg[i_last + 1 + k] = X[end]  +  k * ΔX_R
+        end
+    end
+
+    if BC_Y_right === :Reflect
+        # Mirror around Y[end]:
+        j_last = ng + N_Y
+        @inbounds for k in dng
+            Yg[j_last + 1 + k] = 2 * Y[end]  -  Yg[j_last + 1 - k]
+        end
+    else
+        j_last = ng + N_Y
+        @inbounds for k in dng 
+            Yg[j_last + 1 + k] = Y[end]  +  k * ΔY_R
+        end
+    end
+
 
     # Linear extrapolation for ghost cell centers: 
     ΔXC_L = XCoM[2]      - XCoM[1]
@@ -5563,11 +5602,52 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
     ΔYC_L = YCoM[2]      - YCoM[1]
     ΔYC_R = YCoM[end]    - YCoM[end-1]
 
-    @inbounds for k in dng
-        XCoMg[ng+1 - k]     = XCoM[1]   - k * ΔXC_L
-        XCoMg[ng+N_X + k]   = XCoM[end] + k * ΔXC_R
-        YCoMg[ng+1 - k]     = YCoM[1]   - k * ΔYC_L
-        YCoMg[ng+N_Y + k]   = YCoM[end] + k * ΔYC_R
+    if BC_X_left === :Reflect
+        # Mirror around X[1]:
+        @inbounds for k in dng
+            XCoMg[ng+1 - k] = 2 * X[1]  -  XCoMg[ng + k]
+        end
+    else
+        @inbounds for k in dng
+            XCoMg[ng+1 - k] = XCoM[1] - k * ΔXC_L
+        end
+    end
+
+    if BC_Y_left === :Reflect
+        # Mirror around Y[1]:
+        @inbounds for k in dng
+            YCoMg[ng+1 - k] = 2 * Y[1]  -  YCoMg[ng + k]
+        end
+    else
+        @inbounds for k in dng
+            YCoMg[ng+1 - k] = YCoM[1] - k * ΔYC_L
+        end
+    end
+
+    if BC_X_right === :Reflect
+        # Mirror around X[end]:
+        i_last = ng + N_X
+        @inbounds for k in dng
+            XCoMg[i_last + k] = 2 * X[end]  -  XCoMg[i_last + 1 - k]
+        end
+    else
+        i_last = ng + N_X
+        @inbounds for k in dng 
+            XCoMg[i_last + k] = XCoM[end]  +  k * ΔXC_R
+        end
+    end
+
+    if BC_Y_right === :Reflect
+        # Mirror around Y[end]:
+        j_last = ng + N_Y
+        @inbounds for k in dng
+            YCoMg[j_last + k] = 2 * Y[end]  -  YCoMg[j_last + 1 - k]
+        end
+    else
+        j_last = ng + N_Y
+        @inbounds for k in dng 
+            YCoMg[j_last + k] = YCoM[end]  +  k * ΔYC_R
+        end
     end
 
     # Ghost-padded arrays:

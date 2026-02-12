@@ -17,20 +17,27 @@ Nmaxsteps::Int                     =  100000        # Maximum number of time-ste
 
 mstarZAMS::Float64                 =  35            # Initial mass of the star (M⊙)
 Zstar_Zsun::Float64                =  1.0           # Metallicity of the star in Solar units 
-σstar_cell::Float64                =  5             # Gaussian size of stellar emission region in cell size units (≳ 5 for approximately spherical H II regions)
+σstar_cell::Float64                =  3             # Gaussian size of stellar emission region in cell size units (≳ 5 for approximately spherical H II regions)
 
 #########################################################################
 ######  C L O U D  P R O P E R T I E S  &  S P A T I A L  G R I D  ######
 #########################################################################
 
+# If POWER_LAW_ENVELOPE = true, the density outside Rcore falls off as ρ ∝ r^(-p_ENVELOPE),
+# up until nH = nH_ext. If POWER_LAW_ENVELOPE = false, there is a much sharper cut-off
+# in the density outside Rcl:
+POWER_LAW_ENVELOPE::Bool           =  false 
+p_ENVELOPE::Float64                =  2.0
+
 z::Float64                         =  0.0           # Redshift 
 DG₀::Float64                       =  1.0 * DGsun   # Dust-to-gas ratio (NOTE: *not* normalized to Solar value. To get e.g. Solar, set DG₀ = DGsun)
 Zgas_Zsun::Float64                 =  Zstar_Zsun    # Gas metallicity in Solar units 
-nH₀::Float64                       =  3e3           # Initial cloud density (cm⁻³)
-nH_ext::Float64                    =  1e-7 * nH₀    # Initial density far outside the cloud (cm⁻³)
+nH_core::Float64                   =  3e3           # Initial core density (cm⁻³)
+nH_ext::Float64                    =  0.1           # Initial density far outside the cloud (cm⁻³)
 T₀::Float64                        =  500           # Initial cloud temperature (K)
 T_ext::Float64                     =  500           # Temperature outside the cloud 
-Rcl::Float64                       =  2 * pc        # Radius of cloud (i.e. high-density region)
+Rcore::Float64                     =  2.0 * pc 
+Rcl::Float64                       =  2.0 * pc      # Radius of cloud (i.e. high-density region)
 u_RMSturb::Float64                 =  3 * kms       # Initial RMS turbulence velocity 
 
 # Grid settings below. If BC_Z_bot = :Reflect (Case 1), there is assumed symmetry at Z = 0. If 
@@ -40,17 +47,17 @@ u_RMSturb::Float64                 =  3 * kms       # Initial RMS turbulence vel
 # for the r-logarithmic grid (if used), but the Z-logarithmic grid (if used) stretches in both directions, with 
 # N_Z_log_side cells per side (upper logarithmic region, and lower logarithmic region).
 
-Rmax_lin::Float64                  =  6 * pc        # Uniform/linear grid out to cylindrical r = Rmax_lin 
-LZ_uniform::Float64                =  6 * pc        # Total extent of uniform grid along the Z-axis.  
-Rmax::Float64                      =  6 * pc        # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
-Zmax::Float64                      =  6 * pc        # Maximum extent along Z-axis. Should be ≥ LZ_uniform.
-N_r_lin::Int                       =  128           # Number of cells along r-direction in the uniform grid section 
-N_Z_lin::Int                       =  128           # Number of cells along Z-direction in the uniform grid section 
+Rmax_lin::Float64                  =  3.0 * pc      # Uniform/linear grid out to cylindrical r = Rmax_lin 
+LZ_uniform::Float64                =  3.0 * pc      # Total extent of uniform grid along the Z-axis.  
+Rmax::Float64                      =  3.0 * pc      # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
+Zmax::Float64                      =  3.0 * pc      # Maximum extent along Z-axis. Should be ≥ LZ_uniform.
+N_r_lin::Int                       =  64            # Number of cells along r-direction in the uniform grid section 
+N_Z_lin::Int                       =  64            # Number of cells along Z-direction in the uniform grid section 
 N_r_log::Int                       =  0             # Number of cells along r-direction in the logarithmic grid section 
 N_Z_log_side::Int                  =  0             # Number of cells along Z-direction (per side if BC_Z_bot = :Outflow) in the logarithmic grid section  
  
 BC_r_right::Symbol                 =  :Outflow      # BCs at outer r-boundary (:Outflow or :Reflect)
-BC_Z_bot::Symbol                   =  :Outflow      # BCs at lower Z-boundary (:Outflow or :Reflect)
+BC_Z_bot::Symbol                   =  :Reflect      # BCs at lower Z-boundary (:Outflow or :Reflect)
 BC_Z_top::Symbol                   =  :Outflow      # BCs at upper Z-boundary (:Outflow or :Reflect) 
 
 ######################################################################
@@ -73,7 +80,7 @@ xCO₀::Float64                      =  0.0          # Initial CO fraction insid
 xOI₀::Float64                      =  1.0          # Initial O I fraction (nOI/nO) inside cloud       (≤ 1)
 xOII₀::Float64                     =  0.0          # Initial O II fraction inside cloud               (≤ 1)
 
-xHII_ext::Float64                  =  1.0          # Initial H II fraction outside cloud 
+xHII_ext::Float64                  =  1e-4         # Initial H II fraction outside cloud 
 xH2_ext::Float64                   =  0.0          # Initial H₂ fraction outside cloud 
 xHeII_ext::Float64                 =  0.0          # Initial He II fraction outside cloud 
 xHeIII_ext::Float64                =  0.0          # Initial He III fraction outside cloud 
@@ -91,7 +98,7 @@ xOII_ext::Float64                  =  0.0
 
 Hydro::Bool                        =  true       # Hydrodynamics                    (on if true, off if false)
 Gravity::Bool                      =  true       # Self-gravity                     (on if true, off if false)
-Lyα::Bool                          =  false      # Lyα RT/RHD                       (on if true, off if false)
+Lyα::Bool                          =  true       # Lyα RT/RHD                       (on if true, off if false)
 Recoil::Bool                       =  true       # Atomic recoil for Lyα RT         (on if true, off if false)
 LyαDestruction::Bool               =  true       # Lyα destruction (pd > 0)         (on if true, off if false)
 RadPressure::Bool                  =  true       # Radiation pressure feedback      (on if true, off if false - NOTE: Lyα feedback is only on if Lyα RT is on)
@@ -145,9 +152,11 @@ end
 
 print_info = true 
 
-SetupRHDsimulation( mstarZAMS, Zstar_Zsun, DG₀, nH₀, nH_ext, Rcl, 
+SetupRHDsimulation( mstarZAMS, Zstar_Zsun, DG₀, nH_core, nH_ext, 
+                    Rcore, Rcl, 
                     σstar_cell, Rmax_lin, LZ_uniform, Rmax, Zmax,
-                    T₀, T_ext, tmax, 
+                    T₀, T_ext, POWER_LAW_ENVELOPE, p_ENVELOPE,
+                    tmax, 
                     xHII₀, xH2₀, xHeII₀, xHeIII₀, xDII₀, xHD₀, xCI₀, xCII₀, xCO₀, xOI₀, xOII₀,
                     xHII_ext, xH2_ext, xHeII_ext, xHeIII_ext, xDII_ext, xHD_ext, 
                     xCI_ext, xCII_ext, xCO_ext, xOI_ext, xOII_ext, Zgas_Zsun,

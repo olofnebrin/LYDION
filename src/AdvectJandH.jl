@@ -4,8 +4,9 @@
     PURPOSE:     Contains the code for advecting the mean intensity J, and the
                  first moment H (the Eddington tensor D = K / J is estimated 
                  using an M1 closure). Uses an explicit finite volume method, with 
-                 2:nd order (linear) spatial reconstruction, and 2:nd order (RK-2)
-                 time integration. 
+                 2:nd order (linear) spatial reconstruction, and 1:st order 
+                 time integration. Second-order (Strang) dimensional operator 
+                 splitting is also used.
 
     REFERENCES:  (1) Skinner & Ostriker (2013) 'A Two-moment Radiation Hydrodynamics 
                      Module in Athena Using a Time-explicit Godunov Method', ApJS, 206, 2
@@ -68,12 +69,10 @@ const inv_c::Float64          = 1 / c  # Convenient constant
 end
 
 
-const ψ_fluxlimiter::Float64 = 1.1   # Flux limiter in the highly optically thick regime
-
-""" Computes the HLL fluxes for J, H_r, and H_Z. Uses 
-    a correction factor ϵ for the asymptotic diffusion limit for J,
-    important when τ_cell ≳ 1. """
-@inline function GetFluxHLL( FJ_L::Float64,
+""" Computes the Global Lax-Friedrich (GLF) fluxes for J, H_r, and H_Z. 
+    For cells with τ_cell ≳ 1, corrections are used to get the 
+    asymptotic diffusion limit. """
+@inline function GetFluxGLF( FJ_L::Float64,
                              FJ_R::Float64,
                             FHr_L::Float64, FHr_R::Float64,
                             FHZ_L::Float64, FHZ_R::Float64,
@@ -81,42 +80,28 @@ const ψ_fluxlimiter::Float64 = 1.1   # Flux limiter in the highly optically thi
                               J_R::Float64, 
                              Hr_L::Float64, Hr_R::Float64,
                              HZ_L::Float64, HZ_R::Float64,
-                             λ1_L::Float64, 
-                             λ1_R::Float64,
-                             λ3_L::Float64, 
-                             λ3_R::Float64,
                               τ_L::Float64,
                               τ_R::Float64,
                               J_i::Float64, J_ip1::Float64 )
 
-    # Wavespeeds (in units of c̃) from eigenvalues:
-    S_R          = max( max( λ3_L, λ3_R ), 0.0 )
-    S_L          = min( min( λ1_L, λ1_R ), 0.0 )
-
-    # Pre-compute some quantities:
-    S_R_mult_S_L = S_R * S_L 
-    inv_ΔS       = 1 / ( S_R - S_L ) 
-
     # Effective cell optical depth & correction factor for diffusion limit:
-    τ_cell       = τ_L + τ_R 
-    ϵ            = min( 1, 1 / τ_cell )
-    oneminusϵ    = max( 1 - ϵ, 0.0 )
+    τ_cell       = @fastmath  τ_L + τ_R 
+    ϵ            = @fastmath tanh( 1 / τ_cell )
+    oneminusϵ    = 1.0 - ϵ
 
-    # Interface flux for J:
-    F_J          = ( ( S_R * FJ_L  -  S_L * FJ_R )  +  ϵ * S_R_mult_S_L * ( J_R - J_L ) ) * inv_ΔS
-    if ϵ < 1
-        # Fick's law flux in the isotropic diffusion limit:
-        Fdiff = - ( J_ip1 - J_i ) / ( 3 * τ_cell )
-        # Limit actual numerical flux to physically reasonable values:
-        F_J   = MinMod( F_J, ψ_fluxlimiter * Fdiff )
-    end
+    # Diffusion limit - ∇J / 3α ≈ - (J_{i+1/2} - J_{i}) / (3 τ),
+    # also re-using ϵ since it is 1 / τ when τ > 1:
+    F_J_diff     = @fastmath - OneThird * ( J_ip1 - J_i ) * ϵ
 
-    # Flux for H_r and H_Z:
-    F_Hrdiff     = 0.5 * ( FHr_L + FHr_R ) 
-    F_Hr         = ϵ * ( ( S_R * FHr_L  -  S_L * FHr_R )  +  S_R_mult_S_L * ( Hr_R - Hr_L ) ) * inv_ΔS  +  oneminusϵ * F_Hrdiff
+    # GLF flux (partially corrected) & fully corrected flux:
+    F_J_GLF      = @fastmath  0.5 * ( FJ_L  +  FJ_R )  -  0.5 * ( J_R - J_L )  
 
-    F_HZdiff     = 0.5 * ( FHZ_L + FHZ_R ) 
-    F_HZ         = ϵ * ( ( S_R * FHZ_L  -  S_L * FHZ_R )  +  S_R_mult_S_L * ( HZ_R - HZ_L ) ) * inv_ΔS  +  oneminusϵ * F_HZdiff 
+    # Flux for J, weighted sum of GLF and diffusion limit:
+    F_J          = @fastmath  ϵ * F_J_GLF  +  oneminusϵ * F_J_diff
+
+    # Flux for H_r and H_Z (no corrections needed):
+    F_Hr         = @fastmath 0.5 * ( FHr_L  +  FHr_R )  -  ϵ * 0.5 * ( Hr_R - Hr_L ) 
+    F_HZ         = @fastmath 0.5 * ( FHZ_L  +  FHZ_R )  -  ϵ * 0.5 * ( HZ_R - HZ_L )
 
     return F_J, F_Hr, F_HZ
 end
@@ -125,20 +110,12 @@ end
 """ Get advection flux (u/c) * J or (u/c) * H evaluated at interface 
     with velocity u_contact, obtained from the hydro solver. 
     Uses upwind, following Skinner et al. (2019). """
-@inline function GetAdvectionFlux( u_contact::Float64, # Gas velocity u at the interface (contact velocity)
-                                         J_L::Float64, # J_L or H_L 
-                                         J_R::Float64  # J_R or H_R 
+@inline @fastmath function GetAdvectionFlux( u_contact::Float64, # Gas velocity u at the interface (contact velocity)
+                                                   J_L::Float64, # J_L or H_L 
+                                                   J_R::Float64  # J_R or H_R 
                                              ) 
     
-    if u_contact < 0.0
-        F_adv_J = u_contact * inv_c * J_R 
-
-        return F_adv_J
-    else
-        F_adv_J = u_contact * inv_c * J_L
-
-        return F_adv_J
-    end
+    return u_contact * inv_c * ifelse( u_contact < 0.0, J_R, J_L )
 end
 
 
@@ -188,92 +165,122 @@ end
 end
 
 
-@inline function ReconstructInterface( J_i::Float64,   J_ip1::Float64,  J_ip2::Float64,  J_im1::Float64,
-                                       Hr_i::Float64,  Hr_ip1::Float64, Hr_ip2::Float64, Hr_im1::Float64,
-                                       HZ_i::Float64,  HZ_ip1::Float64, HZ_ip2::Float64, HZ_im1::Float64,
+""" This function performs a second-order reconstruction of J and H 
+    on an interface using PLM. """
+@inline @fastmath function ReconstructInterface( J_i::Float64,   J_ip1::Float64,  J_ip2::Float64,  J_im1::Float64,
+                                                Hr_i::Float64,  Hr_ip1::Float64, Hr_ip2::Float64, Hr_im1::Float64,
+                                                HZ_i::Float64,  HZ_ip1::Float64, HZ_ip2::Float64, HZ_im1::Float64,
  
-                                       rCoM_i::Float64, rCoM_ip1::Float64, rCoM_ip2::Float64, rCoM_im1::Float64, 
-                                       r_ip1::Float64,
+                                                Δr_L::Float64, Δr_R::Float64, 
+                                                inv_dr_i_im1::Float64, inv_dr_ip1_i::Float64, inv_dr_ip2_ip1::Float64,
                               
-                                       α_F_i::Float64, α_F_ip1::Float64 )
-
-    # Intervals for the derivatives: 
-    dr_i_im1   = rCoM_i   - rCoM_im1
-    dr_ip1_i   = rCoM_ip1 - rCoM_i
-    dr_ip2_ip1 = rCoM_ip2 - rCoM_ip1 
-
-    # Intervals between cell centers & inteface:
-    Δr_L       = r_ip1    - rCoM_i 
-    Δr_R       = rCoM_ip1 - r_ip1 
+                                                α_F_i::Float64, α_F_ip1::Float64 )
 
     # (Flux) optical depth between cell centers & inteface:
     τ_L        = α_F_i   * Δr_L
     τ_R        = α_F_ip1 * Δr_R
 
-    # Compute reduced fluxes:
-    Hmag_i   = sqrt( Hr_i * Hr_i  +  HZ_i * HZ_i )          # Magnitude of H in cell i (will be re-used)
-    Hmag_ip1 = sqrt( Hr_ip1 * Hr_ip1  +  HZ_ip1 * HZ_ip1 )  # Magnitude of H in cell i+1 (will be re-used)
+    # Compute reduced flux components:
+    inv_J_i    = 1 / max( J_i, Jeps )
+    inv_J_ip1  = 1 / max( J_ip1, Jeps )
+    inv_J_ip2  = 1 / max( J_ip2, Jeps )
+    inv_J_im1  = 1 / max( J_im1, Jeps )
 
-    f_i      = Hmag_i   / max( J_i, Jeps ) 
-    f_ip1    = Hmag_ip1 / max( J_ip1, Jeps )
-    f_ip2    = sqrt( Hr_ip2 * Hr_ip2  +  HZ_ip2 * HZ_ip2 ) / max( J_ip2, Jeps )
-    f_im1    = sqrt( Hr_im1 * Hr_im1  +  HZ_im1 * HZ_im1 ) / max( J_im1, Jeps )
-
-    # Compute flux unit vectors in cells i and i+1:
-    if Hmag_i > Heps
-        inv_Hmag_i   =  1 / Hmag_i
-        nr_i         =  Hr_i * inv_Hmag_i
-        nZ_i         =  HZ_i * inv_Hmag_i
-    else
-        nr_i         =  0.0
-        nZ_i         =  0.0
-    end
-
-    if Hmag_ip1 > Heps 
-        inv_Hmag_ip1 =  1 / Hmag_ip1
-        nr_ip1       =  Hr_ip1 * inv_Hmag_ip1
-        nZ_ip1       =  HZ_ip1 * inv_Hmag_ip1
-    else
-        nr_ip1       =  0.0
-        nZ_ip1       =  0.0
-    end
+    fr_i     = Hr_i   * inv_J_i
+    fr_ip1   = Hr_ip1 * inv_J_ip1
+    fr_ip2   = Hr_ip2 * inv_J_ip2
+    fr_im1   = Hr_im1 * inv_J_im1
+    
+    fZ_i     = HZ_i   * inv_J_i 
+    fZ_ip1   = HZ_ip1 * inv_J_ip1
+    fZ_ip2   = HZ_ip2 * inv_J_ip2
+    fZ_im1   = HZ_im1 * inv_J_im1
 
     # Compute slope-limited derivatives for J:
-    ∂J∂r_L   = MinMod( (J_i   - J_im1)   / dr_i_im1,
-                       (J_ip1 - J_i)     / dr_ip1_i )
+    ∂J∂r_L   = MinMod( (J_i   - J_im1)   * inv_dr_i_im1,
+                       (J_ip1 - J_i)     * inv_dr_ip1_i )
      
-    ∂J∂r_R   = MinMod( (J_ip2 - J_ip1)   / dr_ip2_ip1,
-                       (J_ip1 - J_i)     / dr_ip1_i )
+    ∂J∂r_R   = MinMod( (J_ip2 - J_ip1)   * inv_dr_ip2_ip1,
+                       (J_ip1 - J_i)     * inv_dr_ip1_i )
 
-    # Compute slope-limited derivatives for f:
-    ∂f∂r_L   = MinMod( (f_i   - f_im1) / dr_i_im1,
-                       (f_ip1 - f_i)   / dr_ip1_i )
+    # Compute sloe-limited derivatives of fr (r-component of reduced flux):
+    ∂fr∂r_L  = MinMod( (fr_i   - fr_im1)   * inv_dr_i_im1,
+                       (fr_ip1 - fr_i)     * inv_dr_ip1_i )
      
-    ∂f∂r_R   = MinMod( (f_ip2 - f_ip1) / dr_ip2_ip1,
-                       (f_ip1 - f_i)   / dr_ip1_i )
+    ∂fr∂r_R  = MinMod( (fr_ip2 - fr_ip1)   * inv_dr_ip2_ip1,
+                       (fr_ip1 - fr_i)     * inv_dr_ip1_i )
+
+    # Compute slope-limited derivatives of fZ (Z-component of reduced flux):   
+    ∂fZ∂r_L  = MinMod( (fZ_i   - fZ_im1)   * inv_dr_i_im1,
+                       (fZ_ip1 - fZ_i)     * inv_dr_ip1_i )
+     
+    ∂fZ∂r_R  = MinMod( (fZ_ip2 - fZ_ip1)   * inv_dr_ip2_ip1,
+                       (fZ_ip1 - fZ_i)     * inv_dr_ip1_i )                
 
     # Get all J and f (reduced flux) interface variables:
     J_L      = max( J_i    +  ∂J∂r_L * Δr_L, Jeps )
     J_R      = max( J_ip1  -  ∂J∂r_R * Δr_R, Jeps )
 
-    f_L      = clamp( f_i     +  ∂f∂r_L * Δr_L,  0.0, 1.0 )
-    f_R      = clamp( f_ip1   -  ∂f∂r_R * Δr_R,  0.0, 1.0 )
+    fr_L     = fr_i     +  ∂fr∂r_L * Δr_L
+    fr_R     = fr_ip1   -  ∂fr∂r_R * Δr_R
+
+    fZ_L     = fZ_i     +  ∂fZ∂r_L * Δr_L
+    fZ_R     = fZ_ip1   -  ∂fZ∂r_R * Δr_R
+
+    # Ensure causality, i.e. f ≤ 1:
+    f_L = sqrt( fr_L * fr_L  +  fZ_L * fZ_L )
+    if f_L > 1.0
+        # Renormalize:
+        inv_f = inv( f_L )
+        fr_L *= inv_f 
+        fZ_L *= inv_f
+        f_L   = 1.0
+    end
+
+    f_R = sqrt( fr_R * fr_R  +  fZ_R * fZ_R )
+    if f_R > 1.0
+        # Renormalize:
+        inv_f = inv( f_R )
+        fr_R *= inv_f 
+        fZ_R *= inv_f
+        f_R   = 1.0
+    end
 
     # Compute H_r and H_Z from the interface J and f values,
     # and preserving the flux directions (via nr and nZ):
-    Hr_L     = f_L * nr_i   * J_L
-    Hr_R     = f_R * nr_ip1 * J_R
+    Hr_L     = fr_L  * J_L
+    Hr_R     = fr_R  * J_R
 
-    HZ_L     = f_L * nZ_i   * J_L
-    HZ_R     = f_R * nZ_ip1 * J_R
+    HZ_L     = fZ_L  * J_L
+    HZ_R     = fZ_R  * J_R
 
-    return J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, τ_L, τ_R
+    # Compute flux normal vectors:
+    if f_L > 0.0
+        inv_f_L = inv( f_L )
+        nr_L    = fr_L * inv_f_L
+        nZ_L    = fZ_L * inv_f_L
+    else
+        nr_L    = 0.0
+        nZ_L    = 0.0
+    end
+
+    if f_R > 0.0
+        inv_f_R = inv( f_R )
+        nr_R    = fr_R * inv_f_R
+        nZ_R    = fZ_R * inv_f_R
+    else
+        nr_R    = 0.0
+        nZ_R    = 0.0
+    end
+
+    return J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, τ_L, τ_R,
+           f_L, f_R, nr_L, nr_R, nZ_L, nZ_R
 end
 
 
 """ This function performs a forward Euler update of J and H in the r-direction,
-    over a time-step Δt. It will be used in the r-direction RK2 time-step update. """
- function ForwardEuler_r!( c̃Δt::Float64,
+    over a time-step Δt. """
+@fastmath function ForwardEuler_r!( c̃Δt::Float64,
                                     α_F::AbstractArray{Float64,2},
                                       J::AbstractArray{Float64,2},
                                     H_r::AbstractArray{Float64,2},
@@ -288,8 +295,6 @@ end
                                  F_r_HZ::AbstractArray{Float64,2},
                                  inv_ΔV::AbstractArray{Float64,2},
                                     A_r::AbstractArray{Float64,2},
-                                      r::AbstractVector{Float64},
-                                   rCoM::AbstractVector{Float64},
                              inv_r_cell::AbstractVector{Float64},
 
                              # Gas velocity field:
@@ -300,6 +305,24 @@ end
                                 ∂u_Z_∂Z::AbstractArray{Float64,2},
                              u_r_over_r::AbstractArray{Float64,2},
 
+                             # Needed intervals:
+
+                             Δr_L::AbstractVector{Float64}, Δr_R::AbstractVector{Float64},
+                             inv_dr_i_im1::AbstractVector{Float64},
+                             inv_dr_ip1_i::AbstractVector{Float64},
+                             inv_dr_ip2_ip1::AbstractVector{Float64},
+
+                             Δr_L_InnerBoundary::Float64, Δr_R_InnerBoundary::Float64,
+                             inv_dr_i_im1_InnerBoundary::Float64,
+                             inv_dr_ip1_i_InnerBoundary::Float64,
+                             inv_dr_ip2_ip1_InnerBoundary::Float64,
+
+                             Δr_L_OuterBoundary::Float64, Δr_R_OuterBoundary::Float64,
+                             inv_dr_i_im1_OuterBoundary::Float64,
+                             inv_dr_ip1_i_OuterBoundary::Float64,
+                             inv_dr_ip2_ip1_OuterBoundary::Float64,
+
+                             # Coordinate system, BCs:
                       CylindricalCoords::Bool,
                               BC_r_left::Symbol,
                              BC_r_right::Symbol,
@@ -313,17 +336,6 @@ end
 
     if DEBUG_M1Advection
         @assert size( u_r_star, 1 ) == N_r + 1 "Contact velocity in r-direction/X-direction must have size $(N_r+1)."
-    end
-
-    # Needed ghost cell CoM radii, obtained by mirroring:
-    @inbounds begin 
-        # Ghost CoM r-positions mirrored around r[1] = r_{1/2}:
-        rCoM_0   = r[1] - (rCoM[1] - r[1]) 
-        rCoM_m1  = r[1] - (rCoM[2] - r[1])
-
-        # Ghost CoM r-positions mirrored around r[N_r+1]:
-        rCoM_Np1 = r[N_r+1] + (r[N_r+1] - rCoM[N_r])
-        rCoM_Np2 = r[N_r+1] + (r[N_r+1] - rCoM[N_r-1])
     end
 
     # First update the Eddington factors:
@@ -358,21 +370,22 @@ end
 
             # Reconstruct variables at interface r_{1/2} (i.e. r[1]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J_0,     J[1,j],   J[2,j],   J_m1,
-                                             Hr_0,    H_r[1,j], H_r[2,j], Hr_m1,
-                                             HZ_0,    H_Z[1,j], H_Z[2,j], HZ_m1,
-                                             rCoM_0,  rCoM[1],  rCoM[2],  rCoM_m1, 
-                                             r[1],               # Interface r_{1/2}
-                                             α_F[1,j], α_F[1,j]  # Assume ghost cell 0 has same opacity as cell i = 1
-                                             )
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R  = ReconstructInterface( J_0,     J[1,j],   J[2,j],   J_m1,
+                                                Hr_0,    H_r[1,j], H_r[2,j], Hr_m1,
+                                                HZ_0,    H_Z[1,j], H_Z[2,j], HZ_m1,
+
+                                                Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+                                                inv_dr_i_im1_InnerBoundary,
+                                                inv_dr_ip1_i_InnerBoundary,
+                                                inv_dr_ip2_ip1_InnerBoundary,
+                    
+                                                α_F[1,j], α_F[1,j]  # Assume ghost cell 0 has same opacity as cell i = 1
+                                               )
 
             # Compute interface D-values:
-            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_r( J_L, J_R,  Hr_L, Hr_R,  HZ_L, HZ_R )
+            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # Compute K = D × J at the interface:
             Krr_L = D_rr_L * J_L
@@ -383,9 +396,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at i = 1/2:
-            F_r[1,j], F_r_Hr[1,j], F_r_HZ[1,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
-                                                             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
+            F_r[1,j], F_r_Hr[1,j], F_r_HZ[1,j] = GetFluxGLF( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+                                                             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R,   
                                                              τ_L, τ_R, J_0, J[1,j] )
 
             # Add advection fluxes:
@@ -404,19 +416,21 @@ end
 
             # Reconstruct variables at interface r_{3/2} (i.e. r[2]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J[1,j],   J[2,j],   J[3,j],   J_0,
-                                             H_r[1,j], H_r[2,j], H_r[3,j], Hr_0,
-                                             H_Z[1,j], H_Z[2,j], H_Z[3,j], HZ_0,
-                                             rCoM[1],  rCoM[2],  rCoM[3],  rCoM_0, 
-                                             r[2],               # Interface r_{3/2}
-                                             α_F[1,j], α_F[2,j] )
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J[1,j],   J[2,j],   J[3,j],   J_0,
+                                               H_r[1,j], H_r[2,j], H_r[3,j], Hr_0,
+                                               H_Z[1,j], H_Z[2,j], H_Z[3,j], HZ_0,
+
+                                               Δr_L[1], Δr_R[1],
+                                               inv_dr_i_im1[1],
+                                               inv_dr_ip1_i[1],
+                                               inv_dr_ip2_ip1[1],
+
+                                               α_F[1,j], α_F[2,j] )
 
             # Compute interface D-values:
-            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_r( J_L, J_R,  Hr_L, Hr_R,  HZ_L, HZ_R )
+            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # Compute K = D × J at the interface:
             Krr_L = D_rr_L * J_L 
@@ -427,9 +441,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at i = 3/2:
-            F_r[2,j], F_r_Hr[2,j], F_r_HZ[2,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+            F_r[2,j], F_r_Hr[2,j], F_r_HZ[2,j] = GetFluxGLF( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
                                                              J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
                                                              τ_L, τ_R, J[1,j], J[2,j] )
 
             # Add advection fluxes:
@@ -455,21 +468,21 @@ end
 
                 # Reconstruct variables at interface r_{i+1/2} (i.e. r[i+1]):
                 J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                τ_L, τ_R = ReconstructInterface( J[i,j],   J[ip1,j],   J[ip2,j],   J[im1,j],
-                                                 H_r[i,j], H_r[ip1,j], H_r[ip2,j], H_r[im1,j],
-                                                 H_Z[i,j], H_Z[ip1,j], H_Z[ip2,j], H_Z[im1,j],
-                                                 rCoM[i],  rCoM[ip1],  rCoM[ip2],  rCoM[im1], 
-                                                 r[ip1], # Interface r_{i+1/2}
-                                                 α_F[i,j], α_F[ip1,j]   )
+                τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+                nZ_L, nZ_R = ReconstructInterface( J[i,j],   J[ip1,j],   J[ip2,j],   J[im1,j],
+                                                   H_r[i,j], H_r[ip1,j], H_r[ip2,j], H_r[im1,j],
+                                                   H_Z[i,j], H_Z[ip1,j], H_Z[ip2,j], H_Z[im1,j],
+
+                                                   Δr_L[i], Δr_R[i],
+                                                   inv_dr_i_im1[i],
+                                                   inv_dr_ip1_i[i],
+                                                   inv_dr_ip2_ip1[i],
+
+                                                   α_F[i,j], α_F[ip1,j]  )
 
                 # Compute interface D-values:
-                D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-                D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-                # Get eigenvalues for wave speeds:
-                λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_r( J_L,   J_R,
-                                                         Hr_L,  Hr_R,
-                                                         HZ_L,  HZ_R )
+                D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+                D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
                 # Compute K = D × J at the interface:
                 Krr_L = D_rr_L * J_L 
@@ -480,9 +493,8 @@ end
                 KrZ_R = D_rZ_R * J_R
 
                 # Radial flux of J, H_r, and H_Z:
-                F_r[i+1,j], F_r_Hr[i+1,j], F_r_HZ[i+1,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+                F_r[i+1,j], F_r_Hr[i+1,j], F_r_HZ[i+1,j] = GetFluxGLF( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
                                                                        J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                                       λ1_L, λ1_R, λ3_L, λ3_R,   
                                                                        τ_L, τ_R, J[i,j], J[ip1,j] )
 
                 # Add advection fluxes:
@@ -528,19 +540,21 @@ end
 
             # Reconstruct variables at interface r_{N_r-1/2} (i.e. r[N_r]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J[N_r-1,j],   J[N_r,j],   J_Np1,    J[N_r-2,j],
-                                             H_r[N_r-1,j], H_r[N_r,j], Hr_Np1,   H_r[N_r-2,j],
-                                             H_Z[N_r-1,j], H_Z[N_r,j], HZ_Np1,   H_Z[N_r-2,j],
-                                             rCoM[N_r-1],  rCoM[N_r],  rCoM_Np1, rCoM[N_r-2], 
-                                             r[N_r],               # Interface r_{N_r-1/2}
-                                             α_F[N_r-1,j], α_F[N_r,j] )
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J[N_r-1,j],   J[N_r,j],   J_Np1,    J[N_r-2,j],
+                                               H_r[N_r-1,j], H_r[N_r,j], Hr_Np1,   H_r[N_r-2,j],
+                                               H_Z[N_r-1,j], H_Z[N_r,j], HZ_Np1,   H_Z[N_r-2,j],
+
+                                               Δr_L[N_r-1], Δr_R[N_r-1],
+                                               inv_dr_i_im1[N_r-1],
+                                               inv_dr_ip1_i[N_r-1],
+                                               inv_dr_ip2_ip1[N_r-1],
+
+                                               α_F[N_r-1,j], α_F[N_r,j] )
 
             # Compute interface D-values:
-            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_r( J_L, J_R,  Hr_L, Hr_R,  HZ_L, HZ_R )
+            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # K = D × J at the interface i = N_r - 1/2:
             Krr_L = D_rr_L * J_L
@@ -551,9 +565,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface i = N_r - 1/2:
-            F_r[N_r,j], F_r_Hr[N_r,j], F_r_HZ[N_r,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+            F_r[N_r,j], F_r_Hr[N_r,j], F_r_HZ[N_r,j] = GetFluxGLF( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
                                                                    J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                                   λ1_L, λ1_R, λ3_L, λ3_R,   
                                                                    τ_L, τ_R, J[N_r-1,j], J[N_r,j] )
 
             # Add advection fluxes:
@@ -575,20 +588,22 @@ end
 
             # Reconstruct variables at interface r_{N_r+1/2} (i.e. r[N_r+1]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J[N_r,j],   J_Np1,    J_Np2,    J[N_r-1,j],
-                                             H_r[N_r,j], Hr_Np1,   Hr_Np2,   H_r[N_r-1,j],
-                                             H_Z[N_r,j], HZ_Np1,   HZ_Np2,   H_Z[N_r-1,j],
-                                             rCoM[N_r],  rCoM_Np1, rCoM_Np2, rCoM[N_r-1], 
-                                             r[N_r+1],               # Interface r_{N_r+1/2}
-                                             α_F[N_r,j], α_F[N_r,j]  # Assume opacity in ghost cell N_r+1 is same as for cell N_r
-                                             )
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J[N_r,j],   J_Np1,    J_Np2,    J[N_r-1,j],
+                                               H_r[N_r,j], Hr_Np1,   Hr_Np2,   H_r[N_r-1,j],
+                                               H_Z[N_r,j], HZ_Np1,   HZ_Np2,   H_Z[N_r-1,j],
+
+                                               Δr_L_OuterBoundary, Δr_R_OuterBoundary,
+                                               inv_dr_i_im1_OuterBoundary,
+                                               inv_dr_ip1_i_OuterBoundary,
+                                               inv_dr_ip2_ip1_OuterBoundary,
+
+                                               α_F[N_r,j], α_F[N_r,j]  # Assume opacity in ghost cell N_r+1 is same as for cell N_r
+                                              )
 
             # Compute interface D-values:
-            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_r( J_L, J_R,  Hr_L, Hr_R,  HZ_L, HZ_R )
+            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # K = D × J at the interface i = N_r + 1/2:
             Krr_L = D_rr_L * J_L
@@ -599,9 +614,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface i = N_r + 1/2:
-            F_r[N_r+1,j], F_r_Hr[N_r+1,j], F_r_HZ[N_r+1,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+            F_r[N_r+1,j], F_r_Hr[N_r+1,j], F_r_HZ[N_r+1,j] = GetFluxGLF( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
                                                                          J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                                         λ1_L, λ1_R, λ3_L, λ3_R,   
                                                                          τ_L, τ_R, J[N_r,j], J_Np1 )
 
             # Add advection fluxes:
@@ -653,7 +667,7 @@ end
 
                 # Finally, also add the contribution from (1/c̃) ∂J/∂t = - 0.5 × (D:∇u/c) J, where again 
                 # the factor 0.5 is from the even split between r & Z directions. 
-                J[i,j] -= 0.5 * (D_colon_∇u * inv_c) * J_stored * c̃Δt
+                J[i,j] = max( J[i,j] - 0.5 * (D_colon_∇u * inv_c) * J_stored * c̃Δt,  Jeps ) 
             end
             
         end # End of inbounds     
@@ -664,7 +678,7 @@ end
 
 
 """ This function performs a forward Euler update of J and H in the r-direction,
-    over a time-step Δt. It will be used in the r-direction RK2 time-step update. """
+    over a time-step Δt. """
 @fastmath function ForwardEuler_r!( c̃Δt::Float64,
                                     α_F::AbstractArray{Float64,2},
                                       J::AbstractArray{Float64,2},
@@ -680,8 +694,6 @@ end
                                  F_r_HZ::AbstractArray{Float64,2},
                                  inv_ΔV::AbstractArray{Float64,2},
                                     A_r::AbstractArray{Float64,2},
-                                      r::AbstractVector{Float64},
-                                   rCoM::AbstractVector{Float64},
                              inv_r_cell::AbstractVector{Float64},
 
                               # Gas velocity field:
@@ -692,6 +704,23 @@ end
                                 ∂u_Z_∂Z::AbstractArray{Float64,2},
                              u_r_over_r::AbstractArray{Float64,2},
 
+                             # Needed intervals:
+                             Δr_L::AbstractVector{Float64}, Δr_R::AbstractVector{Float64},
+                             inv_dr_i_im1::AbstractVector{Float64},
+                             inv_dr_ip1_i::AbstractVector{Float64},
+                             inv_dr_ip2_ip1::AbstractVector{Float64},
+
+                             Δr_L_InnerBoundary::Float64, Δr_R_InnerBoundary::Float64,
+                             inv_dr_i_im1_InnerBoundary::Float64,
+                             inv_dr_ip1_i_InnerBoundary::Float64,
+                             inv_dr_ip2_ip1_InnerBoundary::Float64,
+
+                             Δr_L_OuterBoundary::Float64, Δr_R_OuterBoundary::Float64,
+                             inv_dr_i_im1_OuterBoundary::Float64,
+                             inv_dr_ip1_i_OuterBoundary::Float64,
+                             inv_dr_ip2_ip1_OuterBoundary::Float64,
+
+                             # Coordinate system, BCs:
                       CylindricalCoords::Bool,
                               BC_r_left::Symbol,
                              BC_r_right::Symbol,
@@ -705,17 +734,6 @@ end
 
     if DEBUG_M1Advection
         @assert size( u_r_star, 1 ) == N_r + 1 "Contact velocity in r-direction/X-direction must have size $(N_r+1)."
-    end
-
-    # Needed ghost cell CoM radii, obtained by mirroring:
-    @inbounds begin 
-        # Ghost CoM r-positions mirrored around r[1] = r_{1/2}:
-        rCoM_0   = r[1] - (rCoM[1] - r[1]) 
-        rCoM_m1  = r[1] - (rCoM[2] - r[1])
-
-        # Ghost CoM r-positions mirrored around r[N_r+1]:
-        rCoM_Np1 = r[N_r+1] + (r[N_r+1] - rCoM[N_r])
-        rCoM_Np2 = r[N_r+1] + (r[N_r+1] - rCoM[N_r-1])
     end
 
     # First update the Eddington factors:
@@ -750,21 +768,23 @@ end
 
             # Reconstruct variables at interface r_{1/2} (i.e. r[1]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J_0,     J[1,j],   J[2,j],   J_m1,
-                                             Hr_0,    H_r[1,j], H_r[2,j], Hr_m1,
-                                             HZ_0,    H_Z[1,j], H_Z[2,j], HZ_m1,
-                                             rCoM_0,  rCoM[1],  rCoM[2],  rCoM_m1, 
-                                             r[1],               # Interface r_{1/2}
-                                             α_F[1,j], α_F[1,j]  # Assume ghost cell 0 has same opacity as cell i = 1
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J_0,     J[1,j],   J[2,j],   J_m1,
+                                               Hr_0,    H_r[1,j], H_r[2,j], Hr_m1,
+                                               HZ_0,    H_Z[1,j], H_Z[2,j], HZ_m1,
+
+                                               Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+                                               inv_dr_i_im1_InnerBoundary,
+                                               inv_dr_ip1_i_InnerBoundary,
+                                               inv_dr_ip2_ip1_InnerBoundary,
+
+                                               α_F[1,j], α_F[1,j]  # Assume ghost cell 0 has same opacity as cell i = 1
                                              )
 
             # Compute interface D-values:
-            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
+            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_r( J_L, J_R,  Hr_L, Hr_R,  HZ_L, HZ_R )
 
             # Compute K = D × J at the interface:
             Krr_L = D_rr_L * J_L
@@ -775,9 +795,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at i = 1/2:
-            F_r[1,j], F_r_Hr[1,j], F_r_HZ[1,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+            F_r[1,j], F_r_Hr[1,j], F_r_HZ[1,j] = GetFluxGLF( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
                                                              J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
                                                              τ_L, τ_R, J_0, J[1,j] )
 
             # Add advection fluxes:
@@ -796,19 +815,21 @@ end
 
             # Reconstruct variables at interface r_{3/2} (i.e. r[2]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J[1,j],   J[2,j],   J[3,j],   J_0,
-                                             H_r[1,j], H_r[2,j], H_r[3,j], Hr_0,
-                                             H_Z[1,j], H_Z[2,j], H_Z[3,j], HZ_0,
-                                             rCoM[1],  rCoM[2],  rCoM[3],  rCoM_0, 
-                                             r[2],               # Interface r_{3/2}
-                                             α_F[1,j], α_F[2,j] )
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J[1,j],   J[2,j],   J[3,j],   J_0,
+                                               H_r[1,j], H_r[2,j], H_r[3,j], Hr_0,
+                                               H_Z[1,j], H_Z[2,j], H_Z[3,j], HZ_0,
+
+                                               Δr_L[1], Δr_R[1],
+                                               inv_dr_i_im1[1],
+                                               inv_dr_ip1_i[1],
+                                               inv_dr_ip2_ip1[1],
+
+                                               α_F[1,j], α_F[2,j] )
 
             # Compute interface D-values:
-            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_r( J_L, J_R,  Hr_L, Hr_R,  HZ_L, HZ_R )
+            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # Compute K = D × J at the interface:
             Krr_L = D_rr_L * J_L 
@@ -819,9 +840,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at i = 3/2:
-            F_r[2,j], F_r_Hr[2,j], F_r_HZ[2,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+            F_r[2,j], F_r_Hr[2,j], F_r_HZ[2,j] = GetFluxGLF( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
                                                              J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
                                                              τ_L, τ_R, J[1,j], J[2,j] )
 
             # Add advection fluxes:
@@ -847,21 +867,21 @@ end
 
                 # Reconstruct variables at interface r_{i+1/2} (i.e. r[i+1]):
                 J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                τ_L, τ_R = ReconstructInterface( J[i,j],   J[ip1,j],   J[ip2,j],   J[im1,j],
-                                                 H_r[i,j], H_r[ip1,j], H_r[ip2,j], H_r[im1,j],
-                                                 H_Z[i,j], H_Z[ip1,j], H_Z[ip2,j], H_Z[im1,j],
-                                                 rCoM[i],  rCoM[ip1],  rCoM[ip2],  rCoM[im1], 
-                                                 r[ip1], # Interface r_{i+1/2}
-                                                 α_F[i,j], α_F[ip1,j]   )
+                τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+                nZ_L, nZ_R = ReconstructInterface( J[i,j],   J[ip1,j],   J[ip2,j],   J[im1,j],
+                                                   H_r[i,j], H_r[ip1,j], H_r[ip2,j], H_r[im1,j],
+                                                   H_Z[i,j], H_Z[ip1,j], H_Z[ip2,j], H_Z[im1,j],
+
+                                                   Δr_L[i], Δr_R[i],
+                                                   inv_dr_i_im1[i],
+                                                   inv_dr_ip1_i[i],
+                                                   inv_dr_ip2_ip1[i],
+
+                                                   α_F[i,j], α_F[ip1,j]   )
 
                 # Compute interface D-values:
-                D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-                D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-                # Get eigenvalues for wave speeds:
-                λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_r( J_L,   J_R,
-                                                         Hr_L,  Hr_R,
-                                                         HZ_L,  HZ_R )
+                D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+                D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
                 # Compute K = D × J at the interface:
                 Krr_L = D_rr_L * J_L 
@@ -872,9 +892,8 @@ end
                 KrZ_R = D_rZ_R * J_R
 
                 # Radial flux of J, H_r, and H_Z:
-                F_r[i+1,j], F_r_Hr[i+1,j], F_r_HZ[i+1,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+                F_r[i+1,j], F_r_Hr[i+1,j], F_r_HZ[i+1,j] = GetFluxGLF( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
                                                                        J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                                       λ1_L, λ1_R, λ3_L, λ3_R,   
                                                                        τ_L, τ_R, J[i,j], J[ip1,j] )
 
                 # Add advection fluxes:
@@ -920,19 +939,21 @@ end
 
             # Reconstruct variables at interface r_{N_r-1/2} (i.e. r[N_r]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J[N_r-1,j],   J[N_r,j],   J_Np1,    J[N_r-2,j],
-                                             H_r[N_r-1,j], H_r[N_r,j], Hr_Np1,   H_r[N_r-2,j],
-                                             H_Z[N_r-1,j], H_Z[N_r,j], HZ_Np1,   H_Z[N_r-2,j],
-                                             rCoM[N_r-1],  rCoM[N_r],  rCoM_Np1, rCoM[N_r-2], 
-                                             r[N_r],               # Interface r_{N_r-1/2}
-                                             α_F[N_r-1,j], α_F[N_r,j] )
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J[N_r-1,j],   J[N_r,j],   J_Np1,    J[N_r-2,j],
+                                               H_r[N_r-1,j], H_r[N_r,j], Hr_Np1,   H_r[N_r-2,j],
+                                               H_Z[N_r-1,j], H_Z[N_r,j], HZ_Np1,   H_Z[N_r-2,j],
+
+                                               Δr_L[N_r-1], Δr_R[N_r-1],
+                                               inv_dr_i_im1[N_r-1],
+                                               inv_dr_ip1_i[N_r-1],
+                                               inv_dr_ip2_ip1[N_r-1],
+
+                                               α_F[N_r-1,j], α_F[N_r,j] )
 
             # Compute interface D-values:
-            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_r( J_L, J_R,  Hr_L, Hr_R,  HZ_L, HZ_R )
+            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # K = D × J at the interface i = N_r - 1/2:
             Krr_L = D_rr_L * J_L
@@ -943,9 +964,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface i = N_r - 1/2:
-            F_r[N_r,j], F_r_Hr[N_r,j], F_r_HZ[N_r,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+            F_r[N_r,j], F_r_Hr[N_r,j], F_r_HZ[N_r,j] = GetFluxGLF( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
                                                                    J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                                   λ1_L, λ1_R, λ3_L, λ3_R,   
                                                                    τ_L, τ_R, J[N_r-1,j], J[N_r,j] )
 
             # Add advection fluxes:
@@ -967,20 +987,22 @@ end
 
             # Reconstruct variables at interface r_{N_r+1/2} (i.e. r[N_r+1]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J[N_r,j],   J_Np1,    J_Np2,    J[N_r-1,j],
-                                             H_r[N_r,j], Hr_Np1,   Hr_Np2,   H_r[N_r-1,j],
-                                             H_Z[N_r,j], HZ_Np1,   HZ_Np2,   H_Z[N_r-1,j],
-                                             rCoM[N_r],  rCoM_Np1, rCoM_Np2, rCoM[N_r-1], 
-                                             r[N_r+1],               # Interface r_{N_r+1/2}
-                                             α_F[N_r,j], α_F[N_r,j]  # Assume opacity in ghost cell N_r+1 is same as for cell N_r
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J[N_r,j],   J_Np1,    J_Np2,    J[N_r-1,j],
+                                               H_r[N_r,j], Hr_Np1,   Hr_Np2,   H_r[N_r-1,j],
+                                               H_Z[N_r,j], HZ_Np1,   HZ_Np2,   H_Z[N_r-1,j],
+
+                                               Δr_L_OuterBoundary, Δr_R_OuterBoundary,
+                                               inv_dr_i_im1_OuterBoundary,
+                                               inv_dr_ip1_i_OuterBoundary,
+                                               inv_dr_ip2_ip1_OuterBoundary,
+
+                                               α_F[N_r,j], α_F[N_r,j]  # Assume opacity in ghost cell N_r+1 is same as for cell N_r
                                              )
 
             # Compute interface D-values:
-            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_r( J_L, J_R,  Hr_L, Hr_R,  HZ_L, HZ_R )
+            D_rr_L, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            D_rr_R, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # K = D × J at the interface i = N_r + 1/2:
             Krr_L = D_rr_L * J_L
@@ -991,9 +1013,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface i = N_r + 1/2:
-            F_r[N_r+1,j], F_r_Hr[N_r+1,j], F_r_HZ[N_r+1,j] = GetFluxHLL( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
+            F_r[N_r+1,j], F_r_Hr[N_r+1,j], F_r_HZ[N_r+1,j] = GetFluxGLF( Hr_L, Hr_R,  Krr_L, Krr_R,  KrZ_L, KrZ_R,
                                                                          J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                                         λ1_L, λ1_R, λ3_L, λ3_R,   
                                                                          τ_L, τ_R, J[N_r,j], J_Np1 )
 
             # Add advection fluxes:
@@ -1047,14 +1068,6 @@ end
                 # the factor 0.5 is from the even split between r & Z directions. 
                 J[i,j] = max( J[i,j] - 0.5 * (D_colon_∇u * inv_c) * J_stored * c̃Δt,  Jeps ) 
 
-                # Enforce causality:
-                #f_sq = H_r[i,j] * H_r[i,j]  +  H_Z[i,j] * H_Z[i,j]
-                #if f_sq > J[i,j] * J[i,j]
-                #    inv_f    = 1 / sqrt(f_sq)
-                #    H_r[i,j] = H_r[i,j] * inv_f
-                #    H_Z[i,j] = H_Z[i,j] * inv_f
-                #end
-
             end
             
         end # End of inbounds     
@@ -1064,10 +1077,9 @@ end
 end
 
 
-
 """ This function performs a forward Euler update of J and H in the Z-direction,
-    over a time-step Δt. It will be used in the Z-direction RK2 time-step update. """
- function ForwardEuler_Z!( c̃Δt::Float64,
+    over a time-step Δt. """
+@fastmath function ForwardEuler_Z!( c̃Δt::Float64,
                                     α_F::AbstractArray{Float64,2},
                                       J::AbstractArray{Float64,2},
                                     H_r::AbstractArray{Float64,2},
@@ -1080,8 +1092,6 @@ end
                                  F_Z_HZ::AbstractArray{Float64,2},
                                  inv_ΔV::AbstractArray{Float64,2},
                                     A_Z::AbstractArray{Float64,2},
-                                      Z::AbstractVector{Float64},
-                                   ZCoM::AbstractVector{Float64},
 
                                 # Gas velocity field:
                                u_Z_star::AbstractArray{Float64,2},
@@ -1091,6 +1101,23 @@ end
                                 ∂u_Z_∂Z::AbstractArray{Float64,2},
                              u_r_over_r::AbstractArray{Float64,2},
 
+                             # Needed intervals:
+                             ΔZ_L::AbstractVector{Float64}, ΔZ_R::AbstractVector{Float64},
+                             inv_dZ_j_jm1::AbstractVector{Float64},
+                             inv_dZ_jp1_j::AbstractVector{Float64},
+                             inv_dZ_jp2_jp1::AbstractVector{Float64},
+
+                             ΔZ_L_InnerBoundary::Float64, ΔZ_R_InnerBoundary::Float64,
+                             inv_dZ_j_jm1_InnerBoundary::Float64,
+                             inv_dZ_jp1_j_InnerBoundary::Float64,
+                             inv_dZ_jp2_jp1_InnerBoundary::Float64,
+
+                             ΔZ_L_OuterBoundary::Float64, ΔZ_R_OuterBoundary::Float64,
+                             inv_dZ_j_jm1_OuterBoundary::Float64,
+                             inv_dZ_jp1_j_OuterBoundary::Float64,
+                             inv_dZ_jp2_jp1_OuterBoundary::Float64,
+
+                             # Coordinate system, BCs:
                       CylindricalCoords::Bool,
                                BC_Z_bot::Symbol,
                                BC_Z_top::Symbol,
@@ -1104,17 +1131,6 @@ end
 
     if DEBUG_M1Advection
         @assert size( u_Z_star, 2 ) == N_Z + 1 "Contact velocity in Z-direction/Y-direction must have size $(N_Z+1)."
-    end
-
-    # Needed ghost cell CoM radii, obtained by mirroring:
-    @inbounds begin 
-        # Ghost CoM Z-positions mirrored around Z[1] = Z_{1/2}:
-        ZCoM_0   = Z[1] - (ZCoM[1] - Z[1])
-        ZCoM_m1  = Z[1] - (ZCoM[2] - Z[1])
-
-        # Ghost CoM Z-positions mirrored around Z[N_Z+1] = Z_{N_Z+1/2}:
-        ZCoM_Np1  = Z[N_Z+1] - (ZCoM[N_Z] - Z[N_Z+1])
-        ZCoM_Np2  = Z[N_Z+1] - (ZCoM[N_Z-1] - Z[N_Z+1])
     end
 
     # First update the Eddington factors:
@@ -1149,22 +1165,22 @@ end
 
             # Reconstruct variables at interface Z_{1/2} (i.e. Z[1]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J_0,    J[i,1],   J[i,2],   J_m1,
-                                             Hr_0,   H_r[i,1], H_r[i,2], Hr_m1,
-                                             HZ_0,   H_Z[i,1], H_Z[i,2], HZ_m1,
-                                             ZCoM_0, ZCoM[1],  ZCoM[2],  ZCoM_m1, 
-                                             Z[1],              # Interface Z_{1/2}
-                                             α_F[i,1], α_F[i,1] # Assume same opacity in ghost cell j = 0 as in j = 1
-                                            )
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J_0,    J[i,1],   J[i,2],   J_m1,
+                                               Hr_0,   H_r[i,1], H_r[i,2], Hr_m1,
+                                               HZ_0,   H_Z[i,1], H_Z[i,2], HZ_m1,
+
+                                               ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+                                               inv_dZ_j_jm1_InnerBoundary,
+                                               inv_dZ_jp1_j_InnerBoundary,
+                                               inv_dZ_jp2_jp1_InnerBoundary,
+
+                                               α_F[i,1], α_F[i,1] # Assume same opacity in ghost cell j = 0 as in j = 1
+                                             )
 
             # Compute interface D-values:
-            _, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            _, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_Z( J_L,   J_R,
-                                                     Hr_L,  Hr_R,
-                                                     HZ_L,  HZ_R )
+            _, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            _, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # Compute K = D × J at the interface, with the right BC for KrZ_L:
             KZZ_L = D_ZZ_L * J_L
@@ -1173,9 +1189,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = 1/2:
-            F_Z[i,1], F_Z_Hr[i,1], F_Z_HZ[i,1] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+            F_Z[i,1], F_Z_Hr[i,1], F_Z_HZ[i,1] = GetFluxGLF( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
                                                              J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
                                                              τ_L, τ_R, J_0, J[i,1] )
 
             # Add advection fluxes:
@@ -1190,21 +1205,21 @@ end
 
             # Reconstruct variables at interface Z_{3/2} (i.e. Z[2]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J[i,1],   J[i,2],   J[i,3],   J_0,
-                                             H_r[i,1], H_r[i,2], H_r[i,3], Hr_0,
-                                             H_Z[i,1], H_Z[i,2], H_Z[i,3], HZ_0,
-                                             ZCoM[1],  ZCoM[2],  ZCoM[3],  ZCoM_0, 
-                                             Z[2],              # Interface Z_{3/2}
-                                             α_F[i,1], α_F[i,2] )
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J[i,1],   J[i,2],   J[i,3],   J_0,
+                                               H_r[i,1], H_r[i,2], H_r[i,3], Hr_0,
+                                               H_Z[i,1], H_Z[i,2], H_Z[i,3], HZ_0,
+
+                                               ΔZ_L[1], ΔZ_R[1],
+                                               inv_dZ_j_jm1[1],
+                                               inv_dZ_jp1_j[1],
+                                               inv_dZ_jp2_jp1[1],
+
+                                               α_F[i,1], α_F[i,2] )
 
             # Compute interface D-values:
-            _, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            _, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_Z( J_L,   J_R,
-                                                     Hr_L,  Hr_R,
-                                                     HZ_L,  HZ_R )
+            _, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            _, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # Compute K = D × J at the interface j = 3/2:
             KZZ_L = D_ZZ_L * J_L
@@ -1213,9 +1228,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = 3/2:
-            F_Z[i,2], F_Z_Hr[i,2], F_Z_HZ[i,2] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+            F_Z[i,2], F_Z_Hr[i,2], F_Z_HZ[i,2] = GetFluxGLF( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
                                                              J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
                                                              τ_L, τ_R, J[i,1], J[i,2] )
             
             # Add advection fluxes:
@@ -1235,25 +1249,29 @@ end
             jm1 = j - 1
 
             # Reconstruct at Z_{j+1/2}
-            J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, τ_L, τ_R =
+            J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R =
             ReconstructInterface( J[i,j],   J[i,jp1],   J[i,jp2],   J[i,jm1],
                                   H_r[i,j], H_r[i,jp1], H_r[i,jp2], H_r[i,jm1],
                                   H_Z[i,j], H_Z[i,jp1], H_Z[i,jp2], H_Z[i,jm1],
-                                  ZCoM[j],  ZCoM[jp1],  ZCoM[jp2],  ZCoM[jm1],
-                                  Z[jp1], α_F[i,j], α_F[i,jp1] )
+
+                                  ΔZ_L[j], ΔZ_R[j],
+                                  inv_dZ_j_jm1[j],
+                                  inv_dZ_jp1_j[j],
+                                  inv_dZ_jp2_jp1[j],
+
+                                  α_F[i,j], α_F[i,jp1] )
 
             # Interface D and K
-            _, D_ZZ_L, D_rZ_L = Compute_D_Edd(Hr_L, HZ_L, J_L)
-            _, D_ZZ_R, D_rZ_R = Compute_D_Edd(Hr_R, HZ_R, J_R)
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_Z(J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R)
+            _, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            _, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             KZZ_L = D_ZZ_L * J_L;   KZZ_R = D_ZZ_R * J_R
             KrZ_L = D_rZ_L * J_L;   KrZ_R = D_rZ_R * J_R
 
             # Write interior Z-fluxes:
-            F_Z[i,jp1], F_Z_Hr[i,jp1], F_Z_HZ[i,jp1] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+            F_Z[i,jp1], F_Z_Hr[i,jp1], F_Z_HZ[i,jp1] = GetFluxGLF( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
                                                                    J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                                   λ1_L, λ1_R, λ3_L, λ3_R,   
                                                                    τ_L, τ_R, J[i,j], J[i,jp1] )
 
             # Add advection fluxes:
@@ -1294,21 +1312,21 @@ end
 
             # Reconstruct variables at interface Z_{N_Z-1/2} (i.e. Z[N_Z]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J[i,N_Z-1],   J[i,N_Z],   J_Np1,     J[i,N_Z-2],
-                                             H_r[i,N_Z-1], H_r[i,N_Z], Hr_Np1,    H_r[i,N_Z-2],
-                                             H_Z[i,N_Z-1], H_Z[i,N_Z], HZ_Np1,    H_Z[i,N_Z-2],
-                                             ZCoM[N_Z-1],  ZCoM[N_Z],  ZCoM_Np1,  ZCoM[N_Z-2], 
-                                             Z[N_Z],            # Interface Z_{N_Z-1/2}
-                                             α_F[i,N_Z-1], α_F[i,N_Z] )
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J[i,N_Z-1],   J[i,N_Z],   J_Np1,     J[i,N_Z-2],
+                                               H_r[i,N_Z-1], H_r[i,N_Z], Hr_Np1,    H_r[i,N_Z-2],
+                                               H_Z[i,N_Z-1], H_Z[i,N_Z], HZ_Np1,    H_Z[i,N_Z-2],
+
+                                               ΔZ_L[N_Z-1], ΔZ_R[N_Z-1],
+                                               inv_dZ_j_jm1[N_Z-1],
+                                               inv_dZ_jp1_j[N_Z-1],
+                                               inv_dZ_jp2_jp1[N_Z-1],
+
+                                               α_F[i,N_Z-1], α_F[i,N_Z] )
 
             # Compute interface D-values:
-            _, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            _, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_Z( J_L,   J_R,
-                                                     Hr_L,  Hr_R,
-                                                     HZ_L,  HZ_R )
+            _, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            _, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # Compute K = D × J at the interface j = N_Z - 1/2:
             KZZ_L = D_ZZ_L * J_L
@@ -1317,9 +1335,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = N_Z - 1/2:
-            F_Z[i,N_Z], F_Z_Hr[i,N_Z], F_Z_HZ[i,N_Z] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+            F_Z[i,N_Z], F_Z_Hr[i,N_Z], F_Z_HZ[i,N_Z] = GetFluxGLF( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
                                                                    J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                                   λ1_L, λ1_R, λ3_L, λ3_R,   
                                                                    τ_L, τ_R, J[i,N_Z-1], J[i,N_Z] )
 
             # Add advection fluxes:
@@ -1334,22 +1351,22 @@ end
 
             # Reconstruct variables at interface Z_{N_Z+1/2} (i.e. Z[N_Z+1]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J[i,N_Z],   J_Np1,     J_Np2,     J[i,N_Z-1],
-                                             H_r[i,N_Z], Hr_Np1,    Hr_Np2,    H_r[i,N_Z-1],
-                                             H_Z[i,N_Z], HZ_Np1,    HZ_Np2,    H_Z[i,N_Z-1],
-                                             ZCoM[N_Z],  ZCoM_Np1,  ZCoM_Np2,  ZCoM[N_Z-1], 
-                                             Z[N_Z+1],               # Interface Z_{N_Z+1/2}
-                                             α_F[i,N_Z], α_F[i,N_Z]  # Assume opacity in ghost cell j = N_Z+1 is same as in j = N_Z
-                                             )
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J[i,N_Z],   J_Np1,     J_Np2,     J[i,N_Z-1],
+                                               H_r[i,N_Z], Hr_Np1,    Hr_Np2,    H_r[i,N_Z-1],
+                                               H_Z[i,N_Z], HZ_Np1,    HZ_Np2,    H_Z[i,N_Z-1],
+
+                                               ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary,
+                                               inv_dZ_j_jm1_OuterBoundary,
+                                               inv_dZ_jp1_j_OuterBoundary,
+                                               inv_dZ_jp2_jp1_OuterBoundary,
+
+                                               α_F[i,N_Z], α_F[i,N_Z]  # Assume opacity in ghost cell j = N_Z+1 is same as in j = N_Z
+                                              )
 
             # Compute interface D-values:
-            _, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            _, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_Z( J_L,   J_R,
-                                                     Hr_L,  Hr_R,
-                                                     HZ_L,  HZ_R )
+            _, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            _, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # Compute K = D × J at the interface j = N_Z + 1/2:
             KZZ_L = D_ZZ_L * J_L
@@ -1358,9 +1375,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = N_Z + 1/2:
-            F_Z[i,N_Z+1], F_Z_Hr[i,N_Z+1], F_Z_HZ[i,N_Z+1] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+            F_Z[i,N_Z+1], F_Z_Hr[i,N_Z+1], F_Z_HZ[i,N_Z+1] = GetFluxGLF( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
                                                                          J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                                         λ1_L, λ1_R, λ3_L, λ3_R,   
                                                                          τ_L, τ_R, J[i,N_Z], J_Np1 )
             
             # Add advection fluxes:
@@ -1417,7 +1433,7 @@ end
 
 
 """ This function performs a forward Euler update of J and H in the Z-direction,
-    over a time-step Δt. It will be used in the Z-direction RK2 time-step update. """
+    over a time-step Δt. """
 @fastmath function ForwardEuler_Z!( c̃Δt::Float64, 
                                     α_F::AbstractArray{Float64,2},
                                       J::AbstractArray{Float64,2},
@@ -1431,8 +1447,6 @@ end
                                  F_Z_HZ::AbstractArray{Float64,2},
                                  inv_ΔV::AbstractArray{Float64,2},
                                     A_Z::AbstractArray{Float64,2},
-                                      Z::AbstractVector{Float64},
-                                   ZCoM::AbstractVector{Float64},
 
                                 # Gas velocity field:
                                u_Z_star::AbstractArray{Float64,2},
@@ -1442,6 +1456,23 @@ end
                                 ∂u_Z_∂Z::AbstractArray{Float64,2},
                              u_r_over_r::AbstractArray{Float64,2},
 
+                             # Needed intervals:
+                             ΔZ_L::AbstractVector{Float64}, ΔZ_R::AbstractVector{Float64},
+                             inv_dZ_j_jm1::AbstractVector{Float64},
+                             inv_dZ_jp1_j::AbstractVector{Float64},
+                             inv_dZ_jp2_jp1::AbstractVector{Float64},
+
+                             ΔZ_L_InnerBoundary::Float64, ΔZ_R_InnerBoundary::Float64,
+                             inv_dZ_j_jm1_InnerBoundary::Float64,
+                             inv_dZ_jp1_j_InnerBoundary::Float64,
+                             inv_dZ_jp2_jp1_InnerBoundary::Float64,
+
+                             ΔZ_L_OuterBoundary::Float64, ΔZ_R_OuterBoundary::Float64,
+                             inv_dZ_j_jm1_OuterBoundary::Float64,
+                             inv_dZ_jp1_j_OuterBoundary::Float64,
+                             inv_dZ_jp2_jp1_OuterBoundary::Float64,
+
+                             # Coordinate system, BCs:
                       CylindricalCoords::Bool,
                                BC_Z_bot::Symbol,
                                BC_Z_top::Symbol,
@@ -1455,17 +1486,6 @@ end
 
     if DEBUG_M1Advection
         @assert size( u_Z_star, 2 ) == N_Z + 1 "Contact velocity in Z-direction/Y-direction must have size $(N_Z+1)."
-    end
-
-    # Needed ghost cell CoM radii, obtained by mirroring:
-    @inbounds begin 
-        # Ghost CoM Z-positions mirrored around Z[1] = Z_{1/2}:
-        ZCoM_0   = Z[1] - (ZCoM[1] - Z[1])
-        ZCoM_m1  = Z[1] - (ZCoM[2] - Z[1])
-
-        # Ghost CoM Z-positions mirrored around Z[N_Z+1] = Z_{N_Z+1/2}:
-        ZCoM_Np1  = Z[N_Z+1] - (ZCoM[N_Z] - Z[N_Z+1])
-        ZCoM_Np2  = Z[N_Z+1] - (ZCoM[N_Z-1] - Z[N_Z+1])
     end
 
     # First update the Eddington factors:
@@ -1500,22 +1520,22 @@ end
 
             # Reconstruct variables at interface Z_{1/2} (i.e. Z[1]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J_0,    J[i,1],   J[i,2],   J_m1,
-                                             Hr_0,   H_r[i,1], H_r[i,2], Hr_m1,
-                                             HZ_0,   H_Z[i,1], H_Z[i,2], HZ_m1,
-                                             ZCoM_0, ZCoM[1],  ZCoM[2],  ZCoM_m1, 
-                                             Z[1],              # Interface Z_{1/2}
-                                             α_F[i,1], α_F[i,1] # Assume same opacity in ghost cell j = 0 as in j = 1
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J_0,    J[i,1],   J[i,2],   J_m1,
+                                               Hr_0,   H_r[i,1], H_r[i,2], Hr_m1,
+                                               HZ_0,   H_Z[i,1], H_Z[i,2], HZ_m1,
+
+                                               ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+                                               inv_dZ_j_jm1_InnerBoundary,
+                                               inv_dZ_jp1_j_InnerBoundary,
+                                               inv_dZ_jp2_jp1_InnerBoundary,
+                                               
+                                               α_F[i,1], α_F[i,1] # Assume same opacity in ghost cell j = 0 as in j = 1
                                             )
 
             # Compute interface D-values:
-            _, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            _, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_Z( J_L,   J_R,
-                                                     Hr_L,  Hr_R,
-                                                     HZ_L,  HZ_R )
+            _, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            _, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # Compute K = D × J at the interface, with the right BC for KrZ_L:
             KZZ_L = D_ZZ_L * J_L
@@ -1524,9 +1544,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = 1/2:
-            F_Z[i,1], F_Z_Hr[i,1], F_Z_HZ[i,1] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
-                                                             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
+            F_Z[i,1], F_Z_Hr[i,1], F_Z_HZ[i,1] = GetFluxGLF( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+                                                             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R,
                                                              τ_L, τ_R, J_0, J[i,1] )
 
             # Add advection fluxes:
@@ -1541,21 +1560,21 @@ end
 
             # Reconstruct variables at interface Z_{3/2} (i.e. Z[2]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J[i,1],   J[i,2],   J[i,3],   J_0,
-                                             H_r[i,1], H_r[i,2], H_r[i,3], Hr_0,
-                                             H_Z[i,1], H_Z[i,2], H_Z[i,3], HZ_0,
-                                             ZCoM[1],  ZCoM[2],  ZCoM[3],  ZCoM_0, 
-                                             Z[2],              # Interface Z_{3/2}
-                                             α_F[i,1], α_F[i,2] )
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J[i,1],   J[i,2],   J[i,3],   J_0,
+                                               H_r[i,1], H_r[i,2], H_r[i,3], Hr_0,
+                                               H_Z[i,1], H_Z[i,2], H_Z[i,3], HZ_0,
+
+                                               ΔZ_L[1], ΔZ_R[1],
+                                               inv_dZ_j_jm1[1],
+                                               inv_dZ_jp1_j[1],
+                                               inv_dZ_jp2_jp1[1],
+
+                                               α_F[i,1], α_F[i,2] )
 
             # Compute interface D-values:
-            _, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            _, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_Z( J_L,   J_R,
-                                                     Hr_L,  Hr_R,
-                                                     HZ_L,  HZ_R )
+            _, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            _, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # Compute K = D × J at the interface j = 3/2:
             KZZ_L = D_ZZ_L * J_L
@@ -1564,9 +1583,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = 3/2:
-            F_Z[i,2], F_Z_Hr[i,2], F_Z_HZ[i,2] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+            F_Z[i,2], F_Z_Hr[i,2], F_Z_HZ[i,2] = GetFluxGLF( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
                                                              J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                             λ1_L, λ1_R, λ3_L, λ3_R,   
                                                              τ_L, τ_R, J[i,1], J[i,2] ) 
 
             # Add advection fluxes:
@@ -1586,25 +1604,29 @@ end
             jm1 = j - 1
 
             # Reconstruct at Z_{j+1/2}
-            J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, τ_L, τ_R =
+            J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R =
             ReconstructInterface( J[i,j],   J[i,jp1],   J[i,jp2],   J[i,jm1],
                                   H_r[i,j], H_r[i,jp1], H_r[i,jp2], H_r[i,jm1],
                                   H_Z[i,j], H_Z[i,jp1], H_Z[i,jp2], H_Z[i,jm1],
-                                  ZCoM[j],  ZCoM[jp1],  ZCoM[jp2],  ZCoM[jm1],
-                                  Z[jp1], α_F[i,j], α_F[i,jp1] )
+
+                                  ΔZ_L[j], ΔZ_R[j],
+                                  inv_dZ_j_jm1[j],
+                                  inv_dZ_jp1_j[j],
+                                  inv_dZ_jp2_jp1[j],
+
+                                  α_F[i,j], α_F[i,jp1] )
 
             # Interface D and K
-            _, D_ZZ_L, D_rZ_L = Compute_D_Edd(Hr_L, HZ_L, J_L)
-            _, D_ZZ_R, D_rZ_R = Compute_D_Edd(Hr_R, HZ_R, J_R)
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_Z(J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R)
+            _, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            _, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             KZZ_L = D_ZZ_L * J_L;   KZZ_R = D_ZZ_R * J_R
             KrZ_L = D_rZ_L * J_L;   KrZ_R = D_rZ_R * J_R
 
             # Write interior Z-fluxes:
-            F_Z[i,jp1], F_Z_Hr[i,jp1], F_Z_HZ[i,jp1] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+            F_Z[i,jp1], F_Z_Hr[i,jp1], F_Z_HZ[i,jp1] = GetFluxGLF( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
                                                                    J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                                   λ1_L, λ1_R, λ3_L, λ3_R,   
                                                                    τ_L, τ_R, J[i,j], J[i,jp1] )
 
             # Add advection fluxes:
@@ -1645,21 +1667,21 @@ end
 
             # Reconstruct variables at interface Z_{N_Z-1/2} (i.e. Z[N_Z]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J[i,N_Z-1],   J[i,N_Z],   J_Np1,     J[i,N_Z-2],
-                                             H_r[i,N_Z-1], H_r[i,N_Z], Hr_Np1,    H_r[i,N_Z-2],
-                                             H_Z[i,N_Z-1], H_Z[i,N_Z], HZ_Np1,    H_Z[i,N_Z-2],
-                                             ZCoM[N_Z-1],  ZCoM[N_Z],  ZCoM_Np1,  ZCoM[N_Z-2], 
-                                             Z[N_Z],            # Interface Z_{N_Z-1/2}
-                                             α_F[i,N_Z-1], α_F[i,N_Z] )
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J[i,N_Z-1],   J[i,N_Z],   J_Np1,     J[i,N_Z-2],
+                                               H_r[i,N_Z-1], H_r[i,N_Z], Hr_Np1,    H_r[i,N_Z-2],
+                                               H_Z[i,N_Z-1], H_Z[i,N_Z], HZ_Np1,    H_Z[i,N_Z-2],
+
+                                               ΔZ_L[N_Z-1], ΔZ_R[N_Z-1],
+                                               inv_dZ_j_jm1[N_Z-1],
+                                               inv_dZ_jp1_j[N_Z-1],
+                                               inv_dZ_jp2_jp1[N_Z-1],
+
+                                               α_F[i,N_Z-1], α_F[i,N_Z] )
 
             # Compute interface D-values:
-            _, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            _, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_Z( J_L,   J_R,
-                                                     Hr_L,  Hr_R,
-                                                     HZ_L,  HZ_R )
+            _, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            _, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # Compute K = D × J at the interface j = N_Z - 1/2:
             KZZ_L = D_ZZ_L * J_L
@@ -1668,9 +1690,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = N_Z - 1/2:
-            F_Z[i,N_Z], F_Z_Hr[i,N_Z], F_Z_HZ[i,N_Z] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+            F_Z[i,N_Z], F_Z_Hr[i,N_Z], F_Z_HZ[i,N_Z] = GetFluxGLF( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
                                                                    J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                                   λ1_L, λ1_R, λ3_L, λ3_R,   
                                                                    τ_L, τ_R, J[i,N_Z-1], J[i,N_Z] )
 
             # Add advection fluxes:
@@ -1685,22 +1706,22 @@ end
 
             # Reconstruct variables at interface Z_{N_Z+1/2} (i.e. Z[N_Z+1]):
             J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-            τ_L, τ_R = ReconstructInterface( J[i,N_Z],   J_Np1,     J_Np2,     J[i,N_Z-1],
-                                             H_r[i,N_Z], Hr_Np1,    Hr_Np2,    H_r[i,N_Z-1],
-                                             H_Z[i,N_Z], HZ_Np1,    HZ_Np2,    H_Z[i,N_Z-1],
-                                             ZCoM[N_Z],  ZCoM_Np1,  ZCoM_Np2,  ZCoM[N_Z-1], 
-                                             Z[N_Z+1],               # Interface Z_{N_Z+1/2}
-                                             α_F[i,N_Z], α_F[i,N_Z]  # Assume opacity in ghost cell j = N_Z+1 is same as in j = N_Z
+            τ_L, τ_R, f_L, f_R, nr_L, nr_R,
+            nZ_L, nZ_R = ReconstructInterface( J[i,N_Z],   J_Np1,     J_Np2,     J[i,N_Z-1],
+                                               H_r[i,N_Z], Hr_Np1,    Hr_Np2,    H_r[i,N_Z-1],
+                                               H_Z[i,N_Z], HZ_Np1,    HZ_Np2,    H_Z[i,N_Z-1],
+
+                                               ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary,
+                                               inv_dZ_j_jm1_OuterBoundary,
+                                               inv_dZ_jp1_j_OuterBoundary,
+                                               inv_dZ_jp2_jp1_OuterBoundary,
+
+                                               α_F[i,N_Z], α_F[i,N_Z]  # Assume opacity in ghost cell j = N_Z+1 is same as in j = N_Z
                                              )
 
             # Compute interface D-values:
-            _, D_ZZ_L, D_rZ_L = Compute_D_Edd( Hr_L, HZ_L, J_L )
-            _, D_ZZ_R, D_rZ_R = Compute_D_Edd( Hr_R, HZ_R, J_R )
-
-            # Get eigenvalues for wave speeds:
-            λ1_L, λ1_R, λ3_L, λ3_R = M1WaveSpeeds_Z( J_L,   J_R,
-                                                     Hr_L,  Hr_R,
-                                                     HZ_L,  HZ_R )
+            _, D_ZZ_L, D_rZ_L = Compute_D_Edd_from_f_n( f_L, nr_L, nZ_L )
+            _, D_ZZ_R, D_rZ_R = Compute_D_Edd_from_f_n( f_R, nr_R, nZ_R )
 
             # Compute K = D × J at the interface j = N_Z + 1/2:
             KZZ_L = D_ZZ_L * J_L
@@ -1709,9 +1730,8 @@ end
             KrZ_R = D_rZ_R * J_R
 
             # Fluxes at interface j = N_Z + 1/2:
-            F_Z[i,N_Z+1], F_Z_Hr[i,N_Z+1], F_Z_HZ[i,N_Z+1] = GetFluxHLL( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
-                                                                         J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R, 
-                                                                         λ1_L, λ1_R, λ3_L, λ3_R,   
+            F_Z[i,N_Z+1], F_Z_Hr[i,N_Z+1], F_Z_HZ[i,N_Z+1] = GetFluxGLF( HZ_L, HZ_R,  KrZ_L, KrZ_R,  KZZ_L, KZZ_R,
+                                                                         J_L, J_R, Hr_L, Hr_R, HZ_L, HZ_R,
                                                                          τ_L, τ_R, J[i,N_Z], J_Np1 )
             
             # Add advection fluxes:
@@ -1759,13 +1779,6 @@ end
             # the factor 0.5 is from the even split between r & Z directions. 
             J[i,j] = max( J[i,j] - 0.5 * (D_colon_∇u * inv_c) * J_stored * c̃Δt,  Jeps ) 
 
-            # Enforce causality:
-            #f_sq = H_r[i,j] * H_r[i,j]  +  H_Z[i,j] * H_Z[i,j]
-            #if f_sq > J[i,j] * J[i,j]
-            #    inv_f    = 1 / sqrt(f_sq)
-            #    H_r[i,j] = H_r[i,j] * inv_f
-            #    H_Z[i,j] = H_Z[i,j] * inv_f
-            #end
         end # End of i-loop 
     end # End of j-loop 
 
@@ -1773,7 +1786,7 @@ end
 end
 
 
-""" This function performs an RK2 step of J and H in the 
+""" This function performs a forward Euler step of J and H in the 
     r-direction, over a time-step Δt. """
  function ForwardEuler_r_ThreadingOrNot!( c̃Δt::Float64,
                            α_F::AbstractArray{Float64,2},
@@ -1790,8 +1803,6 @@ end
                         F_r_HZ::AbstractArray{Float64,2},
                         inv_ΔV::AbstractArray{Float64,2},
                            A_r::AbstractArray{Float64,2},
-                             r::AbstractVector{Float64},
-                          rCoM::AbstractVector{Float64},
                     inv_r_cell::AbstractVector{Float64},
 
                         # Gas velocity field:
@@ -1802,6 +1813,23 @@ end
                        ∂u_Z_∂Z::AbstractArray{Float64,2},
                     u_r_over_r::AbstractArray{Float64,2},
 
+                      # Needed intervals:
+                      Δr_L::AbstractVector{Float64}, Δr_R::AbstractVector{Float64},
+                      inv_dr_i_im1::AbstractVector{Float64},
+                      inv_dr_ip1_i::AbstractVector{Float64},
+                      inv_dr_ip2_ip1::AbstractVector{Float64},
+
+                      Δr_L_InnerBoundary::Float64, Δr_R_InnerBoundary::Float64,
+                      inv_dr_i_im1_InnerBoundary::Float64,
+                      inv_dr_ip1_i_InnerBoundary::Float64,
+                      inv_dr_ip2_ip1_InnerBoundary::Float64,
+
+                      Δr_L_OuterBoundary::Float64, Δr_R_OuterBoundary::Float64,
+                      inv_dr_i_im1_OuterBoundary::Float64,
+                      inv_dr_ip1_i_OuterBoundary::Float64,
+                      inv_dr_ip2_ip1_OuterBoundary::Float64,
+
+                      # Coordinate system, BCs:
              CylindricalCoords::Bool,
                      BC_r_left::Symbol,
                     BC_r_right::Symbol,
@@ -1814,9 +1842,24 @@ end
                      K_ϕϕ_iphalf, K_ϕϕ_imhalf,
                      F_r, F_r_Hr, F_r_HZ,
                      inv_ΔV, A_r,
-                     r, rCoM,
                      inv_r_cell, 
                      u_r_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+                     Δr_L, Δr_R,
+                     inv_dr_i_im1,
+                     inv_dr_ip1_i,
+                     inv_dr_ip2_ip1,
+
+                     Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+                     inv_dr_i_im1_InnerBoundary,
+                     inv_dr_ip1_i_InnerBoundary,
+                     inv_dr_ip2_ip1_InnerBoundary,
+
+                     Δr_L_OuterBoundary, Δr_R_OuterBoundary,
+                     inv_dr_i_im1_OuterBoundary,
+                     inv_dr_ip1_i_OuterBoundary,
+                     inv_dr_ip2_ip1_OuterBoundary,
+
                      CylindricalCoords,
                      BC_r_left, BC_r_right,
                      Val(:Threaded)  )
@@ -1825,7 +1868,7 @@ end
 end
 
 
-""" This function performs an RK2 step of J and H in the 
+""" This function performs a forward Euler step of J and H in the 
     r-direction, over a time-step Δt. """
  function ForwardEuler_r_ThreadingOrNot!( c̃Δt::Float64,
                            α_F::AbstractArray{Float64,2},
@@ -1842,8 +1885,6 @@ end
                         F_r_HZ::AbstractArray{Float64,2},
                         inv_ΔV::AbstractArray{Float64,2},
                            A_r::AbstractArray{Float64,2},
-                             r::AbstractVector{Float64},
-                          rCoM::AbstractVector{Float64},
                     inv_r_cell::AbstractVector{Float64},
 
                         # Gas velocity field:
@@ -1854,6 +1895,23 @@ end
                        ∂u_Z_∂Z::AbstractArray{Float64,2},
                     u_r_over_r::AbstractArray{Float64,2},
 
+                      # Needed intervals:
+                      Δr_L::AbstractVector{Float64}, Δr_R::AbstractVector{Float64},
+                      inv_dr_i_im1::AbstractVector{Float64},
+                      inv_dr_ip1_i::AbstractVector{Float64},
+                      inv_dr_ip2_ip1::AbstractVector{Float64},
+
+                      Δr_L_InnerBoundary::Float64, Δr_R_InnerBoundary::Float64,
+                      inv_dr_i_im1_InnerBoundary::Float64,
+                      inv_dr_ip1_i_InnerBoundary::Float64,
+                      inv_dr_ip2_ip1_InnerBoundary::Float64,
+
+                      Δr_L_OuterBoundary::Float64, Δr_R_OuterBoundary::Float64,
+                      inv_dr_i_im1_OuterBoundary::Float64,
+                      inv_dr_ip1_i_OuterBoundary::Float64,
+                      inv_dr_ip2_ip1_OuterBoundary::Float64,
+
+                      # Coordinate system, BCs:
              CylindricalCoords::Bool,
                      BC_r_left::Symbol,
                     BC_r_right::Symbol,
@@ -1866,9 +1924,24 @@ end
                      K_ϕϕ_iphalf, K_ϕϕ_imhalf,
                      F_r, F_r_Hr, F_r_HZ,
                      inv_ΔV, A_r,
-                     r, rCoM,
                      inv_r_cell,
                      u_r_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+                     Δr_L, Δr_R,
+                     inv_dr_i_im1,
+                     inv_dr_ip1_i,
+                     inv_dr_ip2_ip1,
+
+                     Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+                     inv_dr_i_im1_InnerBoundary,
+                     inv_dr_ip1_i_InnerBoundary,
+                     inv_dr_ip2_ip1_InnerBoundary,
+
+                     Δr_L_OuterBoundary, Δr_R_OuterBoundary,
+                     inv_dr_i_im1_OuterBoundary,
+                     inv_dr_ip1_i_OuterBoundary,
+                     inv_dr_ip2_ip1_OuterBoundary,
+
                      CylindricalCoords,
                      BC_r_left, BC_r_right,
                      Val(:Serial)  )
@@ -1877,7 +1950,7 @@ end
 end
 
 
-""" This function performs an RK2 step of J and H in the 
+""" This function performs a forward Euler step of J and H in the 
     Z-direction, over a time-step Δt. """
  function ForwardEuler_Z_ThreadingOrNot!( c̃Δt::Float64,
                            α_F::AbstractArray{Float64,2},
@@ -1892,8 +1965,6 @@ end
                         F_Z_HZ::AbstractArray{Float64,2},
                         inv_ΔV::AbstractArray{Float64,2},
                            A_Z::AbstractArray{Float64,2},
-                             Z::AbstractVector{Float64},
-                          ZCoM::AbstractVector{Float64},
 
                         # Gas velocity field:
                       u_Z_star::AbstractArray{Float64,2},
@@ -1903,6 +1974,23 @@ end
                        ∂u_Z_∂Z::AbstractArray{Float64,2},
                     u_r_over_r::AbstractArray{Float64,2},
 
+                       # Needed intervals:
+                       ΔZ_L::AbstractVector{Float64}, ΔZ_R::AbstractVector{Float64},
+                       inv_dZ_j_jm1::AbstractVector{Float64},
+                       inv_dZ_jp1_j::AbstractVector{Float64},
+                       inv_dZ_jp2_jp1::AbstractVector{Float64},
+
+                       ΔZ_L_InnerBoundary::Float64, ΔZ_R_InnerBoundary::Float64,
+                       inv_dZ_j_jm1_InnerBoundary::Float64,
+                       inv_dZ_jp1_j_InnerBoundary::Float64,
+                       inv_dZ_jp2_jp1_InnerBoundary::Float64,
+
+                       ΔZ_L_OuterBoundary::Float64, ΔZ_R_OuterBoundary::Float64,
+                       inv_dZ_j_jm1_OuterBoundary::Float64,
+                       inv_dZ_jp1_j_OuterBoundary::Float64,
+                       inv_dZ_jp2_jp1_OuterBoundary::Float64,
+
+                       # Coordinate system, BCs:
              CylindricalCoords::Bool,
                       BC_Z_bot::Symbol,
                       BC_Z_top::Symbol,
@@ -1914,8 +2002,23 @@ end
                      D_rr, D_ZZ, D_rZ,
                      F_Z, F_Z_Hr, F_Z_HZ,
                      inv_ΔV, A_Z,
-                     Z, ZCoM,
                      u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+                     ΔZ_L, ΔZ_R,
+                     inv_dZ_j_jm1,
+                     inv_dZ_jp1_j,
+                     inv_dZ_jp2_jp1,
+
+                     ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+                     inv_dZ_j_jm1_InnerBoundary,
+                     inv_dZ_jp1_j_InnerBoundary,
+                     inv_dZ_jp2_jp1_InnerBoundary,
+
+                     ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary,
+                     inv_dZ_j_jm1_OuterBoundary,
+                     inv_dZ_jp1_j_OuterBoundary,
+                     inv_dZ_jp2_jp1_OuterBoundary,
+
                      CylindricalCoords, BC_Z_bot, BC_Z_top,
                      Val(:Threaded) )
 
@@ -1923,7 +2026,7 @@ end
 end
 
 
-""" This function performs an RK2 step of J and H in the 
+""" This function performs a forward Euler step of J and H in the 
     Z-direction, over a time-step Δt. """
  function ForwardEuler_Z_ThreadingOrNot!( c̃Δt::Float64,
                            α_F::AbstractArray{Float64,2},
@@ -1938,8 +2041,6 @@ end
                         F_Z_HZ::AbstractArray{Float64,2},
                         inv_ΔV::AbstractArray{Float64,2},
                            A_Z::AbstractArray{Float64,2},
-                             Z::AbstractVector{Float64},
-                          ZCoM::AbstractVector{Float64},
 
                         # Gas velocity field:
                       u_Z_star::AbstractArray{Float64,2}, 
@@ -1949,6 +2050,23 @@ end
                        ∂u_Z_∂Z::AbstractArray{Float64,2},
                     u_r_over_r::AbstractArray{Float64,2},
 
+                       # Needed intervals:
+                       ΔZ_L::AbstractVector{Float64}, ΔZ_R::AbstractVector{Float64},
+                       inv_dZ_j_jm1::AbstractVector{Float64},
+                       inv_dZ_jp1_j::AbstractVector{Float64},
+                       inv_dZ_jp2_jp1::AbstractVector{Float64},
+
+                       ΔZ_L_InnerBoundary::Float64, ΔZ_R_InnerBoundary::Float64,
+                       inv_dZ_j_jm1_InnerBoundary::Float64,
+                       inv_dZ_jp1_j_InnerBoundary::Float64,
+                       inv_dZ_jp2_jp1_InnerBoundary::Float64,
+
+                       ΔZ_L_OuterBoundary::Float64, ΔZ_R_OuterBoundary::Float64,
+                       inv_dZ_j_jm1_OuterBoundary::Float64,
+                       inv_dZ_jp1_j_OuterBoundary::Float64,
+                       inv_dZ_jp2_jp1_OuterBoundary::Float64,
+
+                       # Coordinate system, BCs:
              CylindricalCoords::Bool,
                       BC_Z_bot::Symbol,
                       BC_Z_top::Symbol,
@@ -1960,8 +2078,23 @@ end
                      D_rr, D_ZZ, D_rZ,
                      F_Z, F_Z_Hr, F_Z_HZ,
                      inv_ΔV, A_Z,
-                     Z, ZCoM,
                      u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+                     ΔZ_L, ΔZ_R,
+                     inv_dZ_j_jm1,
+                     inv_dZ_jp1_j,
+                     inv_dZ_jp2_jp1,
+
+                     ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+                     inv_dZ_j_jm1_InnerBoundary,
+                     inv_dZ_jp1_j_InnerBoundary,
+                     inv_dZ_jp2_jp1_InnerBoundary,
+
+                     ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary,
+                     inv_dZ_j_jm1_OuterBoundary,
+                     inv_dZ_jp1_j_OuterBoundary,
+                     inv_dZ_jp2_jp1_OuterBoundary,
+
                      CylindricalCoords, BC_Z_bot, BC_Z_top,
                      Val(:Serial) )
 
@@ -1997,10 +2130,6 @@ const ThreadsOrNot = Union{Val{:Threaded}, Val{:Serial}}
                                      inv_ΔV::AbstractArray{Float64, 2}, # Inverse cell volumes 1 / ΔV         (N_r   x N_Z)
                                         A_r::AbstractArray{Float64, 2}, # Cell interface areas in r-direction (N_r+1 x N_Z)
                                         A_Z::AbstractArray{Float64, 2}, # Cell interface areas in Z-direction (N_r   x N_Z+1)
-                                          r::AbstractArray{Float64},    # r-interface values                  (N_r+1)
-                                       rCoM::AbstractArray{Float64},    # r-center values                     (N_r)
-                                          Z::AbstractArray{Float64},    # Z-interface values                  (N_Z+1)
-                                       ZCoM::AbstractArray{Float64},    # Z-center values                     (N_Z) 
                                  inv_r_cell::AbstractArray{Float64},    # ⟨1/r⟩ for every cell                (N_r)
 
                                     # Gas velocity field:
@@ -2011,7 +2140,39 @@ const ThreadsOrNot = Union{Val{:Threaded}, Val{:Serial}}
                                     ∂u_Z_∂r::AbstractArray{Float64,2}, 
                                     ∂u_Z_∂Z::AbstractArray{Float64,2},
                                  u_r_over_r::AbstractArray{Float64,2},
+
+                                 # Needed intervals:
+                                 Δr_L::AbstractVector{Float64}, Δr_R::AbstractVector{Float64},
+                                 inv_dr_i_im1::AbstractVector{Float64},
+                                 inv_dr_ip1_i::AbstractVector{Float64},
+                                 inv_dr_ip2_ip1::AbstractVector{Float64},
+
+                                 Δr_L_InnerBoundary::Float64, Δr_R_InnerBoundary::Float64,
+                                 inv_dr_i_im1_InnerBoundary::Float64,
+                                 inv_dr_ip1_i_InnerBoundary::Float64,
+                                 inv_dr_ip2_ip1_InnerBoundary::Float64,
+ 
+                                 Δr_L_OuterBoundary::Float64, Δr_R_OuterBoundary::Float64,
+                                 inv_dr_i_im1_OuterBoundary::Float64,
+                                 inv_dr_ip1_i_OuterBoundary::Float64,
+                                 inv_dr_ip2_ip1_OuterBoundary::Float64,
+
+                                 ΔZ_L::AbstractVector{Float64}, ΔZ_R::AbstractVector{Float64},
+                                 inv_dZ_j_jm1::AbstractVector{Float64},
+                                 inv_dZ_jp1_j::AbstractVector{Float64},
+                                 inv_dZ_jp2_jp1::AbstractVector{Float64},
+
+                                 ΔZ_L_InnerBoundary::Float64, ΔZ_R_InnerBoundary::Float64,
+                                 inv_dZ_j_jm1_InnerBoundary::Float64,
+                                 inv_dZ_jp1_j_InnerBoundary::Float64,
+                                 inv_dZ_jp2_jp1_InnerBoundary::Float64,
+ 
+                                 ΔZ_L_OuterBoundary::Float64, ΔZ_R_OuterBoundary::Float64,
+                                 inv_dZ_j_jm1_OuterBoundary::Float64,
+                                 inv_dZ_jp1_j_OuterBoundary::Float64,
+                                 inv_dZ_jp2_jp1_OuterBoundary::Float64,
                                  
+                                 # Other stuff:
                                  UpdateJold::Bool         = true,          # Whether to update J_old = J at the end (should be false for stellar RT)
 
                           CylindricalCoords::Bool         = true,          # Cylindrical coordinates assumed if true, otherwise Cartesian 
@@ -2036,12 +2197,27 @@ const ThreadsOrNot = Union{Val{:Threaded}, Val{:Serial}}
                      K_ϕϕ_iphalf, K_ϕϕ_imhalf,
                      F_r, F_r_Hr, F_r_HZ,
                      inv_ΔV, A_r,
-                     r, rCoM,
                      inv_r_cell,
                      u_r_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+                     Δr_L, Δr_R,
+                     inv_dr_i_im1,
+                     inv_dr_ip1_i,
+                     inv_dr_ip2_ip1,
+
+                     Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+                     inv_dr_i_im1_InnerBoundary,
+                     inv_dr_ip1_i_InnerBoundary,
+                     inv_dr_ip2_ip1_InnerBoundary,
+
+                     Δr_L_OuterBoundary, Δr_R_OuterBoundary,
+                     inv_dr_i_im1_OuterBoundary,
+                     inv_dr_ip1_i_OuterBoundary,
+                     inv_dr_ip2_ip1_OuterBoundary,
+
                      CylindricalCoords,
                      BC_r_left, BC_r_right,
-                     Val(:Threaded)  )
+                     Threading  )
 
     ################################################################################
     ############                                     ###############################
@@ -2052,8 +2228,24 @@ const ThreadsOrNot = Union{Val{:Threaded}, Val{:Serial}}
     ForwardEuler_Z_ThreadingOrNot!( c̃Δt, α_F, J, H_r, H_Z,
             D_rr, D_ZZ, D_rZ,
             F_Z, F_Z_Hr, F_Z_HZ,
-            inv_ΔV, A_Z, Z, ZCoM,
+            inv_ΔV, A_Z, 
             u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+            ΔZ_L, ΔZ_R,
+            inv_dZ_j_jm1,
+            inv_dZ_jp1_j,
+            inv_dZ_jp2_jp1,
+
+            ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+            inv_dZ_j_jm1_InnerBoundary,
+            inv_dZ_jp1_j_InnerBoundary,
+            inv_dZ_jp2_jp1_InnerBoundary,
+
+            ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary,
+            inv_dZ_j_jm1_OuterBoundary,
+            inv_dZ_jp1_j_OuterBoundary,
+            inv_dZ_jp2_jp1_OuterBoundary,
+
             CylindricalCoords, BC_Z_bot, BC_Z_top,
             Threading )
 
@@ -2066,15 +2258,31 @@ const ThreadsOrNot = Union{Val{:Threaded}, Val{:Serial}}
     ForwardEuler_r_ThreadingOrNot!( c̃Δt_half, α_F, J, H_r, H_Z,
             D_rr, D_ZZ, D_rZ, K_ϕϕ_iphalf, K_ϕϕ_imhalf,
             F_r, F_r_Hr, F_r_HZ, inv_ΔV, A_r,
-            r, rCoM,  inv_r_cell,
+            inv_r_cell,
             u_r_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+            Δr_L, Δr_R,
+            inv_dr_i_im1,
+            inv_dr_ip1_i,
+            inv_dr_ip2_ip1,
+
+            Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+            inv_dr_i_im1_InnerBoundary,
+            inv_dr_ip1_i_InnerBoundary,
+            inv_dr_ip2_ip1_InnerBoundary,
+
+            Δr_L_OuterBoundary, Δr_R_OuterBoundary,
+            inv_dr_i_im1_OuterBoundary,
+            inv_dr_ip1_i_OuterBoundary,
+            inv_dr_ip2_ip1_OuterBoundary,
+
             CylindricalCoords, BC_r_left, BC_r_right,
             Threading )
 
     # Update J_old if the option is turned on 
     # (should be off for stellar RT, but on for Lyα):
     if UpdateJold
-        J_old .= J 
+        copyto!( J_old, J )
     end
 
     return nothing
@@ -2107,10 +2315,6 @@ end
                                      inv_ΔV::AbstractArray{Float64, 2}, # Inverse cell volumes 1 / ΔV         (N_r   x N_Z)
                                         A_r::AbstractArray{Float64, 2}, # Cell interface areas in r-direction (N_r+1 x N_Z)
                                         A_Z::AbstractArray{Float64, 2}, # Cell interface areas in Z-direction (N_r   x N_Z+1)
-                                          r::AbstractArray{Float64},    # r-interface values                  (N_r+1)
-                                       rCoM::AbstractArray{Float64},    # r-center values                     (N_r)
-                                          Z::AbstractArray{Float64},    # Z-interface values                  (N_Z+1)
-                                       ZCoM::AbstractArray{Float64},    # Z-center values                     (N_Z) 
                                  inv_r_cell::AbstractArray{Float64},    # ⟨1/r⟩ for every cell                (N_r)
 
                                 # Gas velocity field:
@@ -2121,7 +2325,39 @@ end
                                     ∂u_Z_∂r::AbstractArray{Float64,2}, 
                                     ∂u_Z_∂Z::AbstractArray{Float64,2},
                                  u_r_over_r::AbstractArray{Float64,2},
+
+                                 # Needed intervals:
+                                 Δr_L::AbstractVector{Float64}, Δr_R::AbstractVector{Float64},
+                                 inv_dr_i_im1::AbstractVector{Float64},
+                                 inv_dr_ip1_i::AbstractVector{Float64},
+                                 inv_dr_ip2_ip1::AbstractVector{Float64},
+
+                                 Δr_L_InnerBoundary::Float64, Δr_R_InnerBoundary::Float64,
+                                 inv_dr_i_im1_InnerBoundary::Float64,
+                                 inv_dr_ip1_i_InnerBoundary::Float64,
+                                 inv_dr_ip2_ip1_InnerBoundary::Float64,
+ 
+                                 Δr_L_OuterBoundary::Float64, Δr_R_OuterBoundary::Float64,
+                                 inv_dr_i_im1_OuterBoundary::Float64,
+                                 inv_dr_ip1_i_OuterBoundary::Float64,
+                                 inv_dr_ip2_ip1_OuterBoundary::Float64,
+
+                                 ΔZ_L::AbstractVector{Float64}, ΔZ_R::AbstractVector{Float64},
+                                 inv_dZ_j_jm1::AbstractVector{Float64},
+                                 inv_dZ_jp1_j::AbstractVector{Float64},
+                                 inv_dZ_jp2_jp1::AbstractVector{Float64},
+
+                                 ΔZ_L_InnerBoundary::Float64, ΔZ_R_InnerBoundary::Float64,
+                                 inv_dZ_j_jm1_InnerBoundary::Float64,
+                                 inv_dZ_jp1_j_InnerBoundary::Float64,
+                                 inv_dZ_jp2_jp1_InnerBoundary::Float64,
+ 
+                                 ΔZ_L_OuterBoundary::Float64, ΔZ_R_OuterBoundary::Float64,
+                                 inv_dZ_j_jm1_OuterBoundary::Float64,
+                                 inv_dZ_jp1_j_OuterBoundary::Float64,
+                                 inv_dZ_jp2_jp1_OuterBoundary::Float64,
                                  
+                                 # Other stuff: 
                                  UpdateJold::Bool         = true,           # Whether to update J_old = J at the end (should be false for stellar RT)
 
                           CylindricalCoords::Bool         = true,           # Cylindrical coordinates assumed if true, otherwise Cartesian 
@@ -2143,8 +2379,24 @@ end
     ForwardEuler_Z_ThreadingOrNot!( c̃Δt_half, α_F, J, H_r, H_Z,
             D_rr, D_ZZ, D_rZ,
             F_Z, F_Z_Hr, F_Z_HZ,
-            inv_ΔV, A_Z, Z, ZCoM,
+            inv_ΔV, A_Z,
             u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+            ΔZ_L, ΔZ_R,
+            inv_dZ_j_jm1,
+            inv_dZ_jp1_j,
+            inv_dZ_jp2_jp1,
+
+            ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+            inv_dZ_j_jm1_InnerBoundary,
+            inv_dZ_jp1_j_InnerBoundary,
+            inv_dZ_jp2_jp1_InnerBoundary,
+
+            ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary,
+            inv_dZ_j_jm1_OuterBoundary,
+            inv_dZ_jp1_j_OuterBoundary,
+            inv_dZ_jp2_jp1_OuterBoundary,
+
             CylindricalCoords, BC_Z_bot, BC_Z_top,
             Threading )
 
@@ -2157,8 +2409,24 @@ end
     ForwardEuler_r_ThreadingOrNot!( c̃Δt, α_F, J, H_r, H_Z,
             D_rr, D_ZZ, D_rZ, K_ϕϕ_iphalf, K_ϕϕ_imhalf,
             F_r, F_r_Hr, F_r_HZ, inv_ΔV, A_r,
-            r, rCoM,  inv_r_cell,
+            inv_r_cell,
             u_r_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+            Δr_L, Δr_R,
+            inv_dr_i_im1,
+            inv_dr_ip1_i,
+            inv_dr_ip2_ip1,
+
+            Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+            inv_dr_i_im1_InnerBoundary,
+            inv_dr_ip1_i_InnerBoundary,
+            inv_dr_ip2_ip1_InnerBoundary,
+
+            Δr_L_OuterBoundary, Δr_R_OuterBoundary,
+            inv_dr_i_im1_OuterBoundary,
+            inv_dr_ip1_i_OuterBoundary,
+            inv_dr_ip2_ip1_OuterBoundary,
+
             CylindricalCoords, BC_r_left, BC_r_right,
             Threading )
 
@@ -2171,15 +2439,31 @@ end
     ForwardEuler_Z_ThreadingOrNot!( c̃Δt_half, α_F, J, H_r, H_Z,
             D_rr, D_ZZ, D_rZ,
             F_Z, F_Z_Hr, F_Z_HZ,
-            inv_ΔV, A_Z, Z, ZCoM,
+            inv_ΔV, A_Z, 
             u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+            ΔZ_L, ΔZ_R,
+            inv_dZ_j_jm1,
+            inv_dZ_jp1_j,
+            inv_dZ_jp2_jp1,
+
+            ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+            inv_dZ_j_jm1_InnerBoundary,
+            inv_dZ_jp1_j_InnerBoundary,
+            inv_dZ_jp2_jp1_InnerBoundary,
+
+            ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary,
+            inv_dZ_j_jm1_OuterBoundary,
+            inv_dZ_jp1_j_OuterBoundary,
+            inv_dZ_jp2_jp1_OuterBoundary,
+
             CylindricalCoords, BC_Z_bot, BC_Z_top,
             Threading )
 
     # Update J_old if the option is turned on 
     # (should be off for stellar RT, but on for Lyα):
     if UpdateJold
-        J_old .= J 
+        copyto!( J_old, J )
     end
 
     return nothing
@@ -2213,10 +2497,6 @@ function AdvectJandH!( c̃Δt::Float64,                   # c̃ × Δt
                     inv_ΔV::AbstractArray{Float64, 2}, # Inverse cell volumes 1 / ΔV         (N_r   x N_Z)
                        A_r::AbstractArray{Float64, 2}, # Cell interface areas in r-direction (N_r+1 x N_Z)
                        A_Z::AbstractArray{Float64, 2}, # Cell interface areas in Z-direction (N_r   x N_Z+1)
-                         r::AbstractArray{Float64},    # r-interface values                  (N_r+1)
-                      rCoM::AbstractArray{Float64},    # r-center values                     (N_r)
-                         Z::AbstractArray{Float64},    # Z-interface values                  (N_Z+1)
-                      ZCoM::AbstractArray{Float64},    # Z-center values                     (N_Z) 
                 inv_r_cell::AbstractArray{Float64},    # ⟨1/r⟩ for every cell                (N_r)
 
                 # Gas velocity field:
@@ -2227,7 +2507,39 @@ function AdvectJandH!( c̃Δt::Float64,                   # c̃ × Δt
                    ∂u_Z_∂r::AbstractArray{Float64,2}, 
                    ∂u_Z_∂Z::AbstractArray{Float64,2},
                 u_r_over_r::AbstractArray{Float64,2},
-                                 
+
+                # Needed intervals:
+                      Δr_L::AbstractVector{Float64}, Δr_R::AbstractVector{Float64},
+              inv_dr_i_im1::AbstractVector{Float64},
+              inv_dr_ip1_i::AbstractVector{Float64},
+            inv_dr_ip2_ip1::AbstractVector{Float64},
+
+            Δr_L_InnerBoundary::Float64, Δr_R_InnerBoundary::Float64,
+            inv_dr_i_im1_InnerBoundary::Float64,
+            inv_dr_ip1_i_InnerBoundary::Float64,
+            inv_dr_ip2_ip1_InnerBoundary::Float64,
+ 
+            Δr_L_OuterBoundary::Float64, Δr_R_OuterBoundary::Float64,
+            inv_dr_i_im1_OuterBoundary::Float64,
+            inv_dr_ip1_i_OuterBoundary::Float64,
+            inv_dr_ip2_ip1_OuterBoundary::Float64,
+
+            ΔZ_L::AbstractVector{Float64}, ΔZ_R::AbstractVector{Float64},
+            inv_dZ_j_jm1::AbstractVector{Float64},
+            inv_dZ_jp1_j::AbstractVector{Float64},
+            inv_dZ_jp2_jp1::AbstractVector{Float64},
+
+            ΔZ_L_InnerBoundary::Float64, ΔZ_R_InnerBoundary::Float64,
+            inv_dZ_j_jm1_InnerBoundary::Float64,
+            inv_dZ_jp1_j_InnerBoundary::Float64,
+            inv_dZ_jp2_jp1_InnerBoundary::Float64,
+ 
+            ΔZ_L_OuterBoundary::Float64, ΔZ_R_OuterBoundary::Float64,
+            inv_dZ_j_jm1_OuterBoundary::Float64,
+            inv_dZ_jp1_j_OuterBoundary::Float64,
+            inv_dZ_jp2_jp1_OuterBoundary::Float64,
+            
+                # Other stuff:
                 UpdateJold::Bool         = true,           # Whether to update J_old = J at the end (should be false for stellar RT)
 
          CylindricalCoords::Bool         = true,           # Cylindrical coordinates assumed if true, otherwise Cartesian 
@@ -2247,9 +2559,39 @@ function AdvectJandH!( c̃Δt::Float64,                   # c̃ × Δt
                              F_r, F_Z, F_r_Hr,
                              F_Z_Hr, F_r_HZ, F_Z_HZ,
                              inv_ΔV, A_r, A_Z,
-                             r, rCoM, Z, ZCoM,
                              inv_r_cell, 
                              u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+                             Δr_L, Δr_R,
+                             inv_dr_i_im1,
+                             inv_dr_ip1_i,
+                             inv_dr_ip2_ip1,
+                             
+                             Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+                             inv_dr_i_im1_InnerBoundary,
+                             inv_dr_ip1_i_InnerBoundary,
+                             inv_dr_ip2_ip1_InnerBoundary,
+                             
+                             Δr_L_OuterBoundary, Δr_R_OuterBoundary,
+                             inv_dr_i_im1_OuterBoundary,
+                             inv_dr_ip1_i_OuterBoundary,
+                             inv_dr_ip2_ip1_OuterBoundary,
+
+                             ΔZ_L, ΔZ_R,
+                             inv_dZ_j_jm1,
+                             inv_dZ_jp1_j,
+                             inv_dZ_jp2_jp1,
+
+                             ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+                             inv_dZ_j_jm1_InnerBoundary,
+                             inv_dZ_jp1_j_InnerBoundary,
+                             inv_dZ_jp2_jp1_InnerBoundary,
+                             
+                             ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary,
+                             inv_dZ_j_jm1_OuterBoundary,
+                             inv_dZ_jp1_j_OuterBoundary,
+                             inv_dZ_jp2_jp1_OuterBoundary,
+
                              UpdateJold, 
                              CylindricalCoords, 
                              BC_r_left, BC_r_right,
@@ -2263,9 +2605,39 @@ function AdvectJandH!( c̃Δt::Float64,                   # c̃ × Δt
                              F_r, F_Z, F_r_Hr,
                              F_Z_Hr, F_r_HZ, F_Z_HZ,
                              inv_ΔV, A_r, A_Z,
-                             r, rCoM, Z, ZCoM,
                              inv_r_cell, 
                              u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+                             Δr_L, Δr_R,
+                             inv_dr_i_im1,
+                             inv_dr_ip1_i,
+                             inv_dr_ip2_ip1,
+                             
+                             Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+                             inv_dr_i_im1_InnerBoundary,
+                             inv_dr_ip1_i_InnerBoundary,
+                             inv_dr_ip2_ip1_InnerBoundary,
+                             
+                             Δr_L_OuterBoundary, Δr_R_OuterBoundary,
+                             inv_dr_i_im1_OuterBoundary,
+                             inv_dr_ip1_i_OuterBoundary,
+                             inv_dr_ip2_ip1_OuterBoundary,
+
+                             ΔZ_L, ΔZ_R,
+                             inv_dZ_j_jm1,
+                             inv_dZ_jp1_j,
+                             inv_dZ_jp2_jp1,
+
+                             ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+                             inv_dZ_j_jm1_InnerBoundary,
+                             inv_dZ_jp1_j_InnerBoundary,
+                             inv_dZ_jp2_jp1_InnerBoundary,
+                             
+                             ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary,
+                             inv_dZ_j_jm1_OuterBoundary,
+                             inv_dZ_jp1_j_OuterBoundary,
+                             inv_dZ_jp2_jp1_OuterBoundary,
+
                              UpdateJold, 
                              CylindricalCoords, 
                              BC_r_left, BC_r_right,
@@ -2274,4 +2646,199 @@ function AdvectJandH!( c̃Δt::Float64,                   # c̃ × Δt
     end
 
     return nothing 
+end
+
+
+function AdvectJandH!(  c̃Δt::Float64,                   # c̃ × Δt 
+                       α_F::AbstractArray{Float64, 2}, # Flux opacities              (N_r x N_Z)
+
+                         J::AbstractArray{Float64, 2}, # J (latest/updated values)   (N_r x N_Z)
+                     J_old::AbstractArray{Float64, 2}, # J (old values)              (N_r x N_Z)
+
+                       H_r::AbstractArray{Float64, 2}, # r-direction component of H  (N_r x N_Z)
+                       H_Z::AbstractArray{Float64, 2}, # Z-direction component of H  (N_r x N_Z)
+
+                      D_rr::AbstractArray{TypeOfD, 2}, # rr-components of the Eddington tensor (N_r x N_Z)
+                      D_ZZ::AbstractArray{TypeOfD, 2}, # ZZ-components of the Eddington tensor (N_r x N_Z)
+                      D_rZ::AbstractArray{TypeOfD, 2}, # rZ-components of the Eddington tensor (N_r x N_Z)
+               K_ϕϕ_iphalf::AbstractArray{Float64, 2}, # ϕϕ-components of K at i+1/2           (N_r x N_Z)
+               K_ϕϕ_imhalf::AbstractArray{Float64, 2}, # ϕϕ-components of K at i-1/2           (N_r x N_Z)
+
+                       F_r::AbstractArray{Float64, 2}, # r-direction flux of J               (N_r+1 x N_Z)
+                       F_Z::AbstractArray{Float64, 2}, # Z-direction flux of J               (N_r   x N_Z+1)
+
+                    F_r_Hr::AbstractArray{Float64, 2}, # r-direction flux of H_r             (N_r+1 x N_Z)
+                    F_Z_Hr::AbstractArray{Float64, 2}, # Z-direction flux of H_r             (N_r   x N_Z+1)
+                    F_r_HZ::AbstractArray{Float64, 2}, # r-direction flux of H_Z             (N_r+1 x N_Z)
+                    F_Z_HZ::AbstractArray{Float64, 2}, # Z-direction flux of H_Z             (N_r   x N_Z+1)
+
+                    # Geometry struct:
+                  geometry::Union{GeometryCylindrical, GeometryCartesian},
+
+                # Gas velocity field:
+                  u_r_star::AbstractArray{Float64,2},
+                  u_Z_star::AbstractArray{Float64,2},
+                   ∂u_r_∂r::AbstractArray{Float64,2},
+                   ∂u_r_∂Z::AbstractArray{Float64,2}, 
+                   ∂u_Z_∂r::AbstractArray{Float64,2}, 
+                   ∂u_Z_∂Z::AbstractArray{Float64,2},
+                u_r_over_r::AbstractArray{Float64,2},
+            
+                # Other stuff:
+                UpdateJold::Bool         = true,           # Whether to update J_old = J at the end (should be false for stellar RT)
+
+                 BC_r_left::Symbol       = :Reflect,       # Boundary condition at i = 1/2 
+                BC_r_right::Symbol       = :Outflow,       # Boundary condition at i = N_r + 1/2
+                  BC_Z_bot::Symbol       = :Reflect,       # Boundary condition at j = 1/2 
+                  BC_Z_top::Symbol       = :Outflow,       # Boundary condition at j = N_Z + 1/2 
+                    rfirst::Bool         = true,
+                 Threading::ThreadsOrNot = Val(:Threaded)
+                                   )  where {TypeOfD<:AbstractFloat}
+
+    # Needed geoetry (intervals, areas etc):
+    inv_ΔV     = geometry.inv_ΔV
+    inv_r_cell = geometry.inv_r_cell  # Same signature for both cylindrical & Cartesian, but only used in former
+
+    if geometry isa GeometryCylindrical
+        # We have cylindrical coordinates:
+        CylindricalCoords = true 
+
+        # Interface areas:
+        A_r        = geometry.A_r 
+        A_Z        = geometry.A_Z
+
+        # r-intervals:
+        Δr_L            = geometry.Δr_L
+        Δr_R            = geometry.Δr_R
+        inv_dr_i_im1    = geometry.inv_dr_i_im1
+        inv_dr_ip1_i    = geometry.inv_dr_ip1_i
+        inv_dr_ip2_ip1  = geometry.inv_dr_ip2_ip1
+                             
+        Δr_L_InnerBoundary           = geometry.Δr_L_InnerBoundary
+        Δr_R_InnerBoundary           = geometry.Δr_R_InnerBoundary
+        inv_dr_i_im1_InnerBoundary   = geometry.inv_dr_i_im1_InnerBoundary
+        inv_dr_ip1_i_InnerBoundary   = geometry.inv_dr_ip1_i_InnerBoundary
+        inv_dr_ip2_ip1_InnerBoundary = geometry.inv_dr_ip2_ip1_InnerBoundary
+                             
+        Δr_L_OuterBoundary           = geometry.Δr_L_OuterBoundary
+        Δr_R_OuterBoundary           = geometry.Δr_R_OuterBoundary
+        inv_dr_i_im1_OuterBoundary   = geometry.inv_dr_i_im1_OuterBoundary
+        inv_dr_ip1_i_OuterBoundary   = geometry.inv_dr_ip1_i_OuterBoundary
+        inv_dr_ip2_ip1_OuterBoundary = geometry.inv_dr_ip2_ip1_OuterBoundary
+
+        # Z-intervals:
+        ΔZ_L            = geometry.ΔZ_L
+        ΔZ_R            = geometry.ΔZ_R
+        inv_dZ_j_jm1    = geometry.inv_dZ_j_jm1
+        inv_dZ_jp1_j    = geometry.inv_dZ_jp1_j
+        inv_dZ_jp2_jp1  = geometry.inv_dZ_jp2_jp1
+                             
+        ΔZ_L_InnerBoundary           = geometry.ΔZ_L_InnerBoundary
+        ΔZ_R_InnerBoundary           = geometry.ΔZ_R_InnerBoundary
+        inv_dZ_j_jm1_InnerBoundary   = geometry.inv_dZ_j_jm1_InnerBoundary
+        inv_dZ_jp1_j_InnerBoundary   = geometry.inv_dZ_jp1_j_InnerBoundary
+        inv_dZ_jp2_jp1_InnerBoundary = geometry.inv_dZ_jp2_jp1_InnerBoundary
+                             
+        ΔZ_L_OuterBoundary           = geometry.ΔZ_L_OuterBoundary
+        ΔZ_R_OuterBoundary           = geometry.ΔZ_R_OuterBoundary
+        inv_dZ_j_jm1_OuterBoundary   = geometry.inv_dZ_j_jm1_OuterBoundary
+        inv_dZ_jp1_j_OuterBoundary   = geometry.inv_dZ_jp1_j_OuterBoundary
+        inv_dZ_jp2_jp1_OuterBoundary = geometry.inv_dZ_jp2_jp1_OuterBoundary
+    elseif geometry isa GeometryCartesian
+        # We don't have cylindrical coordinates (we have Cartesian):
+        CylindricalCoords = false 
+
+        # Interface areas:
+        A_r        = geometry.A_X 
+        A_Z        = geometry.A_Y
+
+        # X-intervals:
+        Δr_L            = geometry.ΔX_L
+        Δr_R            = geometry.ΔX_R
+        inv_dr_i_im1    = geometry.inv_dX_i_im1
+        inv_dr_ip1_i    = geometry.inv_dX_ip1_i
+        inv_dr_ip2_ip1  = geometry.inv_dX_ip2_ip1
+                             
+        Δr_L_InnerBoundary           = geometry.ΔX_L_InnerBoundary
+        Δr_R_InnerBoundary           = geometry.ΔX_R_InnerBoundary
+        inv_dr_i_im1_InnerBoundary   = geometry.inv_dX_i_im1_InnerBoundary
+        inv_dr_ip1_i_InnerBoundary   = geometry.inv_dX_ip1_i_InnerBoundary
+        inv_dr_ip2_ip1_InnerBoundary = geometry.inv_dX_ip2_ip1_InnerBoundary
+                             
+        Δr_L_OuterBoundary           = geometry.ΔX_L_OuterBoundary
+        Δr_R_OuterBoundary           = geometry.ΔX_R_OuterBoundary
+        inv_dr_i_im1_OuterBoundary   = geometry.inv_dX_i_im1_OuterBoundary
+        inv_dr_ip1_i_OuterBoundary   = geometry.inv_dX_ip1_i_OuterBoundary
+        inv_dr_ip2_ip1_OuterBoundary = geometry.inv_dX_ip2_ip1_OuterBoundary
+
+        # Y-intervals:
+        ΔZ_L            = geometry.ΔY_L
+        ΔZ_R            = geometry.ΔY_R
+        inv_dZ_j_jm1    = geometry.inv_dY_j_jm1
+        inv_dZ_jp1_j    = geometry.inv_dY_jp1_j
+        inv_dZ_jp2_jp1  = geometry.inv_dY_jp2_jp1
+                             
+        ΔZ_L_InnerBoundary           = geometry.ΔY_L_InnerBoundary
+        ΔZ_R_InnerBoundary           = geometry.ΔY_R_InnerBoundary
+        inv_dZ_j_jm1_InnerBoundary   = geometry.inv_dY_j_jm1_InnerBoundary
+        inv_dZ_jp1_j_InnerBoundary   = geometry.inv_dY_jp1_j_InnerBoundary
+        inv_dZ_jp2_jp1_InnerBoundary = geometry.inv_dY_jp2_jp1_InnerBoundary
+                             
+        ΔZ_L_OuterBoundary           = geometry.ΔY_L_OuterBoundary
+        ΔZ_R_OuterBoundary           = geometry.ΔY_R_OuterBoundary
+        inv_dZ_j_jm1_OuterBoundary   = geometry.inv_dY_j_jm1_OuterBoundary
+        inv_dZ_jp1_j_OuterBoundary   = geometry.inv_dY_jp1_j_OuterBoundary
+        inv_dZ_jp2_jp1_OuterBoundary = geometry.inv_dY_jp2_jp1_OuterBoundary
+    end
+
+    # Call M1 advection:
+    AdvectJandH!(         c̃Δt,           α_F,        
+                          J,             J_old, 
+                          H_r,           H_Z, 
+                          D_rr,          D_ZZ,        D_rZ,  # Eddington factors D = K / J
+                          K_ϕϕ_iphalf,   K_ϕϕ_imhalf,
+                          F_r,           F_Z,                     # Fluxes of J 
+                          F_r_Hr,        F_Z_Hr,                  # Fluxes of H_r 
+                          F_r_HZ,        F_Z_HZ,                  # Fluxes of H_Z 
+                          inv_ΔV,  A_r,  A_Z, inv_r_cell,
+                          u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+
+                          # Intervals & inverse intervals, needed for interface reconstruction 
+                          # & cell optical depths:
+                          Δr_L, Δr_R,
+                          inv_dr_i_im1,
+                          inv_dr_ip1_i,
+                          inv_dr_ip2_ip1,
+                             
+                          Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+                          inv_dr_i_im1_InnerBoundary,
+                          inv_dr_ip1_i_InnerBoundary,
+                          inv_dr_ip2_ip1_InnerBoundary,
+                             
+                          Δr_L_OuterBoundary, Δr_R_OuterBoundary,
+                          inv_dr_i_im1_OuterBoundary,
+                          inv_dr_ip1_i_OuterBoundary,
+                          inv_dr_ip2_ip1_OuterBoundary,
+
+                          ΔZ_L, ΔZ_R,
+                          inv_dZ_j_jm1,
+                          inv_dZ_jp1_j,
+                          inv_dZ_jp2_jp1,
+
+                          ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+                          inv_dZ_j_jm1_InnerBoundary,
+                          inv_dZ_jp1_j_InnerBoundary,
+                          inv_dZ_jp2_jp1_InnerBoundary,
+                             
+                          ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary,
+                          inv_dZ_j_jm1_OuterBoundary,
+                          inv_dZ_jp1_j_OuterBoundary,
+                          inv_dZ_jp2_jp1_OuterBoundary,
+
+                          # Other stuff:
+                          UpdateJold, 
+                          CylindricalCoords,
+                          BC_r_left,  BC_r_right,  BC_Z_bot,  BC_Z_top,
+                          rfirst, Threading )
+
 end

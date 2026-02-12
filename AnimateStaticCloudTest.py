@@ -18,12 +18,12 @@ fps       = 20
 edge_indices = [0]            # e.g. [0, 5, 10]
 
 # Left panel mode:
-left_panel_mode = "axis"       # "map" or "axis"
+left_panel_mode = "map"       # "map" or "axis"
 
 # ν-window settings for the spectrum panel
 use_nu_window       = True
 nu_Lya              = 2.466e15             # Hz
-nu_window_fraction  = 0.01                # total width = 2% of ν_Lya (±1% around center)
+nu_window_fraction  = 0.007                # total width = 2% of ν_Lya (±1% around center)
 # ---------------------------------------------
 
 # constants
@@ -287,7 +287,8 @@ else:
     raise ValueError(f"Unknown left_panel_mode={left_panel_mode!r}. Use 'map' or 'axis'.")
 
 # --- spectrum panel ---
-ax_spec.set_ylim(0.0, 1e-13 )  # adjust if needed
+ax_spec.set_ylim(0.0, 0.7*1e-13 )  # adjust if needed
+#ax_spec.set_ylim(Jmin, Jmax * 1.2)
 ax_spec.set_xlabel(r"$\nu$ (Hz)", labelpad=12)
 ax_spec.set_ylabel(r"$J_{Ly\alpha}$", labelpad=12)
 ax_spec.set_xlim(nuC_plot.min(), nuC_plot.max())

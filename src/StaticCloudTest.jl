@@ -6,16 +6,17 @@ __precompile__()
 
 
 include( "./Structs.jl" )
+include( "./FastInterpolations.jl" )
 include( "./ConstantsAndFunctions.jl" )
 using .Structs
+using .FastInterpolations
 using .ConstantsAndFunctions
 using LinearAlgebra           # For the tridiagonal solver 
 BLAS.set_num_threads(1)       # Ensure the tridiagonal solver is not threaded (we thread over spatial cells)
 
 # Some basic underlying files:
 include( "./WENO3.jl" )              # Needed just because it enters the geometry, but not used in practice below 
-include( "./ExponentialScheme.jl" )
-include( "./FreqFactorsAndGrid.jl" )
+include( "./FreqFactors.jl" )
 include( "./TridiagonalSolver.jl" )
 include( "./M1Closure.jl" ) 
 include( "./AdvectJandH.jl" )
@@ -64,12 +65,12 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
                IonizedSourceRegion::Bool    = false,      # Whether the emission region is ionized (if true) or not (if false)
                                Rcl::Float64 = pc,         # Cloud radius (no real impact on the test setup)
                                 Zc::Float64 = 0.0,        # Cloud center position 
-                     tmax_unitless::Float64 = 0.01,        # Maximum time for time integration, in units (aτ_cl)^(1/3) Rcl / c̃
+                     tmax_unitless::Float64 = 4.0,       # Maximum time for time integration, in units (aτ_cl)^(1/3) Rcl / c̃
                         BC_r_right::Symbol  = :Outflow,   # Lyα boundary conditions at outer r-boundary 
                           BC_Z_bot::Symbol  = :Reflect,   # Lyα boundary conditions at lower Z-boundary 
                           BC_Z_top::Symbol  = :Outflow,   # Lyα boundary conditions at upper r-boundary 
-                           N_r_lin::Int     = 128,
-                           N_Z_lin::Int     = 128,
+                           N_r_lin::Int     = 16,
+                           N_Z_lin::Int     = 16,
                          Nminsteps::Int     = 300,
                          Nmaxsteps::Int     = 100000,
                             Nsaved::Int     = 300,
@@ -77,13 +78,13 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
                           FileName::String  = "StaticCloudTest.h5"
                              )
 
-    Rmax     = 1.2 * Rcl
+    Rmax     = 1.4 * Rcl
     Rmax_lin = Rmax 
     Zmax     = Rmax 
     Zmax_lin = Zmax    
     
-    # RSL:
-    c̃        = min( c, max( 10 * umax * kms, 100 * kms ) )
+    # RSL can be set to the speed of light:
+    c̃        = c
 
     # Setup uniform cylindrical grid:
     geometry   = SetupCylindricalGrid( Rmax, Rmax_lin, Zmax, Zmax_lin, 
@@ -153,7 +154,7 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
     Rs   = rs * Rcl 
 
     # Choose cloud H I density such that its optical depth is τcl:
-    nHI₀ = τcl / ( σ0(T₀) * Rcl )
+    nHI₀ = τcl / ( Compute_σ0(T₀) * Rcl )
 
     # Choose continuum absorption opacity such that the cloud continuum optical depth is τabs:
     αc₀  = τabs / Rcl
@@ -183,18 +184,18 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
                 θ      = min( θpolar, π - θpolar )        # Allow for two polar holes (in positive & negative Z directions)
                 if RCoM < Rcl && RCoM > Rs && θ > θhole
                     nHI        = nHI₀
-                    α_Lyα[i,j] = nHI * σ0(T[i,j])
+                    α_Lyα[i,j] = nHI * Compute_σ0(T[i,j])
                     αc[i,j]    = αc₀
                     pd[i,j]    = pd₀
                 elseif RCoM < Rs
                     nHI        = max( (1 - xHII_SourceRegion), 0.0 ) * nHI₀ 
-                    α_Lyα[i,j] = nHI * σ0(T[i,j])
+                    α_Lyα[i,j] = nHI * Compute_σ0(T[i,j])
                     αc[i,j]    = αc₀
                     pd[i,j]    = pd₀
                 else 
                     # No H I or absorption/destruction outside the cloud: 
                     nHI        = 0.0
-                    α_Lyα[i,j] = nHI * σ0(T[i,j])
+                    α_Lyα[i,j] = nHI * Compute_σ0(T[i,j])
                     αc[i,j]    = 0.0
                     pd[i,j]    = 0.0
                 end
@@ -243,7 +244,7 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
     CFL         = 0.4
     Δt_CFL      = GetRHDCFLTimeStep(r, Z, c̃, u_r, u_Z, CFL)
     t           = 0.0
-    tmax        = tmax_unitless * (a(T₀) * τcl)^(1/3) * Rcl / c̃
+    tmax        = tmax_unitless * (Compute_a(T₀) * τcl)^(1/3) * Rcl / c̃
 
     # Initialize time-steps where data is saved 
     Δt_save     = tmax / ( Nsaved - 1 )
@@ -266,9 +267,8 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
     prog = Progress( 100; dt = 0.01, desc = "Time integration progress:",
                      barglyphs=BarGlyphs("[=> ]"), barlen = 50, color=:green ) 
 
-    #t_emit = 0.0
-    #t_adv  = 0.0
-    #t_ff   = 0.0                 
+    t_emit = 0.0
+    t_adv  = 0.0              
 
     step = 0
     while t < tmax
@@ -285,18 +285,12 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
                                       c̃, Δt )
         #t_emit += (time_ns() - t0)
 
-        # Just for time testing (to simulate an RHD run where this is done every time-step):
-        #t0 = time_ns()
-        #UpdateFreqFactors!(LyaState, T, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r)
-        #t_ff += (time_ns() - t0)
-
         # 2) M1 spatial advection + frequency diffusion + Doppler shift
         #t0 = time_ns()
-        UpdateLyαJandH!( Δt, c̃, LyaState,
-                         inv_ΔV, A_r, A_Z, r, rCoM, Z, ZCoM, inv_r_cell,
+        UpdateLyαJandH!( Δt, c̃, LyaState, geometry,
                          T,
                          u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                         true, BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top )
+                         BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top )
         #t_adv += (time_ns() - t0)
 
         # Update Lyα forces f_Lyα, force multiplier, and M_F:
@@ -342,7 +336,6 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
     end # End of time integration 
 
     #println("Emit/abs:  ", t_emit*1e-9, " s")
-    #println("FreqFacts: ", t_ff*1e-9,   " s")
     #println("UpdateJH:  ", t_adv*1e-9,  " s")
 
 

@@ -21,47 +21,47 @@ function CreateHDF5File( FileName::String,
                        chunk = (1,))
 
         # Cell centers rCoM: one value per cell.
-        create_dataset(file, "rCoM", Float32,
+        create_dataset(file, "rCoM", Float64,
                        (N_r,) )
 
         # Cell centers ZCoM: one value per cell.
-        create_dataset(file, "ZCoM", Float32,
+        create_dataset(file, "ZCoM", Float64,
                        (N_Z,) )
         
         # Cell interface radii r: should have N_r+1 entries if storing cell boundaries.
-        create_dataset(file, "r", Float32,
+        create_dataset(file, "r", Float64,
                        (N_r+1,) )
 
         # Cell interface radii Z: should have N_Z+1 entries if storing cell boundaries.
-        create_dataset(file, "Z", Float32,
+        create_dataset(file, "Z", Float64,
                        (N_Z+1,) )
         
         # Cell volumes ΔV: one value per cell.
-        create_dataset(file, "CellVolumes", Float32,
+        create_dataset(file, "CellVolumes", Float64,
                        (N_r, N_Z) )
 
         ############################# QUANTITIES #################################
 
         # Create a 3D dataset (r, Z, time) for the gas density:
-        create_dataset(file, "GasDensity_History", Float32,
+        create_dataset(file, "GasDensity_History", Float64,
                        (N_r, N_Z, Nsaved);
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
         # Create a 3D dataset (r, Z, time) for the r-direction velocity:
-        create_dataset(file, "rVelocity_History", Float32,
+        create_dataset(file, "rVelocity_History", Float64,
                        (N_r, N_Z, Nsaved);
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
         # Create a 3D dataset (r, Z, time) for the Z-direction velocity:
-        create_dataset(file, "ZVelocity_History", Float32,
+        create_dataset(file, "ZVelocity_History", Float64,
                        (N_r, N_Z, Nsaved);
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
         # Create a 3D dataset (r, Z, time) for the gas pressure:
-        create_dataset(file, "P_History", Float32,
+        create_dataset(file, "P_History", Float64,
                        (N_r, N_Z, Nsaved);
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
