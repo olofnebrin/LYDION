@@ -6,7 +6,7 @@ from matplotlib.ticker import AutoMinorLocator, LogLocator, NullFormatter
 
 # ---------------- User inputs ----------------
 script_dir  = os.path.dirname(os.path.abspath(__file__))
-N           = [32, 64, 128, 256, 1024]          # Grid resolution(s) to plot
+N           = [32, 64, 128, 256, 512]          # Grid resolution(s) to plot
 ErrorNorm   = "L1"                             # "L1" or "L2"
 SaveFigure  = True
 OutName     = os.path.join(script_dir, "IsentropicPulseTest.pdf")
@@ -172,6 +172,41 @@ def radial_profile_volume_weighted(X, Y, dV, rho2d):
     return R_centers, rho_avg
 
 
+# ---------- NEW: conservative restriction (volume-weighted 2x2) ----------
+def restrict_2x2_volume_weighted(F_fine, dV_fine):
+    """
+    Restrict a fine-grid cell-average field to the next coarser grid (factor 2),
+    using volume-weighted averaging over 2x2 fine blocks.
+
+    Returns:
+        F_coarse_ref : (Nx/2, Ny/2)
+        dV_coarse    : (Nx/2, Ny/2)  (sum of the 2x2 volumes)
+    """
+    F_fine  = np.asarray(F_fine, dtype=np.float64)
+    dV_fine = np.asarray(dV_fine, dtype=np.float64)
+
+    if F_fine.shape != dV_fine.shape:
+        raise ValueError(f"restrict_2x2: shape mismatch F {F_fine.shape} vs dV {dV_fine.shape}")
+
+    nx_f, ny_f = F_fine.shape
+    if (nx_f % 2) != 0 or (ny_f % 2) != 0:
+        raise ValueError(f"restrict_2x2: fine shape {F_fine.shape} not divisible by 2")
+
+    nx_c = nx_f // 2
+    ny_c = ny_f // 2
+
+    # reshape into (nx_c, 2, ny_c, 2)
+    F4  = F_fine.reshape(nx_c, 2, ny_c, 2)
+    V4  = dV_fine.reshape(nx_c, 2, ny_c, 2)
+
+    Vsum = np.sum(V4, axis=(1, 3))  # -> (nx_c, ny_c)
+    # Avoid divide-by-zero (should not happen, but keep robust)
+    Fsum = np.sum(F4 * V4, axis=(1, 3))
+    Fcoarse = Fsum / (Vsum + 1e-300)
+
+    return Fcoarse, Vsum
+
+
 ###############################################################
 #######           P L O T   C O S M E T I C S           #######
 ###############################################################
@@ -218,6 +253,21 @@ if not os.path.exists(File_ref):
 t_ref, X_ref, Y_ref, dV_ref, rho_ref2d = load_final_rho(File_ref)
 R_ref, rho_ref_1d = radial_profile_volume_weighted(X_ref, Y_ref, dV_ref, rho_ref2d)
 
+# ---------- NEW: build a restricted reference pyramid for factor-2 grids ----------
+# ref_maps[Nx] = (rho_ref_on_Nx, dV_ref_on_Nx)
+ref_maps = {N_ref: (rho_ref2d, dV_ref)}
+
+N_sorted_desc = sorted(N, reverse=True)
+for k in range(len(N_sorted_desc) - 1):
+    Nfine = N_sorted_desc[k]
+    Ncoar = N_sorted_desc[k + 1]
+
+    # Only restrict if this is an exact factor-of-2 step and we have the fine ref
+    if (Nfine in ref_maps) and (Nfine == 2 * Ncoar):
+        rho_f, dV_f = ref_maps[Nfine]
+        rho_c, dV_c = restrict_2x2_volume_weighted(rho_f, dV_f)
+        ref_maps[Ncoar] = (rho_c, dV_c)
+
 
 ###############################################################
 #######               P L O T  I T !                    #######
@@ -245,12 +295,23 @@ for i, Nx in enumerate(N):
     t_final, X, Y, dV, rho2d = load_final_rho(File)
     R, rho_1d = radial_profile_volume_weighted(X, Y, dV, rho2d)
 
-    # --- interpolate reference rho to coarse cell centers ---
-    rho_ref_on_coarse = bilinear_interp_on_centers(X_ref, Y_ref, rho_ref2d, X, Y)
+    # --- NEW: compare to conservative restricted reference when available ---
+    if Nx in ref_maps:
+        rho_ref_on_coarse, dV_ref_on_coarse = ref_maps[Nx]
 
-    # --- error on matching physical positions ---
-    diff = rho2d - rho_ref_on_coarse
-    Err[i] = volume_weighted_error(diff, dV, norm=ErrorNorm)
+        if rho_ref_on_coarse.shape != rho2d.shape:
+            raise ValueError(
+                f"Restricted reference shape {rho_ref_on_coarse.shape} does not match rho2d {rho2d.shape} for N={Nx}."
+            )
+
+        diff = rho2d - rho_ref_on_coarse
+        Err[i] = volume_weighted_error(diff, dV, norm=ErrorNorm)
+
+    else:
+        # Fallback (should only happen if N is not a power-of-two chain from N_ref)
+        rho_ref_on_coarse = bilinear_interp_on_centers(X_ref, Y_ref, rho_ref2d, X, Y)
+        diff = rho2d - rho_ref_on_coarse
+        Err[i] = volume_weighted_error(diff, dV, norm=ErrorNorm)
 
     ax_rho.plot(R, rho_1d, color=color, label=f"N = {Nx}", alpha=alpha,
                 marker=marker, linestyle='None', markersize=ms_num)
@@ -307,4 +368,3 @@ if SaveFigure:
     print(f"Saved plot to {OutName}")
 else:
     plt.show()
-

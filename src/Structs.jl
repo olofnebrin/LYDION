@@ -94,9 +94,6 @@ mutable struct LyαArrays
     f_Lyα_r::Array{Float64, 2}
     f_Lyα_Z::Array{Float64, 2}
 
-    # Strang-split order for M1 advection (changes automatically every advection step):
-    rfirst_Lyα::Bool 
-
     # Force multiplier, Lyα luminosity, Lyα escape fraction:
     M_F::Float64
     M_F_antigravity::Float64       # Force multiplier anti-parallel to gravity 
@@ -249,9 +246,6 @@ mutable struct StellarRTArrays
     f_IR_r::Array{Float64, 2}
     f_IR_Z::Array{Float64, 2}
 
-    # Strang-split order for M1 advection (changes automatically every advection step):
-    rfirst_StellarRT::Bool 
-
     # LyC & LW escape fraction:
     f_esc_LyC::Float64 
     f_esc_LW::Float64
@@ -325,10 +319,15 @@ mutable struct ChemistryState{T<:AbstractFloat}
     xOHx_adv::Array{T, 2}       # OHₓ is only advected for accuracy, but otherwise obtained from conservation 
     xOHx_adv_old::Array{T, 2}
 
-    # Overall gas metallicity:
-    Zgas_Zsun::Array{T, 2}
+    # Gas-phase metallicities:
+    ZC::Array{T, 2}        # Carbon gas metallicity 
+    ZSil::Array{T, 2}      # Si gas metallicity 
+    Zgasrest::Array{T, 2}  # Rest of gas metallicity 
 
-    # Setting for whether to model hydrong + helium + deuterium, or pure 
+    # Sobolev-like density length scale ρ / ∇ρ:
+    Lsob::Array{T, 2}
+
+    # Setting for whether to model hydrogen + helium + deuterium, or pure 
     # hydrogen gas (useful for idealized tests):
     HydrogenAndHelium::Bool
 
@@ -338,85 +337,112 @@ end
 """ A struct for storing the dust properties. The dust is advected and experiences 
     radiation pressure, drag, and gravity, but can also change as a result of 
     dust destruction and dust growth. This struct also stores dust 
-    optical properties (opacities etc.) for all bands. """
+    optical properties (opacities etc.) for all bands & dust types. """
 mutable struct DustState{ITP_P, ITP_R}
 
     # Dust growth/destruction setting (on if true, off if false):
     DustGrowthDestruction::Bool
 
-    # Dust temperature for every cell:
-    Td::Array{Float64, 2}
+    # Dust temperature for every cell (silicates, graphite, PAH):
+    Td_Sil::Array{Float64, 2}
+    Td_C::Array{Float64, 2}
+    Td_PAH::Array{Float64, 2}
 
-    # Grain charges (silicates & graphite):
-    Zgr_sil::Array{Float64, 2}
+    # Radiation temperature for the IR field, which determines e.g. the 
+    # Rosseland-mean opacity:
+    Trad::Array{Float64, 2}
+
+    # Grain charges (silicates, graphite, PAH):
+    Zgr_Sil::Array{Float64, 2}
     Zgr_C::Array{Float64, 2}
+    Zgr_PAH::Array{Float64, 2}
 
-    # Band absorption opacities (cm² g⁻¹ of dust):
-    κd_abs_opt::Float64
-    κd_abs_FUV::Float64
-    κd_abs_LW::Float64
-    κd_abs_EUV1::Float64
-    κd_abs_EUV2::Float64
-    κd_abs_EUV3::Float64
-    κd_abs_Lyα::Float64
+    # Band absorption opacities for silicate grains (cm² g⁻¹ of dust in bin):
+    κd_abs_opt_Sil::Float64
+    κd_abs_FUV_Sil::Float64
+    κd_abs_LW_Sil::Float64
+    κd_abs_EUV1_Sil::Float64
+    κd_abs_EUV2_Sil::Float64
+    κd_abs_EUV3_Sil::Float64
+    κd_abs_Lyα_Sil::Float64
 
-    # Band flux opacities (cm² g⁻¹ of dust):
-    κd_F_opt::Float64
-    κd_F_FUV::Float64
-    κd_F_LW::Float64
-    κd_F_EUV1::Float64
-    κd_F_EUV2::Float64
-    κd_F_EUV3::Float64
-    κd_F_Lyα::Float64
+    # Band absorption opacities for graphite grains (cm² g⁻¹ of dust in bin):
+    κd_abs_opt_C::Float64
+    κd_abs_FUV_C::Float64
+    κd_abs_LW_C::Float64
+    κd_abs_EUV1_C::Float64
+    κd_abs_EUV2_C::Float64
+    κd_abs_EUV3_C::Float64
+    κd_abs_Lyα_C::Float64
 
-    # Band albedos:
-    ωd_opt::Float64
-    ωd_FUV::Float64
-    ωd_LW::Float64
-    ωd_EUV1::Float64
-    ωd_EUV2::Float64
-    ωd_EUV3::Float64
-    ωd_Lyα::Float64
+    # Band absorption opacities for PAH grains (cm² g⁻¹ of dust in bin):
+    κd_abs_opt_PAH::Float64
+    κd_abs_FUV_PAH::Float64
+    κd_abs_LW_PAH::Float64
+    κd_abs_EUV1_PAH::Float64
+    κd_abs_EUV2_PAH::Float64
+    κd_abs_EUV3_PAH::Float64
+    κd_abs_Lyα_PAH::Float64
 
-    # Band scattering asymmetry:
-    gd_opt::Float64
-    gd_FUV::Float64
-    gd_LW::Float64
-    gd_EUV1::Float64
-    gd_EUV2::Float64
-    gd_EUV3::Float64
-    gd_Lyα::Float64
+    # Band flux opacities for silicate grains (cm² g⁻¹ of dust in bin):
+    κd_F_opt_Sil::Float64
+    κd_F_FUV_Sil::Float64
+    κd_F_LW_Sil::Float64
+    κd_F_EUV1_Sil::Float64
+    κd_F_EUV2_Sil::Float64
+    κd_F_EUV3_Sil::Float64
+    κd_F_Lyα_Sil::Float64
+
+    # Band flux opacities for graphite grains (cm² g⁻¹ of dust in bin):
+    κd_F_opt_C::Float64
+    κd_F_FUV_C::Float64
+    κd_F_LW_C::Float64
+    κd_F_EUV1_C::Float64
+    κd_F_EUV2_C::Float64
+    κd_F_EUV3_C::Float64
+    κd_F_Lyα_C::Float64
+
+    # Band flux opacities for PAH grains (cm² g⁻¹ of dust in bin):
+    κd_F_opt_PAH::Float64
+    κd_F_FUV_PAH::Float64
+    κd_F_LW_PAH::Float64
+    κd_F_EUV1_PAH::Float64
+    κd_F_EUV2_PAH::Float64
+    κd_F_EUV3_PAH::Float64
+    κd_F_Lyα_PAH::Float64
 
     # --- IR mean opacity interpolations ---
     # Store log₁₀(κ) vs. log₁₀(T) interpolations:
-    logκP_itp::ITP_P
-    logκR_itp::ITP_R
+    logκP_Sil_itp::ITP_P; logκP_C_itp::ITP_P; logκP_PAH_itp::ITP_P
+    logκR_Sil_itp::ITP_R; logκR_C_itp::ITP_R; logκR_PAH_itp::ITP_R
 end
 
 
 """ A struct for holding main hydro arrays, e.g. gas densities 
     and velocities. """
 mutable struct HydrodynamicsState{T<:AbstractFloat}
+    # Total number of dust species/bins (default will be 3, 
+    # for silicates, graphite, and PAH grains):
+    N_dust::Int
+
     # Updated hydro state variables:
     ρ_new::Array{T, 2} 
     ρu_X_new::Array{T, 2} 
     ρu_Y_new::Array{T, 2}
     E_new::Array{T, 2}
+    e_dual_new::Array{T, 2}
     # "Old" hydro state variables:
     ρ::Array{T, 2}
     ρu_X::Array{T, 2}
     ρu_Y::Array{T, 2}     
     E::Array{T, 2}
-    # Arrays for storing old hydro state, for use in the gravity solver:
-    ρ0::Array{T, 2}
-    ρu_X0::Array{T, 2}    
-    ρu_Y0::Array{T, 2}
-    E0::Array{T, 2}
+    e_dual::Array{T, 2}
     # Arrays for storing pre-update state in the RK time integration:
     ρ_stage::Array{T, 2}
     ρu_X_stage::Array{T, 2}    
     ρu_Y_stage::Array{T, 2}
     E_stage::Array{T, 2}
+    e_dual_stage::Array{T, 2}
     # Cell-averaged gas velocities & adiabatic indices:
     γad::Array{T, 2}
     u_X::Array{T, 2}
@@ -430,11 +456,14 @@ mutable struct HydrodynamicsState{T<:AbstractFloat}
     u_Y_R_X::Array{T, 2} 
     P_L_X::Array{T, 2}
     P_R_X::Array{T, 2}
+    e_dual_L_X::Array{T, 2} 
+    e_dual_R_X::Array{T, 2}
     # Interface X-fluxes:
     F_ρ_X::Array{T, 2}
     F_ρu_X_X::Array{T, 2}
     F_ρu_Y_X::Array{T, 2}
     F_E_X::Array{T, 2}
+    F_e_dual_X::Array{T, 2}
     # Reconstructed Y-interface primitive variables:
     ρ_L_Y::Array{T, 2} 
     ρ_R_Y::Array{T, 2} 
@@ -444,11 +473,14 @@ mutable struct HydrodynamicsState{T<:AbstractFloat}
     u_X_R_Y::Array{T, 2} 
     P_L_Y::Array{T, 2} 
     P_R_Y::Array{T, 2}
+    e_dual_L_Y::Array{T, 2} 
+    e_dual_R_Y::Array{T, 2}
     # Interface Y-fluxes:
     F_ρ_Y::Array{T, 2} 
     F_ρu_X_Y::Array{T, 2} 
     F_ρu_Y_Y::Array{T, 2} 
     F_E_Y::Array{T, 2}
+    F_e_dual_Y::Array{T, 2}
     # Contact velocities:
     u_X_star_X::Array{T, 2}
     u_Y_star_Y::Array{T, 2}
@@ -467,6 +499,7 @@ mutable struct HydrodynamicsState{T<:AbstractFloat}
     u_Xg_old::Array{T, 2} 
     u_Yg_old::Array{T, 2} 
     Pg_old::Array{T, 2}
+    e_dualg_old::Array{T, 2}
     # Cell-centered primitives:
     ρc::Array{T, 2} 
     ρu_Xc::Array{T, 2} 
@@ -483,60 +516,57 @@ mutable struct HydrodynamicsState{T<:AbstractFloat}
     BC_Y_left::Symbol
     BC_Y_right::Symbol
 
-    # All dust arrays:
-    ρd_new::Array{T, 2} 
-    ρdud_X_new::Array{T, 2} 
-    ρdud_Y_new::Array{T, 2} 
-    ρd::Array{T, 2} 
-    ρdud_X::Array{T, 2} 
-    ρdud_Y::Array{T, 2} 
-    ρd0::Array{T, 2} 
-    ρdud_X0::Array{T, 2} 
-    ρdud_Y0::Array{T, 2} 
-    ρd_stage::Array{T, 2} 
-    ρdud_X_stage::Array{T, 2} 
-    ρdud_Y_stage::Array{T, 2}
-    ud_X::Array{T, 2} 
-    ud_Y::Array{T, 2} 
-    ρd_L_X::Array{T, 2} 
-    ρd_R_X::Array{T, 2} 
-    ud_X_L_X::Array{T, 2} 
-    ud_X_R_X::Array{T, 2} 
-    ud_Y_L_X::Array{T, 2} 
-    ud_Y_R_X::Array{T, 2}
-    F_ρd_X::Array{T, 2} 
-    F_ρdud_X_X::Array{T, 2} 
-    F_ρdud_Y_X::Array{T, 2}
-    ρd_L_Y::Array{T, 2} 
-    ρd_R_Y::Array{T, 2} 
-    ud_Y_L_Y::Array{T, 2} 
-    ud_Y_R_Y::Array{T, 2} 
-    ud_X_L_Y::Array{T, 2} 
-    ud_X_R_Y::Array{T, 2} 
-    F_ρd_Y::Array{T, 2} 
-    F_ρdud_X_Y::Array{T, 2} 
-    F_ρdud_Y_Y::Array{T, 2} 
-    ρdg_old::Array{T, 2} 
-    ud_Xg_old::Array{T, 2} 
-    ud_Yg_old::Array{T, 2}
-    ρdc::Array{T, 2}
-    ρdud_Xc::Array{T, 2} 
-    ρdud_Yc::Array{T, 2} 
-    ud_Xc::Array{T, 2} 
-    ud_Yc::Array{T, 2}
+    # All dust arrays, of the form ~ (N_dust, N_X, N_Y):
+    ρd_new::Array{T, 3} 
+    ρdud_X_new::Array{T, 3} 
+    ρdud_Y_new::Array{T, 3} 
+    ρd::Array{T, 3} 
+    ρdud_X::Array{T, 3} 
+    ρdud_Y::Array{T, 3} 
+    ρd_stage::Array{T, 3} 
+    ρdud_X_stage::Array{T, 3} 
+    ρdud_Y_stage::Array{T, 3}
+    ud_X::Array{T, 3} 
+    ud_Y::Array{T, 3} 
+    ρd_L_X::Array{T, 3} 
+    ρd_R_X::Array{T, 3} 
+    ud_X_L_X::Array{T, 3} 
+    ud_X_R_X::Array{T, 3} 
+    ud_Y_L_X::Array{T, 3} 
+    ud_Y_R_X::Array{T, 3}
+    F_ρd_X::Array{T, 3} 
+    F_ρdud_X_X::Array{T, 3} 
+    F_ρdud_Y_X::Array{T, 3}
+    ρd_L_Y::Array{T, 3} 
+    ρd_R_Y::Array{T, 3} 
+    ud_Y_L_Y::Array{T, 3} 
+    ud_Y_R_Y::Array{T, 3} 
+    ud_X_L_Y::Array{T, 3} 
+    ud_X_R_Y::Array{T, 3} 
+    F_ρd_Y::Array{T, 3} 
+    F_ρdud_X_Y::Array{T, 3} 
+    F_ρdud_Y_Y::Array{T, 3} 
+    ρdg_old::Array{T, 3} 
+    ud_Xg_old::Array{T, 3} 
+    ud_Yg_old::Array{T, 3}
+    ρdc::Array{T, 3}
+    ρdud_Xc::Array{T, 3} 
+    ρdud_Yc::Array{T, 3} 
+    ud_Xc::Array{T, 3} 
+    ud_Yc::Array{T, 3}
 
-    # Arrays for advecting passive scalars (e.g. ρx_HII, ρZ, etc):
-    Scalars::Array{Float64, 3}         # Size (N_X, N_Y, N_Scalars)
-    Scalars_old::Array{Float64, 3}     # Size (N_X, N_Y, N_Scalars)
-    Scalars_stage::Array{Float64, 3}   # Size (N_X, N_Y, N_Scalars)
-    ρ_save::Array{Float64, 2}          # Size (N_X, N_Y), for storing the gas density in RK2 updates of scalar advection 
-    
-    # Strang split order:
-    rfirst_Hydro::Bool
+    # Arrays for advecting passive scalars (e.g. ρx_HII, ρZC, etc):
+    Scalars::Array{T, 3}         # Size (N_X, N_Y, N_Scalars)
+    Scalars_old::Array{T, 3}     # Size (N_X, N_Y, N_Scalars)
+    Scalars_stage::Array{T, 3}   # Size (N_X, N_Y, N_Scalars)
+    ρ_save::Array{T, 2}          # Size (N_X, N_Y), for storing the gas density in RK2 updates of scalar advection 
+
+    # Total dust density:
+    ρdtot::Array{T, 2} 
 
     # Total gas & dust mass (g) in simulation volume:
     M_simvol::T
-    Md_simvol::T
+    Md_simvol::T  
 
     # Velocity dispersion diagnostics (cm s⁻¹):
     σ_X::T 
@@ -710,7 +740,7 @@ mutable struct GravityState{T<:AbstractFloat}
     ρ_bg::Array{T, 2}        # Static non-gas gravitating mass density, e.g. from star & dark matter 
     f_gravity_r::Array{T, 2}
     f_gravity_Z::Array{T, 2}
-    P::Array{T, 2}           # Legendre polynomials (for BCs), one array for each tread (to avoid race conditions)
+    P::Array{T, 2}           # Legendre polynomials (for BCs), one array for each thread (to avoid race conditions)
     Q::Array{T, 1}           # Multipole moments (for BCs)
     ℓmax::Int                # Maximum ℓ to use in Legendre polynomials
 end

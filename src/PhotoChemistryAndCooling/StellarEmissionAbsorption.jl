@@ -32,7 +32,7 @@ using DelimitedFiles          # For reading data from files
 export dNdt_opt, L_opt, dNdt_FUV, L_FUV, dNdt_LW, L_LW,
        dNdt_EUV1, L_EUV1, dNdt_EUV2, L_EUV2, dNdt_EUV3, L_EUV3, L_bol,
        HeatingRate_LW, HeatingRate_EUV1, HeatingRate_EUV2, HeatingRate_EUV3, 
-       HeatingRate_PhotoElectric, HeatingRate_Compton,
+       HeatingRate_Compton,
        IonRate_HI, IonRate_H2, IonRate_HeI, IonRate_HeII, IonRate_OI, IonRate_CI,
        PhotoDissRate_H2, PhotoDetachRate_Hminus, PhotoDissRate_HD, PhotoDissRate_CO,
        PhotoDissRate_OHₓ, PhotoDissRate_CHₓ, StromGrenRadius
@@ -584,16 +584,16 @@ const Crad::Float64 = 2e-7  # Typical radiative de-excitation rate for H₂ (see
                                     T::Float64 
                                   )
     # Heating from photodissociation of H₂:
-    HeatingRate_PhotoDissH2 = ( Four_π * J_LW / E_LW) * nH2 * σH2_LW_diss * hH2_LW 
+    HeatingRate_PhotoDissH2 = @fastmath ( Four_π * J_LW * inv_E_LW) * nH2 * σH2_LW_diss * hH2_LW 
 
     # Average energy injected per UV pumping event (i.e. no photodissociation):
     T          = clamp( T, 10.0, 1e5 )
-    Cdex       = 1e-12 * sqrt(T) * ( 1.4 * exp( - 18100.0 / (T + 1200.0)) * nH2  
-                                 +   exp(- 1000.0/T) * nHI )
-    E_H2_pump  = 2 * eV * Cdex / (Cdex + Crad)
+    Cdex       = @fastmath 1e-12 * sqrt(T) * ( 1.4 * exp( - 18100.0 / (T + 1200.0)) * nH2  
+                                             + exp(- 1000.0/T) * nHI )
+    E_H2_pump  = @fastmath 2 * eV * Cdex / (Cdex + Crad)
 
     # Heating from vibrational excitation (but not photodissociation) of H₂:
-    HeatingRate_PumpH2  = ( Four_π * J_LW * inv_E_LW) * nH2 * σH2_LW_pump * E_H2_pump
+    HeatingRate_PumpH2  = @fastmath ( Four_π * J_LW * inv_E_LW) * nH2 * σH2_LW_pump * E_H2_pump
 
     return HeatingRate_PhotoDissH2 + HeatingRate_PumpH2
 end
@@ -606,7 +606,7 @@ end
                                       nH2::Float64 
                                   )
 
-    ( Four_π * J_EUV1 * inv_E_EUV1) * ( nHI * σHI_EUV1 * hHI_EUV1  +  nH2 * σH2_EUV1 * hH2_EUV1 )
+    @fastmath ( Four_π * J_EUV1 * inv_E_EUV1) * ( nHI * σHI_EUV1 * hHI_EUV1  +  nH2 * σH2_EUV1 * hH2_EUV1 )
 end
 
 
@@ -618,7 +618,7 @@ end
                                      nHeI::Float64
                                   )
 
-    ( Four_π * J_EUV2 * inv_E_EUV2) * ( 
+    @fastmath ( Four_π * J_EUV2 * inv_E_EUV2) * ( 
     nHI * σHI_EUV2 * hHI_EUV2  +  nH2 * σH2_EUV2 * hH2_EUV2  +  nHeI * σHeI_EUV2 * hHeI_EUV2 )
 end
 
@@ -632,54 +632,13 @@ end
                                     nHeII::Float64
                                   )
 
-    ( Four_π * J_EUV3 * inv_E_EUV3) * ( 
+    @fastmath ( Four_π * J_EUV3 * inv_E_EUV3) * ( 
         nHI * σHI_EUV3 * hHI_EUV3  +  nH2 * σH2_EUV3 * hH2_EUV3  
     +  nHeI * σHeI_EUV3 * hHeI_EUV3  + nHeII * σHeII_EUV3 * hHeII_EUV3 )
 end
 
 
-const C0_pe::Float64 = 1.84;    const C1_pe::Float64    = 3.81
-const C2_pe::Float64 = 0.08348; const C3_pe::Float64    = 0.00391
-const C4_pe::Float64 = 0.089;   const C5_pe::Float64    = 0.328
-const C6_pe::Float64 = 0.778;   const inv_DGpe::Float64 = 130.0   # Inverse Solar dust-to-gas ratio in the R_V = 5.5 model 
-
-""" Photoelectric heating rate (erg cm⁻³ s⁻¹) from absorptions of stellar photons 
-    in the FUV & LW bands, as well as Lyα photons, by dust. Uses the fit for the 
-    R_V = 5.5, B, bC = 3 × 10⁻⁵ model of Weingartner & Draine (2001a). Uses the fit 
-    in Eq. (44) of Weingartner & Draine (2001b), with constants from their table 2.
-    
-    References: Weingartner & Draine (2001a) 'PDust Grain-Size Distributions and Extinction 
-                in the Milky Way, Large Magellanic Cloud, and Small Magellanic Cloud', ApJ,
-                548, 1, 296-309 
-
-                Weingartner & Draine (2001b) 'Photoelectric Emission from Interstellar Dust: 
-                Grain Charging and Gas Heating', ApJS, 134, 2, 263-281
-    
-    """
-@inline function HeatingRate_PhotoElectric( J_FUV::Float64,
-                                             J_LW::Float64,
-                                               DG::Float64,  # Dust-to-gas ratio
-                                               nH::Float64,
-                                               ne::Float64,
-                                                T::Float64,
-                                            e_Lyα::Float64 = 0.0
-                                              )
-
-    T     =  clamp( T, 10.0, 1e4 )   # Range where fit is valid
-    ne    =  max( ne, 1e-30 )        # Avoid division by zero 
-
-    # Compute the charging parameter & G0:
-    F_eff =  Four_π * ( J_FUV + J_LW )  +  c * e_Lyα
-    G0    =  F_eff / F_Habing    # Flux normalized by Habing value (see ConstantsAndFunctions.jl)
-    ψ_FUV =  G0 * sqrt(T) / ne 
-
-    # The heating rate:
-    Γpe   =  1e-26 * (DG * inv_DGpe) * G0 * nH * ( C0_pe + C1_pe * (T^C4_pe) ) / (
-             1 + C2_pe * (ψ_FUV^C5_pe) * ( 1 + C3_pe * (ψ_FUV^C6_pe) ) )
-
-    return Γpe
-end
-
+const ConstantComptonHeating::Float64 = σT / (me * c)  # Convenient constant 
 
 """ Compton heating/cooling rate (erg cm⁻³ s⁻¹) from stellar 
     radiation backgrounds (see e.g. Ploeckinger et al. 2025):
@@ -697,19 +656,19 @@ end
                                       e_Lyα::Float64 = 0.0
                                        )
     # Convenient variable:
-    Four_kBT             = 4 * kB * T
+    Four_kBT             = @fastmath 4 * kB * T
 
     # Heating/cooling rate, considering the stellar intensity in all bands: 
-    HeatingRate_Compton  = Four_π * ne * (σT / (me * c^2)) * (  J_opt  * (E_opt - Four_kBT)
-                                                              + J_FUV  * (E_FUV - Four_kBT)
-                                                              + J_LW   * (E_LW - Four_kBT)
-                                                              + J_EUV1 * (E_EUV1 - Four_kBT)
-                                                              + J_EUV2 * (E_EUV2 - Four_kBT)
-                                                              + J_EUV3 * (E_EUV3 - Four_kBT) )
+    HeatingRate_Compton  = @fastmath Four_π_over_c * ne * ConstantComptonHeating * (  J_opt  * (E_opt  - Four_kBT)
+                                                                                    + J_FUV  * (E_FUV  - Four_kBT)
+                                                                                    + J_LW   * (E_LW   - Four_kBT)
+                                                                                    + J_EUV1 * (E_EUV1 - Four_kBT)
+                                                                                    + J_EUV2 * (E_EUV2 - Four_kBT)
+                                                                                    + J_EUV3 * (E_EUV3 - Four_kBT) )
 
     # Add contribution from Lyα photons:
     if e_Lyα > 0.0
-        HeatingRate_Compton += ne * (σT / (me * c)) * e_Lyα * (ELyα - Four_kBT)
+        HeatingRate_Compton += @fastmath ne * ConstantComptonHeating * e_Lyα * (ELyα - Four_kBT)
     end
 
     return HeatingRate_Compton
@@ -727,59 +686,68 @@ end
 """ H₂ photodissociation rate (s⁻¹) 
     from absorptions of stellar Lyman-Werner photons. """
 @inline function PhotoDissRate_H2( J_LW::Float64 )
-    Four_π * J_LW * σH2_LW_diss * inv_E_LW
+    @fastmath Four_π * J_LW * σH2_LW_diss * inv_E_LW
 end
 
 
 """ CO photodissociation rate (s⁻¹) 
     from absorptions of stellar Lyman-Werner photons. """
 @inline function PhotoDissRate_CO( J_LW::Float64 )
-    Four_π * J_LW * σCO_LW * inv_E_LW
+    @fastmath Four_π * J_LW * σCO_LW * inv_E_LW
 end
 
 
 """ OHₓ (represented by OH) photodissociation rate (s⁻¹) 
-    from absorptions of stellar photons. """
+    from absorptions of stellar photons & Lyα photons. """
 @inline function PhotoDissRate_OHₓ( J_FUV::Float64, 
-                                     J_LW::Float64
+                                     J_LW::Float64,
+                                    e_Lyα::Float64 = 0.0
                                       )
-    Four_π * ( J_FUV * σOH_FUV * inv_E_FUV  +  J_LW * σOH_LW * inv_E_LW )
+    @fastmath (  Four_π * ( J_FUV * σOH_FUV * inv_E_FUV  +  J_LW * σOH_LW * inv_E_LW )
+
+    +  c * e_Lyα * σOH_Lyα * inv_ELyα  )
 end
 
 
 """ CHₓ (represented by CH) photodissociation rate (s⁻¹) 
-    from absorptions of stellar photons. """
+    from absorptions of stellar photons & Lyα photons. """
 @inline function PhotoDissRate_CHₓ( J_opt::Float64,
                                     J_FUV::Float64, 
-                                     J_LW::Float64
+                                     J_LW::Float64,
+                                    e_Lyα::Float64 = 0.0
                                     )
-    Four_π * ( J_opt * σCH_opt * inv_E_opt +  J_FUV * σCH_FUV * inv_E_FUV  +  J_LW * σCH_LW * inv_E_LW )
+    @fastmath (  Four_π * ( J_opt * σCH_opt * inv_E_opt +  J_FUV * σCH_FUV * inv_E_FUV  +  J_LW * σCH_LW * inv_E_LW )
+    
+    +  c * e_Lyα * σCH_Lyα * inv_ELyα  )
 end
 
 
 """ H⁻ photodetachment rate (s⁻¹) 
-    from absorptions of stellar photons. """
+    from absorptions of stellar photons & Lyα photons. """
 @inline function PhotoDetachRate_Hminus( J_opt::Float64,
                                          J_FUV::Float64,
                                           J_LW::Float64,
                                         J_EUV1::Float64,
                                         J_EUV2::Float64,
-                                        J_EUV3::Float64
+                                        J_EUV3::Float64,
+                                         e_Lyα::Float64 = 0.0
                                        )
 
-    Four_π * ( J_opt  * σHminus_opt  * inv_E_opt  
-             + J_FUV  * σHminus_FUV  * inv_E_FUV  
-             + J_LW   * σHminus_LW   * inv_E_LW
-             + J_EUV1 * σHminus_EUV1 * inv_E_EUV1 
-             + J_EUV2 * σHminus_EUV2 * inv_E_EUV2  
-             + J_EUV3 * σHminus_EUV3 * inv_E_EUV3 )
+    @fastmath (  Four_π * ( J_opt  * σHminus_opt  * inv_E_opt  
+                          + J_FUV  * σHminus_FUV  * inv_E_FUV  
+                          + J_LW   * σHminus_LW   * inv_E_LW
+                          + J_EUV1 * σHminus_EUV1 * inv_E_EUV1 
+                          + J_EUV2 * σHminus_EUV2 * inv_E_EUV2  
+                          + J_EUV3 * σHminus_EUV3 * inv_E_EUV3 )
+
+                +  c * e_Lyα * σHminus_Lyα * inv_ELyα  )
 end
 
 
 """ HD photodissociation rate (s⁻¹) 
     from absorptions of stellar Lyman-Werner photons. """
 @inline function PhotoDissRate_HD( J_LW::Float64 )
-    Four_π * J_LW * σHD_LW * inv_E_LW
+    @fastmath Four_π * J_LW * σHD_LW * inv_E_LW
 end
 
 
@@ -789,9 +757,9 @@ end
                              J_EUV2::Float64,
                              J_EUV3::Float64
                               )
-    Four_π * ( J_EUV1 * σH2_EUV1 * inv_E_EUV1 
-             + J_EUV2 * σH2_EUV2 * inv_E_EUV2 
-             + J_EUV3 * σH2_EUV3 * inv_E_EUV3  )
+    @fastmath Four_π * ( J_EUV1 * σH2_EUV1 * inv_E_EUV1 
+                       + J_EUV2 * σH2_EUV2 * inv_E_EUV2 
+                       + J_EUV3 * σH2_EUV3 * inv_E_EUV3  )
 end
 
 
@@ -801,9 +769,9 @@ end
                              J_EUV2::Float64,
                              J_EUV3::Float64
                              )
-    Four_π * ( J_EUV1 * σHI_EUV1 * inv_E_EUV1 
-             + J_EUV2 * σHI_EUV2 * inv_E_EUV2 
-             + J_EUV3 * σHI_EUV3 * inv_E_EUV3  )
+    @fastmath Four_π * ( J_EUV1 * σHI_EUV1 * inv_E_EUV1 
+                       + J_EUV2 * σHI_EUV2 * inv_E_EUV2 
+                       + J_EUV3 * σHI_EUV3 * inv_E_EUV3  )
 end
 
 
@@ -812,8 +780,8 @@ end
 @inline function IonRate_HeI( J_EUV2::Float64,
                               J_EUV3::Float64
                              )
-    Four_π * ( J_EUV2 * σHeI_EUV2 * inv_E_EUV2 
-             + J_EUV3 * σHeI_EUV3 * inv_E_EUV3  )
+    @fastmath Four_π * ( J_EUV2 * σHeI_EUV2 * inv_E_EUV2 
+                       + J_EUV3 * σHeI_EUV3 * inv_E_EUV3  )
 end
 
 
@@ -830,9 +798,9 @@ end
                              J_EUV2::Float64,
                              J_EUV3::Float64
                              )
-    Four_π * ( J_EUV1 * σOI_EUV1 * inv_E_EUV1 
-             + J_EUV2 * σOI_EUV2 * inv_E_EUV2 
-             + J_EUV3 * σOI_EUV3 * inv_E_EUV3  )
+    @fastmath Four_π * ( J_EUV1 * σOI_EUV1 * inv_E_EUV1 
+                       + J_EUV2 * σOI_EUV2 * inv_E_EUV2 
+                       + J_EUV3 * σOI_EUV3 * inv_E_EUV3  )
 end
 
 
@@ -843,10 +811,10 @@ end
                            J_EUV2::Float64,
                            J_EUV3::Float64
                              )
-    Four_π * ( J_LW   * σCI_LW   * inv_E_LW
-             + J_EUV1 * σCI_EUV1 * inv_E_EUV1 
-             + J_EUV2 * σCI_EUV2 * inv_E_EUV2 
-             + J_EUV3 * σCI_EUV3 * inv_E_EUV3  )
+    @fastmath Four_π * ( J_LW   * σCI_LW   * inv_E_LW
+                       + J_EUV1 * σCI_EUV1 * inv_E_EUV1 
+                       + J_EUV2 * σCI_EUV2 * inv_E_EUV2 
+                       + J_EUV3 * σCI_EUV3 * inv_E_EUV3  )
 end
 
 
@@ -862,5 +830,3 @@ end
     
     return ( 3 * dNdt_LyC / (Four_π * krecHII(T, CaseB) * (nH^2)) )^(1/3)
 end
-
-#println(StromGrenRadius(35.0, 1e4, 2.4466e4, true, 1.0)/pc)

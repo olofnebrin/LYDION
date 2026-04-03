@@ -109,6 +109,7 @@ end
 
 const C_ref::Float64      = 20.0
 const Wref_floor::Float64 = 1e-40
+const ϵ_WENO3tol::Float64 = 0.4    # Sets maximum WENO3 deviation from local stencil max/min before fallback to PLM
 
 """ Compute left interface value W_L at i-1/2, and 
     right interface value W_R, also at i-1/2. """
@@ -139,12 +140,12 @@ function Get_QL_and_QR( W_im2::Float64,      # We need W[i-2] and W[i-1] for the
         # Slopes in cell i-1 (for W_L):
         sL_im1 = (W_im1 - W_im2) / (XCoM_im1 - XCoM_im2)
         sR_im1 = (W_i   - W_im1) / (XCoM_i   - XCoM_im1)
-        s_im1  = MinMod( sL_im1, sR_im1 )
+        s_im1  =  MinMod( sR_im1, sL_im1 ) 
 
         # Slopes in cell i (for W_R):
         sL_i   = (W_i   - W_im1) / (XCoM_i   - XCoM_im1)
         sR_i   = (W_ip1 - W_i  ) / (XCoM_ip1 - XCoM_i)
-        s_i    = MinMod( sL_i, sR_i )
+        s_i    =  MinMod( sR_i, sL_i ) 
 
         # Get left & right states: 
         W_L    = W_im1  +  s_im1 * ( X_i - XCoM_im1 )
@@ -157,7 +158,7 @@ function Get_QL_and_QR( W_im2::Float64,      # We need W[i-2] and W[i-1] for the
         # Save chosen reconstruction order:
         ReconstructionOrder = Int8(2)
 
-        if (!EnsurePositivity && (!isfinite(W_L) || !isfinite(W_R))) || MaxReconstructionOrder == Int8(1)
+        if (!EnsurePositivity && (!isfinite(W_L) || !isfinite(W_R))) || MaxReconstructionOrder == Int8(1) 
           # If we still get undefined values, fall back to a first-order method (i.e. no reconstruction):
           W_L = W_im1 
           W_R = W_i 
@@ -243,18 +244,31 @@ function Get_QL_and_QR( W_im2::Float64,      # We need W[i-2] and W[i-1] for the
     ΔW_L = abs( W_L - W_im1 )
     ΔW_R = abs( W_R - W_i )
 
+    # Compute min and max of local stencils:
+    W_L_max = max( W_im2, W_im1, W_i )
+    W_R_max = max( W_im1, W_i, W_ip1 )
+    W_L_min = min( W_im2, W_im1, W_i )
+    W_R_min = min( W_im1, W_i, W_ip1 )
+
+    # Allow for moderate deviations from the min and max values, but otherwise 
+    # fall back to PLM:
+    WENO3_overshoot = ( W_L < W_L_min  -  ϵ_WENO3tol * abs(W_L_min) || 
+                        W_L > W_L_max  +  ϵ_WENO3tol * abs(W_L_max) ||
+                        W_R < W_R_min  -  ϵ_WENO3tol * abs(W_R_min) || 
+                        W_R > W_R_max  +  ϵ_WENO3tol * abs(W_R_max) )
+
     # For variables that need not be positive, we still check that the interface 
     # values are finite, and if not, fall back to PLM:
-    if !EnsurePositivity && ( !isfinite(W_L) || !isfinite(W_R) )
+    if !EnsurePositivity && ( WENO3_overshoot || !isfinite(W_L) || !isfinite(W_R) )
         # Slopes in cell i-1 (for W_L):
         sL_im1 = (W_im1 - W_im2) / (XCoM_im1 - XCoM_im2)
         sR_im1 = (W_i   - W_im1) / (XCoM_i   - XCoM_im1)
-        s_im1  = MinMod( sL_im1, sR_im1 )
+        s_im1  =  MinMod( sR_im1, sL_im1 ) 
 
         # Slopes in cell i (for W_R):
         sL_i   = (W_i   - W_im1) / (XCoM_i   - XCoM_im1)
         sR_i   = (W_ip1 - W_i  ) / (XCoM_ip1 - XCoM_i)
-        s_i    = MinMod( sL_i, sR_i )
+        s_i    =  MinMod( sR_i, sL_i ) 
 
         # Get left & right states: 
         W_L    = W_im1  +  s_im1 * ( X_i - XCoM_im1 )
@@ -279,16 +293,16 @@ function Get_QL_and_QR( W_im2::Float64,      # We need W[i-2] and W[i-1] for the
     end
 
     # For variables that should be finite & positive, we add additional constraints: 
-    if EnsurePositivity && ( !isfinite(W_L) || !isfinite(W_R) || W_L ≤ 0.0 || W_R ≤ 0.0 || ΔW_L > 0.9 * W_im1 || ΔW_R > 0.9 * W_i )
+    if EnsurePositivity && ( WENO3_overshoot || !isfinite(W_L) || !isfinite(W_R) || W_L ≤ 0.0 || W_R ≤ 0.0 || ΔW_L > 0.9 * W_im1 || ΔW_R > 0.9 * W_i )
         # Slopes in cell i-1 (for W_L):
         sL_im1 = (W_im1 - W_im2) / (XCoM_im1 - XCoM_im2)
         sR_im1 = (W_i   - W_im1) / (XCoM_i   - XCoM_im1)
-        s_im1  = MinMod( sL_im1, sR_im1 )
+        s_im1  =  MinMod( sR_im1, sL_im1 ) 
 
         # Slopes in cell i (for W_R):
         sL_i   = (W_i   - W_im1) / (XCoM_i   - XCoM_im1)
         sR_i   = (W_ip1 - W_i  ) / (XCoM_ip1 - XCoM_i)
-        s_i    = MinMod( sL_i, sR_i )
+        s_i    =  MinMod( sR_i, sL_i )  
 
         # Get left & right states: 
         W_L    = W_im1  +  s_im1 * ( X_i - XCoM_im1 )

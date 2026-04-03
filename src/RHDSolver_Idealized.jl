@@ -31,6 +31,7 @@ include( "./DustGasCoupling.jl" )
 include( "PhotoChemistryAndCooling/InitializeChemistryStruct.jl" ) 
 include( "PhotoChemistryAndCooling/PhotoThermoChemistry.jl" )
 include( "PhotoChemistryAndCooling/StellarIR_Diagnostics.jl" )
+include( "./RHD_TimeStep.jl" )
 include( "./AdvectScalars.jl" )
 include( "./Turbulence.jl" )
 include( "./SaveHDF5Data_RHDTests.jl" )
@@ -59,34 +60,17 @@ function UpdateRHD!( Δt_Hydro::Float64,
 
     # Main geometry arrays:
     ΔV          = geometry.ΔV
-    inv_ΔV      = geometry.inv_ΔV
     A_r         = geometry.A_r
     A_Z         = geometry.A_Z
     inv_r_cell  = geometry.inv_r_cell
     r           = geometry.r 
-    rCoM        = geometry.rCoM
     Z           = geometry.Z
-    ZCoM        = geometry.ZCoM
-
-    # Weights for converting between cell center & cell-average values of 
-    # conservatives & primitives:
-    w_i_m1_r    = geometry.w_i_m1_r;     w_j_m1_Z     = geometry.w_j_m1_Z
-    w_i_0_r     = geometry.w_i_0_r;      w_j_0_Z      = geometry.w_j_0_Z
-    w_i_p1_r    = geometry.w_i_p1_r;     w_j_p1_Z     = geometry.w_j_p1_Z
-
-    q_i_m1_r    = geometry.q_i_m1_r;     q_j_m1_Z     = geometry.q_j_m1_Z
-    q_i_0_r     = geometry.q_i_0_r;      q_j_0_Z      = geometry.q_j_0_Z
-    q_i_p1_r    = geometry.q_i_p1_r;     q_j_p1_Z     = geometry.q_j_p1_Z
-
-    # WENO3 weights for interface reconstruction:
-    w_plus_i_p1 = geometry.w_plus_i_p1;  w_minus_i_p1 = geometry.w_minus_i_p1   
-    w_plus_j_p1 = geometry.w_plus_j_p1;  w_minus_j_p1 = geometry.w_minus_j_p1
 
     # Some hydro state arrays (cell-averaged):
     ρ           = hydrostate.ρ;        ρu_r        = hydrostate.ρu_X 
     ρu_Z        = hydrostate.ρu_Y;     E           = hydrostate.E
     u_r         = hydrostate.u_X;      u_Z         = hydrostate.u_Y 
-    P           = hydrostate.P;        e           = hydrostate.e 
+    P           = hydrostate.P;        e           = hydrostate.e_dual 
     T           = hydrostate.T;        γad         = hydrostate.γad 
 
     # r-direction interface velocities:
@@ -134,46 +118,35 @@ function UpdateRHD!( Δt_Hydro::Float64,
         PreparePassiveScalars!( hydrostate, chemstate )
 
         # Update hydro & dust variables & passive scalars by advection:
-        UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, inv_ΔV, A_r, A_Z,
-
-                      w_i_m1_r, w_i_0_r, w_i_p1_r, w_j_m1_Z, w_j_0_Z, w_j_p1_Z, 
-                      q_i_m1_r, q_i_0_r, q_i_p1_r, q_j_m1_Z, q_j_0_Z, q_j_p1_Z,  
-
-                      w_plus_i_p1, w_minus_i_p1,   
-                      w_plus_j_p1, w_minus_j_p1, 
-
-                      Val(:Cylindrical), inv_r_cell )  
+        UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, geometry )  
 
         # Update total mass in simulation volume (for diagnostic purposes):
-        UpdateTotalMass!( hydrostate, ΔV )
+        UpdateTotalMass!( hydrostate, geometry )
 
         # Recover abundance fractions from passive scalars (needed before sub-cycling):
         RecoverChemistryFromPassiveScalars!( hydrostate, chemstate )
     end
 
-    # Update primitives to reflect latest conservatives:
-    @threads for j in dN_Z 
+    @threads for j in dN_Z
         @inbounds @simd for i in dN_r
+            # Adiabatic index & mean molecular weight (needed to initialize temperature):
+            γad[i,j] = Getγad( chemstate.xHII[i,j],  chemstate.xH2[i,j], 
+                               chemstate.xHeII[i,j], chemstate.xHeIII[i,j] )
+
+            μ        = Getμ( chemstate.xHII[i,j],  chemstate.xH2[i,j], 
+                             chemstate.xHeII[i,j], chemstate.xHeIII[i,j] )
+
             # Recover primitives at geometric cell centers, from the 
             # conservative variables at the cell centers:
-            u_r[i,j], u_Z[i,j], P[i,j] = GetPrimitive( ρ[i,j], ρu_r[i,j], ρu_Z[i,j], E[i,j], γad[i,j] )
+            u_r[i,j], u_Z[i,j], P[i,j] = GetPrimitive( ρ[i,j], ρu_r[i,j], ρu_Z[i,j], E[i,j], e[i,j], γad[i,j] )
 
             # Ensure positive pressure:
             P[i,j] = max( P[i,j], P_floor )
+
+            # Get the latest temperature corresponding to e = e_dual to set the RSL for RT:
+            T[i,j] = e[i,j] * μ * (γad[i,j] - 1) * mH / ( ρ[i,j] * kB )
         end
     end
-    
-    # Initialize the internal energy density & adiabatic index (can change after gas fraction advection)
-    # for the thermochemistry sub-cycling: 
-    @threads for j in dN_Z 
-        @simd for i in dN_r
-            @inbounds begin 
-                γad[i,j] = Getγad( chemstate.xHII[i,j],  chemstate.xH2[i,j], 
-                                   chemstate.xHeII[i,j], chemstate.xHeIII[i,j] )
-                e[i,j]   = P[i,j] / ( γad[i,j] - 1 )
-            end
-        end
-    end 
 
     # Update the ∇u components, needed for the velocity terms in the RT:
     Update_∇u_RHD!( ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
@@ -195,8 +168,7 @@ function UpdateRHD!( Δt_Hydro::Float64,
     Reset_Δρu!( RT.Δρu_IR_r,        RT.Δρu_IR_Z )
 
     # Determine an updated reduced speed of light for the radiative transfer:
-    RT.c̃  = FindRSL_StellarRT( RT.c̃, u_r, u_Z, ud_r, ud_Z, P, ρ, γad )
-
+    RT.c̃  = FindRSL( RT.c̃, nothing, hydrostate, chemstate, duststate, geometry )
 
     t_RT  = 0.0 # Initialize the RT time 
     while t_RT < Δt_Hydro
@@ -212,7 +184,7 @@ function UpdateRHD!( Δt_Hydro::Float64,
                                              z, CoolingHeating,
                                              geometry,
                                              u_r_star_r, u_Z_star_Z, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r, 
-                                             nothing, false, 
+                                             nothing,  
                                              RadPressure )
 
         # Update time:
@@ -284,14 +256,15 @@ function UpdateRHD!( Δt_Hydro::Float64,
                 u_Z[i,j]  = ρu_Z[i,j] / ρ[i,j]
 
                 # Same for the dust:
-                ud_r[i,j], ud_Z[i,j] = GetDustVelocities( ρd[i,j], ρdud_r[i,j], ρdud_Z[i,j] )
+                ud_r[i,j], ud_Z[i,j] = GetDustVelocities( ρd[i,j], ρdud_r[i,j], ρdud_Z[i,j],
+                                                          ρ[i,j], u_r[i,j], u_Z[i,j] )
 
             end
         end # End of i-loop 
     end # End of j-loop 
 
     # Update gas velocity dispersions (useful diagnostic):
-    UpdateGasVelocityDispersion!( hydrostate, ΔV )
+    UpdateGasVelocityDispersion!( hydrostate, geometry )
 
     return nothing
 end
@@ -446,7 +419,7 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
     u_Z    = hydrostate.u_Y
     E      = hydrostate.E
     P      = hydrostate.P 
-    e      = hydrostate.e 
+    e      = hydrostate.e_dual
     T      = hydrostate.T
     γad    = hydrostate.γad
 
@@ -462,12 +435,15 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
 
     # Set up chemistry state struct, containing arrays for all species tracked,
     # e.g. xHII, xH2 etc. :
-    chemstate = InitializeChemistryArrays( N_r, N_Z, Zgas_Zsun, HydrogenAndHelium )
+    ZC₀       = fCarbon  * Zgas_Zsun₀ * Zsun 
+    ZSil₀     = fSilicon * Zgas_Zsun₀ * Zsun 
+    Zgasrest₀ = (1 - fCarbon - fSilicon) * Zgas_Zsun₀ * Zsun 
+    chemstate = InitializeChemistryArrays( N_r, N_Z, ZC₀, ZSil₀, Zgasrest₀, HydrogenAndHelium ) 
 
     # Cloud density properties:
-    ρcl  = max( Get_ρ_From_nH( nH₀, Zgas_Zsun, HydrogenAndHelium ),     10 * ρ_floor )  # Density within cloud 
-    ρext = max( Get_ρ_From_nH( nH_ext, Zgas_Zsun, HydrogenAndHelium ),  10 * ρ_floor )  # Density far outside the cloud
-    δr   = max( 2 * max( minimum(diff(r)), minimum(diff(Z)) ), 0.05 * Rcl )             # Determines fall-off in density outside cloud
+    ρcl  = max( Get_ρ_From_nH( nH₀, Zgas_Zsun₀, HydrogenAndHelium ),     10 * ρ_floor )  # Density within cloud 
+    ρext = max( Get_ρ_From_nH( nH_ext, Zgas_Zsun₀, HydrogenAndHelium ),  10 * ρ_floor )  # Density far outside the cloud
+    δr   = max( 2 * max( minimum(diff(r)), minimum(diff(Z)) ), 0.05 * Rcl )              # Determines fall-off in density outside cloud
 
     if ρcl < 1e3 * ρ_floor 
         @warn "The initial cloud density ρcl is only $(ρcl/ρ_floor) times the density floor. Consider making 
@@ -532,7 +508,7 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
                     P[i,j] = ρ[i,j] * kB * T[i,j] / ( Getμ(xHII₀, xH2₀, xHeII₀, xHeIII₀) * mH )
                 else
                     T[i,j] = T_ext
-                    P[i,j] = ρ[i,j] * kB * T[i,j] / ( Getμ(xHII₀, xH2₀, xHeII₀, xHeIII₀) * mH )
+                    P[i,j] = ρ[i,j] * kB * T[i,j] / ( Getμ(xHII_ext, xH2_ext, xHeII_ext, xHeIII_ext) * mH )
                 end
 
                 # Gas momentum density:
@@ -545,12 +521,22 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
                 # Energy density of gas, E = e + E_kin:
                 E[i,j]      = e[i,j]  +  0.5 * ρ[i,j] * (u_r[i,j]^2 + u_Z[i,j]^2)
 
-                # Dust density:
-                ρd[i,j]     = max( DG₀ * ρ[i,j], 10 * ρd_floor )
+                # Dust densities:
+                ρd[1,i,j]   = max( fd_Sil * DG₀ * ρ[i,j], 10 * ρd_floor )  # Silicate dust density 
+                ρd[2,i,j]   = max( fd_C   * DG₀ * ρ[i,j], 10 * ρd_floor )  # Graphite dust density 
+                ρd[3,i,j]   = max( fd_PAH * DG₀ * ρ[i,j], 10 * ρd_floor )  # PAH dust density 
+
+                @assert isapprox(fd_Sil + fd_C + fd_PAH, 1.0, rtol = 0.01) "Initial dust bin density fractions don't add up to 1."
 
                 # Dust momentum density (assume same velocity as gas initially):
-                ρdud_r[i,j] = ρd[i,j] * u_r[i,j]
-                ρdud_Z[i,j] = ρd[i,j] * u_Z[i,j]
+                ρdud_r[1,i,j] = ρd[1,i,j] * u_r[i,j]  # Silicate dust momentum
+                ρdud_Z[1,i,j] = ρd[1,i,j] * u_Z[i,j]
+
+                ρdud_r[2,i,j] = ρd[2,i,j] * u_r[i,j]  # Graphite dust momentum
+                ρdud_Z[2,i,j] = ρd[2,i,j] * u_Z[i,j]
+
+                ρdud_r[3,i,j] = ρd[3,i,j] * u_r[i,j]  # PAH dust momentum
+                ρdud_Z[3,i,j] = ρd[3,i,j] * u_Z[i,j]
                 
             end
         end # End of i-loop 
@@ -558,7 +544,7 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
 
 
     # Initialize total mass in simulation volume (for diagnostic purposes):
-    UpdateTotalMass!( hydrostate, ΔV )
+    UpdateTotalMass!( hydrostate, geometry )
 
     ###############################################################
     #######                                                 #######
@@ -568,12 +554,11 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
 
     # Initialize struct for dust properties/settings (no dust growth/destruction):
     Td₀       = 30.0
-    duststate = SetupDustState( false, N_r, N_Z, Td₀, "DustData.txt", 
-                                "DustIRData.txt", true )
+    duststate = SetupDustState( false, N_r, N_Z, Td₀ )
 
     # Sanity/safety check:
-    @assert size( duststate.Td ) == size( ρ ) "Dust temperature Td should have the same size 
-                                               as spatial grid."
+    @assert size( duststate.Td_Sil ) == size( ρ ) " Dust temperature Td should have the same size 
+                                                    as spatial grid. "
 
 
     ###############################################################
@@ -647,20 +632,11 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
     step             = 1          # Initialize the steps
     Δt_Hydro         = Inf        # Initialize the hydro time-step 
     while t < tmax
-
-        # Hydro & dust CFL time-step:
-        Δt_CFL      = GetCFLTimeStep( r, Z, ρ, P, u_r, u_Z, ud_r, ud_Z, γad )  
-
-        # Limit from Radiation pressure acceleration time-scale:
-        if RadPressure 
-            Δt_RP = GetRadPressureTimeStep( r, Z, ρ, ρd, RT.f_stellar_r,   RT.f_stellar_Z )
-        else
-            # Ignore limit in absence of radiation pressure feedback:
-            Δt_RP   = Inf 
-        end
-
-        # Set hydro time-step:
-        Δt_Hydro = min( 1.25 * Δt_Hydro, Δt_CFL, Δt_RP, Δt_Resolve, tmax - t )
+        # Set global hydro time-step:
+        Δt_Hydro_max =  min( Δt_Resolve, tmax - t )
+        Δt_Hydro     =  Compute_RHD_TimeStep( Δt_Hydro, Δt_Hydro_max, hydrostate, nothing, RT,  
+                                              nothing, chemstate, duststate, geometry, 
+                                              false, RadPressure )
 
         # Update hydro, gravity, thermochemistry, stellar RT:
         UpdateRHD!( Δt_Hydro, hydrostate, chemstate,

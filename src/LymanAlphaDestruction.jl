@@ -16,16 +16,6 @@
 
 using .ConstantsAndFunctions  # Needed constants & functions
 
-######################################################################
-#######                                                        #######
-#######            R A M A N  S C A T T E R I N G              #######
-#######                                                        #######
-######################################################################
-
-export σRaman
-
-# H₂-Raman scattering cross-section for Lyα (see ref. 1 & references therein):
-const σRaman::Float64 = 2.1e-25  
 
 ######################################################################
 #######                                                        #######
@@ -61,6 +51,9 @@ function pd_Lyα( nHII::Float64,
     T         = clamp( T, 1.0, 1e5 )
     T_100     = T / 100.0        
     logT      = log10( T )
+    logT_sq   = logT * logT       # logT^2
+    logT_cu   = logT_sq * logT    # logT^3
+    logT_4    = logT_cu * logT    # logT^4 
 
     # CMB stimulated transition rates:
     Γ_CMB2p2s = 3.1e-6 * (1+z)    # 2p → 2s
@@ -69,7 +62,7 @@ function pd_Lyα( nHII::Float64,
     # 2s → 2p rates for charged particles (H II, e⁻):
     C_e       = 5e-5 * exp( - (2.5/T)^2 ) * ne / (1 + T_100^0.45)
     C_HII     = ( 6.98e-3 * (1 + 0.933*logT) * exp( - (601/T)^0.406 ) / (T^0.5)
-              +   10^(-7.69 + 1.21*logT + 0.455*(logT^2) - 0.199*(logT^3) + 0.0182*(logT^4))  ) * nHII
+              +   10^(-7.69 + 1.21*logT + 0.455*logT_sq - 0.199*logT_cu + 0.0182*logT_4)  ) * nHII
 
     # 2s → 2p rates for neutral atoms/molecules (He I, H2, and H I):
     C_HeI     = 2.6e-9 * (T_100^0.315) * nHeI
@@ -78,12 +71,12 @@ function pd_Lyα( nHII::Float64,
               +  (1.6e-10 + 1.57e-12 * (T^1.1)) / ( (8.9 * (T^(-0.55)) + 0.078 * (T^0.35))^2 ) ) * nHI
 
     # Total 2s → 2p and 2p → 2s rates:
-    C_2s2p    = C_e + C_HII + C_HeI + C_H2 + C_HI 
-    C_2p2s    = C_2s2p / 3
+    C_2s2p    = C_e  +  C_HII  +  C_HeI  +  C_H2  +  C_HI 
+    C_2p2s    = OneThird * C_2s2p 
 
     # Destruction probability from 2p → 2s:
 
-    R_2p2s    = (2/3) * A_2p2s + C_2p2s + Γ_CMB2p2s
+    R_2p2s    = TwoThirds * A_2p2s  +  C_2p2s  +  Γ_CMB2p2s
     R_2s2p    = A_2s2p + C_2s2p + Γ_CMB2s2p
 
     pd_HI     = R_2p2s / ( (ALyα/A_2γ) * (A_2γ + R_2s2p) + R_2p2s )

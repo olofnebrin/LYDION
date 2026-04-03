@@ -19,17 +19,20 @@ using .FastInterpolations  # For fast interpolations of special/expensive functi
 
 export LyαArrays, GenerateLyαArrays, H, Htophat, 
        Compute_b, Compute_ΔνD, Compute_a, Compute_σ0, 
-       Update_Hvoigt!, Update_Hvoigt_cell!, Update_ϕν!, 
+       Update_Hvoigt!, Update_ϕν!, 
        Compute_e_Lyα, Update_e_Lyα!,
        AbsorptionUpdateJorH, LyαEmissionUpdate!, LyαEmissionAbsorptionUpdate!, 
        Update_f_Lyα_MF_L_Lyα!, Reset_Δρu!, AbsorptionUpdateH, 
        Update_∇u_RHD!, D_colon_∇u_Cylindrical, 
+       J_sphere_uni, J_sphere_point,
        eLyα_sphere_point, eLyα_sphere_uni,
        D_colon_∇u_Cartesian, Compute_f_esc_Cylindrical, Compute_f_esc_Lyα_Cylindrical,
        vth_H, GetHydrogenDensities, GetHeliumDensities, GetDeuteriumDensities, 
        GetCarbonDensities, GetOxygenDensities, GetElectronDensity,
-       GetElectronDensityFromFracs, GetAllNumberDensities, Get_ρ_From_nH,
-       MinMod, MonCen, GetBlackBodyIonizingEmission, PrintLYDIONLogo
+       GetElectronDensityFromFracs, GetTotalNumberDensity,
+       GetAllNumberDensities, Get_ρ_From_nH, Compute_nC_over_nO,
+       MinMod, SphericalAverageProfile!,
+       GetBlackBodyIonizingEmission, PrintLYDIONLogo
 
 
 ###############################################################
@@ -48,6 +51,7 @@ const kpc::Float64        = 1e3 * pc              # 1 kiloparsec (cm)
 const Mpc::Float64        = 1e6 * pc              # 1 Megaparsec (cm)
 const Gpc::Float64        = 1e9 * pc              # 1 Gigaparsec (cm)
 const kms::Float64        = 1e5                   # 1 km/s (cm/s)
+const inv_kms::Float64    = 1 / kms               # Inverse of 1 km/s (convenient)
 const day::Float64        = 86400.0               # 1 day (seconds)
 const yr::Float64         = 365.24 * day          # 1 year (sec)
 const Myr::Float64        = 1e6 * yr              # 1 million years (sec)
@@ -60,56 +64,61 @@ const F_Habing::Float64   = 1.6e-3                # Habing flux (erg cm⁻² s�
                                                   # (equivaletly, u_Habing = F_Habing/c = 5.3 × 10⁻¹³ erg cm⁻³)
 
 ####### PHYSICAL CONSTANTS ################
-const c::Float64          = 2.99792458e10         # Speed of light (cm/s)
-const h::Float64          = 6.626069573e-27       # Planck's constant (erg s)
-const G::Float64          = 6.6743e-8             # The gravitational constant (dyn cm² g⁻²)
-const kB::Float64         = 1.380648813e-16       # Boltzmann constant (erg/K)
+const c::Float64           = 2.99792458e10         # Speed of light (cm/s)
+const h::Float64           = 6.626069573e-27       # Planck's constant (erg s)
+const G::Float64           = 6.6743e-8             # The gravitational constant (dyn cm² g⁻²)
+const kB::Float64          = 1.380648813e-16       # Boltzmann constant (erg/K)
 
-const mu::Float64         = 1.660539069e-24       # Atomic mass unit (g)
-const mH::Float64         = 1.0080 * mu           # Mass of hydrogen atom (g)
-const mH2::Float64        = 2 * mH                # Mass of H₂ molecule (g)
-const mD::Float64         = 2.014  * mu           # Mass of deuterium atom (g) 
-const me::Float64         = 9.109382917e-28       # Mass of electron (g)
-const mHe::Float64        = 4.0026 * mu           # Mass of helium atom (g)
-const mC::Float64         = 12.011 * mu           # Mass of carbon atom (g)
-const mO::Float64         = 15.999 * mu           # Mass of oxygen atom (g)
-const mCO::Float64        = mC  +  mO             # Mass of CO molecule (g)
-const mN::Float64         = 14.007 * mu           # Mass of nitrogen atom (g)
-const mNe::Float64        = 20.180 * mu           # Mass of neon atom (g)
-const mMg::Float64        = 24.305 * mu           # Mass of magnesium atom (g)
-const mSi::Float64        = 28.086 * mu           # Mass of silicon atom (g)
-const mS::Float64         = 32.065 * mu           # Mass of sulfur atom (g)
-const mFe::Float64        = 55.845 * mu           # Mass of iron atom (g)
+const mu::Float64          = 1.660539069e-24       # Atomic mass unit (g)
+const mH::Float64          = 1.0080 * mu           # Mass of hydrogen atom (g)
+const mH2::Float64         = 2 * mH                # Mass of H₂ molecule (g)
+const mD::Float64          = 2.014  * mu           # Mass of deuterium atom (g) 
+const me::Float64          = 9.109382917e-28       # Mass of electron (g)
+const mHe::Float64         = 4.0026 * mu           # Mass of helium atom (g)
+const mC::Float64          = 12.011 * mu           # Mass of carbon atom (g)
+const mO::Float64          = 15.999 * mu           # Mass of oxygen atom (g)
+const mCO::Float64         = mC  +  mO             # Mass of CO molecule (g)
+const mN::Float64          = 14.007 * mu           # Mass of nitrogen atom (g)
+const mNe::Float64         = 20.180 * mu           # Mass of neon atom (g)
+const mMg::Float64         = 24.305 * mu           # Mass of magnesium atom (g)
+const mSi::Float64         = 28.086 * mu           # Mass of silicon atom (g)
+const mS::Float64          = 32.065 * mu           # Mass of sulfur atom (g)
+const mFe::Float64         = 55.845 * mu           # Mass of iron atom (g)
 
-const inv_mH::Float64     = 1 / mH 
-const inv_mHe::Float64    = 1 / mHe 
-const inv_mD::Float64     = 1 / mD 
-const inv_mC::Float64     = 1 / mC 
-const inv_mO::Float64     = 1 / mO 
-const inv_mN::Float64     = 1 / mN 
-const inv_mNe::Float64    = 1 / mNe
-const inv_mMg::Float64    = 1 / mMg
-const inv_mSi::Float64    = 1 / mSi
-const inv_mS::Float64     = 1 / mS
-const inv_mFe::Float64    = 1 / mFe
+const inv_mH::Float64      = 1 / mH 
+const inv_mH2::Float64     = 1 / mH2 
+const inv_mHe::Float64     = 1 / mHe 
+const inv_mD::Float64      = 1 / mD 
+const inv_mC::Float64      = 1 / mC 
+const inv_mO::Float64      = 1 / mO 
+const inv_mN::Float64      = 1 / mN 
+const inv_mNe::Float64     = 1 / mNe
+const inv_mMg::Float64     = 1 / mMg
+const inv_mSi::Float64     = 1 / mSi
+const inv_mS::Float64      = 1 / mS
+const inv_mFe::Float64     = 1 / mFe
 
-const e::Float64          = 4.80320451e-10        # Electron charge (esu)
-const q_e::Float64        = - e                   # Charge of electron (esu)
-const q_HII::Float64      = - e                   # Charge of proton (esu)
-const q_HeII::Float64     = - e                   # Charge of He II (esu)
-const q_HeIII::Float64    = - 2 * e               # Charge of He III (esu)
-const σSB::Float64        = 5.670374419e-5        # Stefan-Boltzmann constant (cgs units)
-const νLyα::Float64       = 2.466068e15           # Lyα frequency at line center (Hz)
-const νLyC::Float64       = 3.289842e15           # LyC limit frequency (Hz)
-const ELyα::Float64       = h * νLyα              # Lyα photon energy (erg)
-const ELyC::Float64       = h * νLyC              # LyC limit photon energy (i.e. Rydberg) (erg)
-const inv_ELyα::Float64   = 1 / ELyα              # Inverse of ELyα, convenient 
-const ALyα::Float64       = 6.265e8               # Einstein-A coefficient for Lyα (s⁻¹)
-const A_2γ::Float64       = 8.2206                # Einstein-A coefficient for two-photon decay (s⁻¹) 
-const A_2p2s::Float64     = 8.78e-7               # Einstein-A coefficient for 2p → 2s transition (s⁻¹)
-const A_2s2p::Float64     = 1.597e-9              # Einstein-A coefficient for 2s → 2p transition (s⁻¹)
-const f_lu_Lyα::Float64   = 0.41641               # Oscillator strength for Lyα
-const σT::Float64         = 6.6524587321e-25      # Thomson scattering cross-section (cm²)
+const e::Float64           = 4.80320451e-10        # Electron charge (esu)
+const q_e::Float64         = - e                   # Charge of electron (esu)
+const q_HII::Float64       = - e                   # Charge of proton (esu)
+const q_HeII::Float64      = - e                   # Charge of He II (esu)
+const q_HeIII::Float64     = - 2 * e               # Charge of He III (esu)
+const σSB::Float64         = 5.670374419e-5        # Stefan-Boltzmann constant (cgs units)
+const νLyα::Float64        = 2.466068e15           # Lyα frequency at line center (Hz)
+const νLyC::Float64        = 3.289842e15           # LyC limit frequency (Hz)
+const ELyα::Float64        = h * νLyα              # Lyα photon energy (erg)
+const ELyC::Float64        = h * νLyC              # LyC limit photon energy (i.e. Rydberg) (erg)
+const inv_ELyα::Float64    = 1 / ELyα              # Inverse of ELyα, convenient 
+const ALyα::Float64        = 6.265e8               # Einstein-A coefficient for Lyα (s⁻¹)
+const A_2γ::Float64        = 8.2206                # Einstein-A coefficient for two-photon decay (s⁻¹) 
+const A_2p2s::Float64      = 8.78e-7               # Einstein-A coefficient for 2p → 2s transition (s⁻¹)
+const A_2s2p::Float64      = 1.597e-9              # Einstein-A coefficient for 2s → 2p transition (s⁻¹)
+const f_lu_Lyα::Float64    = 0.41641               # Oscillator strength for Lyα
+const σT::Float64          = 6.6524587321e-25      # Thomson scattering cross-section (cm²)
+const σHminus_Lyα::Float64 = 5.477e-18             # Lyα H⁻ photodetachment cross-section (cm²) (McLaughling et al. 2017)
+const σOH_Lyα::Float64     = 4.07e-18              # Lyα OH photodissociation cross-section (cm²) (Heays et al. 2017)
+const σCH_Lyα::Float64     = 0.05e-18              # Lyα CH photodissociation cross-section (cm²) (Heays et al. 2017)
+const σRaman::Float64      = 2.1e-25               # Lyα H₂ Raman scattering cross-section for Lyα (see Nebrin et al. 2025 & references therein)  
 
 ####### PARAMETERS ########################
 const Y::Float64          = 0.247                          # Helium mass fraction (of pristine gas)
@@ -119,23 +128,27 @@ const X::Float64          = 1 - Y - X_D                    # Hydrogen mass fract
 
 const Zsun::Float64       = 0.0142                         # Solar metallicity M_Z / (M_H + M_He + M_Z)   (Asplund et al. 2009)
 const MZ_over_MH::Float64 = 0.0199                         # M_Z / M_H                                    (Asplund et al. 2009)
-const fCarbon::Float64    = 3.54e-3 / MZ_over_MH           # Fraction of metal mass in carbon             (Asplund et al. 2009)
-const fNitrogen::Float64  = 1.04e-3 / MZ_over_MH           # Fraction of metal mass in nitrogen           (Asplund et al. 2009)
-const fOxygen::Float64    = 8.59e-3 / MZ_over_MH           # Fraction of metal mass in oxygen             (Asplund et al. 2009)
-const fNeon::Float64      = 1.88e-3 / MZ_over_MH           # Fraction of metal mass in neon               (Asplund et al. 2009)
-const fMagnesium::Float64 = 1.06e-3 / MZ_over_MH           # Fraction of metal mass in magnesium          (Asplund et al. 2009)
-const fSilicon::Float64   = 9.07e-4 / MZ_over_MH           # Fraction of metal mass in silicon            (Asplund et al. 2009) 
-const fSulfur::Float64    = 4.63e-4 / MZ_over_MH           # Fraction of metal mass in sulfur             (Asplund et al. 2009)
-const fIron::Float64      = 1.94e-3 / MZ_over_MH           # Fraction of metal mass in iron               (Asplund et al. 2009)
+const fCarbon::Float64    = 3.54e-3 / MZ_over_MH           # Fraction of metal mass in carbon @ Solar abundance ratios     (Asplund et al. 2009)
+const fNitrogen::Float64  = 1.04e-3 / MZ_over_MH           # Fraction of metal mass in nitrogen @ Solar abundance ratios   (Asplund et al. 2009)
+const fOxygen::Float64    = 8.59e-3 / MZ_over_MH           # Fraction of metal mass in oxygen @ Solar abundance ratios     (Asplund et al. 2009)
+const fNeon::Float64      = 1.88e-3 / MZ_over_MH           # Fraction of metal mass in neon @ Solar abundance ratios       (Asplund et al. 2009)
+const fMagnesium::Float64 = 1.06e-3 / MZ_over_MH           # Fraction of metal mass in magnesium @ Solar abundance ratios  (Asplund et al. 2009)
+const fSilicon::Float64   = 9.07e-4 / MZ_over_MH           # Fraction of metal mass in silicon @ Solar abundance ratios    (Asplund et al. 2009) 
+const fSulfur::Float64    = 4.63e-4 / MZ_over_MH           # Fraction of metal mass in sulfur @ Solar abundance ratios     (Asplund et al. 2009)
+const fIron::Float64      = 1.94e-3 / MZ_over_MH           # Fraction of metal mass in iron @ Solar abundance ratios       (Asplund et al. 2009)
 
-# nC / nO:
-const C_over_O::Float64   = fCarbon * inv_mC / ( fOxygen * inv_mO )  
+# Fraction of non-C/Si metals in the form of oxygen, needed 
+# to recover the oxygen density from Zgasrest_Zsun (the ratio between 
+# metals in Zgasrest_Zsun is assumed fixed): 
+const fO_over_frest::Float64 = fOxygen / (1 - fCarbon - fSilicon)
+ 
 
 const DGsun::Float64      = 1 / 162                        # Solar dust-to-gas ratio
 const TCMB0::Float64      = 2.726                          # CMB temperature at redshift z = 0
 
 ####### CONVENIENT CONSTANTS ##############
 const OneThird::Float64          = 1 / 3
+const TwoThirds::Float64         = 2 / 3
 const ThreeEights::Float64       = 3 / 8
 const ThreeFourths::Float64      = 3 / 4 
 const Four_π::Float64            = 4 * π 
@@ -174,14 +187,16 @@ const inv_E_EUV3::Float64 = 1 / E_EUV3
 # Export constants:
 export c, h, G, kB, e, q_e, q_HII, q_HeII, q_HeIII,
        σSB, νLyα, νLyC, ELyα, ELyC, inv_ELyα, 
-       ALyα, A_2γ, A_2p2s, A_2s2p, f_lu_Lyα, σT, X, Y, X_D, Zsun, DGsun, TCMB0, inv_Zsun,
+       ALyα, A_2γ, A_2p2s, A_2s2p, f_lu_Lyα, 
+       σT, σHminus_Lyα, σOH_Lyα, σCH_Lyα, σRaman,
+       X, Y, X_D, Zsun, DGsun, TCMB0, inv_Zsun,
 
-       fCarbon, fNitrogen, fOxygen, fNeon, fMagnesium, fSilicon, fSulfur, fIron, C_over_O,
-       mH, mH2, mD, me, mHe, mC, mCO, 
-       inv_mN, inv_mNe, inv_mMg, inv_mSi, inv_mS, inv_mFe,
+       fCarbon, fNitrogen, fOxygen, fNeon, fMagnesium, fSilicon, fSulfur, fIron, 
+       mH, mH2, mD, me, mHe, mC, mCO, mSi,
+       inv_mH2, inv_mD, inv_mN, inv_mNe, inv_mMg, inv_mSi, inv_mS, inv_mFe,
 
-       Lsun, Msun, AU, pc, kpc, Mpc, Gpc, kms, day, yr, Myr, Gyr, eV, Ang, nm, μm, F_Habing,
-       OneThird, ThreeEights, ThreeFourths, Four_π, inv_Four_π, Two_π, Sqrt_π, Sqrt_2,
+       Lsun, Msun, AU, pc, kpc, Mpc, Gpc, kms, inv_kms, day, yr, Myr, Gyr, eV, Ang, nm, μm, F_Habing,
+       OneThird, TwoThirds, ThreeEights, ThreeFourths, Four_π, inv_Four_π, Two_π, Sqrt_π, Sqrt_2,
        Sqrt_π_over_2, inv_Sqrt_π_over_2, Four_π_over_c, inv_c, X_over_mH, Y_over_mHe, 
 
        E_opt, E_FUV, E_LW, E_EUV1, E_EUV2, E_EUV3,
@@ -336,36 +351,6 @@ function Update_Hvoigt!( Hvoigt::AbstractArray{Float64, 3}, # Top-hat average Vo
 end
 
 
-""" Compute & update the (top-hat average) Voigt profile Hvoigt
-    for a single cell. Convenient in the RHD sub-cycling. """
-function Update_Hvoigt_cell!( Hvoigt::AbstractArray{Float64, 1}, # Top-hat average Voigt profile for this cell (UPDATED)
-                                  δν::AbstractArray{Float64},    # Frequency interfaces displacement from line center 
-                                 δνC::AbstractArray{Float64},    # Frequency bin centers displacement from line center
-                                   a::Float64,                   # Voigt parameters for this cell 
-                            inv_Δν_D::Float64                    # Inverse Doppler width for this cell 
-                             )
-
-    N_ν = length( Hvoigt )
-
-    @simd for k in 1:N_ν
-        @inbounds begin 
-            # Get frequency displacements from line center:
-            δν_C   = δνC[k]
-            δν_max = δν[k+1]
-            δν_min = δν[k]
-
-            # Compute Hvoigt:
-            Hvoigt[k] = Htophat( δν_C   * inv_Δν_D, # x 
-                                 δν_max * inv_Δν_D, # xmax 
-                                 δν_min * inv_Δν_D, # xmin
-                                 a )
-        end
-    end
-
-    return nothing 
-end
-
-
 """ Compute & update the normalized emission profile ϕ_ν for each cell, 
     assuming ϕ_ν = Hvoigt / ∫dν Hvoigt ≈ Hvoigt[i,j,k] / ∑_k Δν[k] Hvoigt[i,j,k]. """
 function Update_ϕν!( ϕ_ν::AbstractArray{Float64, 3},  # Normalized emission line profile (UPDATED)
@@ -401,34 +386,6 @@ function Update_ϕν!( ϕ_ν::AbstractArray{Float64, 3},  # Normalized emission 
 end
 
 
-""" Compute & update the normalized emission profile ϕ_ν for a single cell, 
-    assuming ϕ_ν = Hvoigt / ∫dν Hvoigt ≈ Hvoigt[i,j,k] / ∑_k Δν[k] Hvoigt[i,j,k]. 
-    
-    Useful for sub-cycling in RHD simulations. """
-@inline function Update_ϕν_cell!( ϕ_ν::AbstractArray{Float64, 1},  # Normalized emission line profile for this cell (UPDATED)
-                                   Δν::AbstractArray{Float64, 1},  # Frequency bin widths
-                               Hvoigt::AbstractArray{Float64, 1},  # Voigt profile for this cell
-                                 kmin::Int, 
-                                 kmax::Int 
-                                 )
-
-    # Interval:
-    dk = kmin:kmax 
-
-    SUM = 0.0
-    @simd for k in dk 
-        @inbounds SUM += Δν[k] * Hvoigt[k]
-    end
-    inv_SUM = 1 / SUM
-
-    @simd for k in dk 
-        @inbounds ϕ_ν[k] = Hvoigt[k] * inv_SUM
-    end
-
-    return nothing 
-end
-
-
 """ This function computes the Lyα energy density, for a given cell/position. """
 @inline function Compute_e_Lyα( Δν::AbstractArray{Float64},
                                  J::AbstractArray{Float64, 1} )
@@ -446,7 +403,6 @@ end
 
     return e_Lyα
 end
-
 
 
 """ Update the Lyα energy density e_Lyα(r,Z) = 4π ∫dν J(r,Z,ν) / c. """
@@ -514,6 +470,7 @@ end
     
     NOTE: This function also updates the old values of H. """
 function LyαEmissionAbsorptionUpdate!( J_Lyα::AbstractArray{Float64, 3},
+                                   J_Lyα_old::AbstractArray{Float64, 3},
                                      H_r_Lyα::AbstractArray{Float64, 3}, 
                                      H_Z_Lyα::AbstractArray{Float64, 3},
                                  H_r_old_Lyα::AbstractArray{Float64, 3},
@@ -547,7 +504,7 @@ function LyαEmissionAbsorptionUpdate!( J_Lyα::AbstractArray{Float64, 3},
                 dJdt   = ∫dν_js_Lyα[i,j] * ϕ_ν[i,j,k] * c̃
 
                 # Update J:
-                J_Lyα[i,j,k] = AbsorptionUpdateJorH( J_Lyα[i,j,k], Δt, dJdt, αabs_J, c̃ )
+                J_Lyα[i,j,k] = AbsorptionUpdateJorH( J_Lyα_old[i,j,k], Δt, dJdt, αabs_J, c̃ )
 
                 # Store & set old (un-updated) H components:
                 H_r_old_Lyα[i,j,k] = H_r_Lyα[i,j,k] 
@@ -584,7 +541,8 @@ function LyαEmissionAbsorptionUpdate!( J_Lyα::AbstractArray{Float64, 3},
         end
     end
 
-    # Update old H components a final time:
+    # Update old J and H components a final time:
+    J_Lyα_old   .= J_Lyα 
     H_r_old_Lyα .= H_r_Lyα 
     H_Z_old_Lyα .= H_Z_Lyα
 
@@ -1238,13 +1196,15 @@ const fOxygen_over_mO::Float64 = fOxygen * inv_mO
                                                         xCII::Float64,
                                                         xOII::Float64,
                                                            ρ::Float64,
-                                                   Zgas_Zsun::Float64,
+                                                          ZC::Float64,  # Carbon gas metallicity 
+                                                        ZSil::Float64,  # Si gas metallicity 
+                                                    Zgasrest::Float64,  # Non-C/Si gas metallicity 
                                            HydrogenAndHelium::Bool = true 
                                                         )
 
-    # Get metal density:
-    Z          = clamp( Zgas_Zsun * Zsun, 0.0, 1.0 )
-    ρZ         = Z * ρ 
+    # Total gas-phase metallicity:
+    Zgas       = ZC  +  ZSil  +  Zgasrest
+    Z          = clamp( Zgas, 0.0, 1.0 )
 
     # Get pristine (H + He + D) gas density:
     ρ_pristine = max( (1 - Z), 0.0 ) * ρ
@@ -1272,17 +1232,32 @@ const fOxygen_over_mO::Float64 = fOxygen * inv_mO
     nDII       = xDII * nD 
 
     # Get nCII:
-    nC         = fCarbon_over_mC * ρZ 
+    nC         = ZC * ρ * inv_mC 
     nCII       = xCII * nC 
 
     # Get nOII:
-    nO         = fOxygen_over_mO * ρZ 
+    nO         = fO_over_frest * Zgasrest * ρ * inv_mO 
     nOII       = xOII * nO
 
     # Get electron density:
     ne         = GetElectronDensity( nHII, nHeII, nHeIII, nDII, nCII, nOII )
 
     return ne
+end
+
+
+""" Computes the total gas number density. """
+@inline function GetTotalNumberDensity( nHI::Float64,   nHII::Float64,    nH2::Float64, 
+                                        nHeI::Float64, nHeII::Float64, nHeIII::Float64,
+                                        nDI::Float64,   nDII::Float64,    nHD::Float64, 
+                                        nCI::Float64,   nCII::Float64,    nCO::Float64,
+                                        nCHx::Float64,   nOI::Float64,   nOII::Float64,
+                                        nOHx::Float64,    ne::Float64 )
+
+    n  = ( nHI + nHII + nH2 + nHeI + nHeII + nHeIII + nDI + nDII + nHD
+         + nCI + nCII + nCO + nCHx + nOI + nOII + nOHx + ne )
+
+    return n
 end
 
 
@@ -1299,14 +1274,16 @@ function GetAllNumberDensities( xH2::Float64,
                                 xOI::Float64,
                                xOII::Float64,
                                   ρ::Float64,
-                          Zgas_Zsun::Float64,
+                                 ZC::Float64,  # Carbon gas metallicity 
+                               ZSil::Float64,  # Silicon gas metallicity  
+                           Zgasrest::Float64,  # Non-C/Si gas metallicity 
                   HydrogenAndHelium::Bool = true )
 
-    # Get metal density:
-    Z          = clamp( Zgas_Zsun * Zsun, 0.0, 1.0 )
-    ρZ         = Z * ρ 
+    # Total gas-phase metallicity: 
+    Zgas  = ZC  +  ZSil  +  Zgasrest
 
     # Get pristine (H + He + D) gas density:
+    Z          = clamp( Zgas, 0.0, 1.0 )
     ρ_pristine = max( (1 - Z), 0.0 ) * ρ
 
     # Get hydrogen densities:
@@ -1319,11 +1296,11 @@ function GetAllNumberDensities( xH2::Float64,
     nDI, nDII, nHD, nD        = GetDeuteriumDensities( xHD, xDII, ρ_pristine, HydrogenAndHelium )
 
     # Get carbon species densities:
-    ρCarbon                   = fCarbon * ρZ 
+    ρCarbon                   = @fastmath ZC * ρ
     nCI, nCII, nCO, nCHx, nC  = GetCarbonDensities( xCI, xCII, xCO, ρCarbon )
 
     # Get oxygen species densities:
-    ρOxygen                   = fOxygen * ρZ 
+    ρOxygen                   = @fastmath fO_over_frest * Zgasrest * ρ
     nOI, nOII, nOHx, nO       = GetOxygenDensities( xOI, xOII, nCO, ρOxygen )
 
     # Get electron density:
@@ -1338,6 +1315,9 @@ function GetAllNumberDensities( xH2::Float64,
 end
 
 
+""" This is a small useful function for relating ρ to 
+    the hydrogen number density nH. Only used for initialization 
+    in simulations. """
 @inline function Get_ρ_From_nH( nH::Float64, 
                          Zgas_Zsun::Float64, 
                  HydrogenAndHelium::Bool )
@@ -1370,6 +1350,31 @@ end
 end
 
 
+const mO_over_mC::Float64 = mO / mC
+
+""" This function computes nC / nO as:
+
+    nC / nO = (ZC × ρ / mC) / (fO_over_frest × Zgasrest × ρ / mO)
+            = [ZC / (fO_over_frest × Zgasrest)] × (mO/mC) 
+            
+    This is used in both the C/O chemistry, and when advecting the gas abundances 
+    as passive scalars. """
+@inline function Compute_nC_over_nO( ZC::Float64,
+                               Zgasrest::Float64 )
+
+    if Zgasrest == 0.0
+        # If there is no other metals than carbon - therefore no oxygen -
+        # just set nC_over_nO to zero to avoid division by zero when used 
+        # elsewhere:
+        return 0.0
+    end
+
+    nC_over_nO = ( ZC / ( fO_over_frest * Zgasrest ) ) * mO_over_mC
+
+    return nC_over_nO 
+end
+
+
 """ MinMod slope limiter. Used in the hydrodynamics, M1 RT, 
     and in the estimate for ∇ρ for the Sobolev-like 
     column density estimates. """
@@ -1387,12 +1392,66 @@ end
 end
 
 
-""" MonCen slope limiter. Less diffusive than MinMod, albeit 
-    slightly less robust (but still very good). """
-@inline function MonCen( A::Float64, 
-                         B::Float64
-                         )
-    MinMod( 0.5 * ( A + B ), MinMod( 2.0 * A, 2.0 * B ) )
+""" This function  computes the spherically averaged profile ρ(R), for 
+    some array (e.g. density) ρ(r,Z) in cylindrical coordinates (r,Z). 
+    It does the spherical averaging centered on Z = Zc. This function 
+    can be used to compute spherically averaged profiles of various 
+    quantities, e.g. densities, abundance fractions,
+    or the Lyα energy density. """
+function SphericalAverageProfile!( ρ_av::AbstractArray{Float64, 1},    # Spherically averaged ρ
+                                      ρ::AbstractArray{Float64, 2},    # Array ρ(r,Z)
+                             R_binedges::AbstractArray{Float64, 1},    # Spherical R-bin edges 
+                                 V_bins::AbstractArray{Float64, 1},    # Bin volumes 
+                                     ΔV::AbstractArray{Float64, 2},    # Cell volumes 
+                                   rCoM::AbstractArray{Float64, 1},    # Cell CoM in r-direction 
+                                   ZCoM::AbstractArray{Float64, 1},    # Cell CoM in Z-direction 
+                                     Zc::Float64 = 0.0 )
+
+
+    # Intervals:
+    N_r, N_Z = size( ΔV )
+    Nbins    = length( R_binedges ) - 1
+    dN_Z     = 1:N_Z 
+    dN_r     = 1:N_r  
+    dNbin    = 1:Nbins
+    
+    # Initialize ρ_av and V_bins to zero before we update them:
+    ρ_av   .= 0.0
+    V_bins .= 0.0
+
+    @inbounds for j in dN_Z 
+        for i in dN_r 
+            # Get the cell distance from center:
+            R = sqrt( rCoM[i]^2 + (ZCoM[j] - Zc)^2 )
+
+            # Find nearest bin:
+            for k in dNbin
+                if R_binedges[k] ≤ R && R < R_binedges[k+1] 
+                    # In this case we have found the right bin, so add the contribution 
+                    # from ρ[i,j] to this bin:
+                    ρ_av[k]   += ρ[i,j] * ΔV[i,j]
+
+                    # Add the contribution to the bin volume:
+                    V_bins[k] += ΔV[i,j]
+
+                    # Exit the loop (we have found the bin):
+                    break 
+                end
+            end
+
+        end # End of i-loop 
+    end # End of j-loop 
+
+    # Normalize to get the final profile:
+    @inbounds for k in dNbin
+        if V_bins[k] > 0.0
+            ρ_av[k] = ρ_av[k] / V_bins[k]
+        else
+            ρ_av[k] = 0.0
+        end
+    end
+
+    return nothing
 end
 
 

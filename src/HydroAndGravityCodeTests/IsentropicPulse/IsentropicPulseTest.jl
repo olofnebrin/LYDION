@@ -50,6 +50,7 @@ function UpdateIsentropicPulseTest!( Δt_Hydro::Float64,
     ρu_Y        = hydrostate.ρu_Y;     E           = hydrostate.E
     u_X         = hydrostate.u_X;      u_Y         = hydrostate.u_Y 
     P           = hydrostate.P;        γad         = hydrostate.γad 
+    e           = hydrostate.e_dual
 
     # Grid size & intervals:
     N_X, N_Y    = size( ρ )
@@ -78,7 +79,7 @@ function UpdateIsentropicPulseTest!( Δt_Hydro::Float64,
         @inbounds @simd for i in dN_X
             # Recover primitives at geometric cell centers, from the 
             # conservative variables at the cell centers:
-            u_X[i,j], u_Y[i,j], P[i,j] = GetPrimitive( ρ[i,j], ρu_X[i,j], ρu_Y[i,j], E[i,j], γad[i,j] )
+            u_X[i,j], u_Y[i,j], P[i,j] = GetPrimitive( ρ[i,j], ρu_X[i,j], ρu_Y[i,j], E[i,j], e[i,j], γad[i,j] )
 
             # Ensure positive pressure:
             P[i,j] = max( P[i,j], P_floor )
@@ -152,7 +153,7 @@ function SetupIsentropicPulseTest(tmax::Float64,
     u_Y  = hydrostate.u_Y
     E    = hydrostate.E
     P    = hydrostate.P 
-    e    = hydrostate.e 
+    e    = hydrostate.e_dual
     γad  = hydrostate.γad
 
     # Dust arrays (not coupled to gas, but need to be initialized): 
@@ -176,6 +177,9 @@ function SetupIsentropicPulseTest(tmax::Float64,
             
             # Gas energy (no initial kinetic energy):
             E[i,j]   = P[i,j] / (γad[i,j] - 1)  
+
+            # Gas internal energy density e = P / (γ - 1):
+            e[i,j]   = P[i,j] / ( γad[i,j] - 1 )
         end # End of i-loop 
     end # End of j-loop
 

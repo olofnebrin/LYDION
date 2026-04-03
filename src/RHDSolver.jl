@@ -22,11 +22,13 @@ include( "./PoissonGravitySolver.jl" )
 include( "./Hydrodynamics.jl" )
 
 include( "./UpdateLyaJandH.jl" )
-include( "./Dust.jl" )
+include( "./DustPhysics.jl" )
 include( "./DustGasCoupling.jl" )
 include( "PhotoChemistryAndCooling/InitializeChemistryStruct.jl" ) 
 include( "PhotoChemistryAndCooling/PhotoThermoChemistry.jl" )
 include( "PhotoChemistryAndCooling/StellarIR_Diagnostics.jl" )
+include( "PhotoChemistryAndCooling/StellarWinds.jl" )
+include( "./RHD_TimeStep.jl" )
 include( "./AdvectScalars.jl" )
 include( "./Turbulence.jl" )
 include( "./SaveHDF5Data_RHD.jl" )
@@ -35,10 +37,32 @@ using  Base.Threads              # For CPU acceleration
 using  ProgressMeter             # To show time step progress
 using  Dates, Printf
 
+
+const N_dust::Int           = 3      # 3 dust bins (Sil, C, PAH) 
+const N_passivescalars::Int = 19     # Number of passive scalars (for chemistry etc)
+const BENCHMARK_RHD::Bool   = false  # For benchmarking performance of the RHD update. Off by default.
+
 export SetupRHDsimulation, RestartRHDsimulation
 
 
-""" This function performs a full RHD update over a hydro time-step Δt_Hydro. """
+
+""" This function performs a full RHD update over a hydro time-step Δt_Hydro. 
+    Operator splitting is used, with the following order:
+    
+    (1) Gravity solver + kick over half-step Δt_Hydro / 2. (If gravity is on)
+
+    (2) Hydro & dust advection over full step Δt_Hydro. 
+
+    (3) Gravity solver + kick over half-step Δt_Hydro / 2. (If gravity is on)
+
+    (4) Inject stellar wind momentum & mass over full step Δt_Hydro, 
+        if stellar wind feedback is on.
+
+    (5) Sub-cycle radiative transfer of stellar, IR, and Lyα photons (if on)
+        over steps Δt_RT ≤ Δt_Hydro. And for each Δt_RT, sub-cycle photo-thermo
+        chemistry and other stiff source terms (gas heating/cooling, chemistry, 
+        dust-gas coupling, ...). 
+"""
 function UpdateRHD!( Δt_Hydro::Float64,
                    hydrostate::HydrodynamicsState{Float64},
                     chemstate::ChemistryState{Float64},
@@ -52,48 +76,27 @@ function UpdateRHD!( Δt_Hydro::Float64,
                       Gravity::Bool    = true,
                   RadPressure::Bool    = true,
                    IRfeedback::Bool    = true,
+          StellarWindFeedback::Bool    = true,
                             z::Float64 = 0.0,
-                        Hydro::Bool    = false,
-               CoolingHeating::Bool    = false,
-                          Lyα::Bool    = true
+                    mstarZAMS::Float64 = 35.0,
+                   Zstar_Zsun::Float64 = 1.0,
+                        Hydro::Bool    = true,
+               CoolingHeating::Bool    = true
                      )
-
-    if Lyα
-        @assert LyaState !== nothing "UpdateRHD!: Lyα = true but LyaState is nothing."
-    else
-        @assert LyaState === nothing "UpdateRHD!: Lyα = false but LyaState is not nothing."
-    end
 
     # Main geometry arrays:
     ΔV          = geometry.ΔV
-    inv_ΔV      = geometry.inv_ΔV
     A_r         = geometry.A_r
     A_Z         = geometry.A_Z
     inv_r_cell  = geometry.inv_r_cell
     r           = geometry.r 
-    rCoM        = geometry.rCoM
     Z           = geometry.Z
-    ZCoM        = geometry.ZCoM
-
-    # Weights for converting between cell center & cell-average values of 
-    # conservatives & primitives:
-    w_i_m1_r    = geometry.w_i_m1_r;     w_j_m1_Z     = geometry.w_j_m1_Z
-    w_i_0_r     = geometry.w_i_0_r;      w_j_0_Z      = geometry.w_j_0_Z
-    w_i_p1_r    = geometry.w_i_p1_r;     w_j_p1_Z     = geometry.w_j_p1_Z
-
-    q_i_m1_r    = geometry.q_i_m1_r;     q_j_m1_Z     = geometry.q_j_m1_Z
-    q_i_0_r     = geometry.q_i_0_r;      q_j_0_Z      = geometry.q_j_0_Z
-    q_i_p1_r    = geometry.q_i_p1_r;     q_j_p1_Z     = geometry.q_j_p1_Z
-
-    # WENO3 weights for interface reconstruction:
-    w_plus_i_p1 = geometry.w_plus_i_p1;  w_minus_i_p1 = geometry.w_minus_i_p1   
-    w_plus_j_p1 = geometry.w_plus_j_p1;  w_minus_j_p1 = geometry.w_minus_j_p1
 
     # Some hydro state arrays (cell-averaged):
     ρ           = hydrostate.ρ;        ρu_r        = hydrostate.ρu_X 
     ρu_Z        = hydrostate.ρu_Y;     E           = hydrostate.E
     u_r         = hydrostate.u_X;      u_Z         = hydrostate.u_Y 
-    P           = hydrostate.P;        e           = hydrostate.e 
+    P           = hydrostate.P;        e           = hydrostate.e_dual 
     T           = hydrostate.T;        γad         = hydrostate.γad 
 
     # r-direction interface velocities:
@@ -115,13 +118,6 @@ function UpdateRHD!( Δt_Hydro::Float64,
     ∂u_Z_∂Z    = hydrostate.∂u_Y_∂Y
     u_r_over_r = hydrostate.u_r_over_r
 
-    # Dust arrays:
-    ρd         = hydrostate.ρd
-    ρdud_r     = hydrostate.ρdud_X
-    ρdud_Z     = hydrostate.ρdud_Y
-    ud_r       = hydrostate.ud_X
-    ud_Z       = hydrostate.ud_Y
-
     # Boundary conditions:
     BC_Z_bot   = hydrostate.BC_Y_left
 
@@ -129,6 +125,12 @@ function UpdateRHD!( Δt_Hydro::Float64,
     N_r, N_Z    = size( ρ )
     dN_r        = 1:N_r 
     dN_Z        = 1:N_Z 
+
+    if BENCHMARK_RHD
+        t_HydroDust = 0.0
+        t_SubCycle  = 0.0
+        t0          = time_ns()
+    end
 
     ###############################################################
     #######                                                 #######
@@ -139,8 +141,10 @@ function UpdateRHD!( Δt_Hydro::Float64,
     # Gravity solver + kick update (over a half-step):
     Δt_Hydro_half = 0.5 * Δt_Hydro
     if Gravity && Hydro 
+        UpdateTotalDustDensity!( hydrostate )
+
         GravitySolveAndKick!( Δt_Hydro_half, hydrostate, gravstate, gravcoeffs,
-                              ΔV, r, Z, rCoM, ZCoM )
+                              geometry )
 
     end
 
@@ -149,18 +153,10 @@ function UpdateRHD!( Δt_Hydro::Float64,
         PreparePassiveScalars!( hydrostate, chemstate )
 
         # Update hydro & dust variables & passive scalars by advection (full step):
-        UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, inv_ΔV, A_r, A_Z,
-
-                      w_i_m1_r, w_i_0_r, w_i_p1_r, w_j_m1_Z, w_j_0_Z, w_j_p1_Z, 
-                      q_i_m1_r, q_i_0_r, q_i_p1_r, q_j_m1_Z, q_j_0_Z, q_j_p1_Z,  
-
-                      w_plus_i_p1, w_minus_i_p1,   
-                      w_plus_j_p1, w_minus_j_p1, 
-
-                      Val(:Cylindrical), inv_r_cell )  
+        UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, geometry )  
 
         # Update total mass in simulation volume (for diagnostic purposes):
-        UpdateTotalMass!( hydrostate, ΔV )
+        UpdateTotalMass!( hydrostate, geometry )
 
         # Recover abundance fractions from passive scalars (needed before sub-cycling):
         RecoverChemistryFromPassiveScalars!( hydrostate, chemstate )
@@ -168,40 +164,53 @@ function UpdateRHD!( Δt_Hydro::Float64,
 
     # Gravity solver + kick update (over a half-step):
     if Gravity && Hydro 
+        UpdateTotalDustDensity!( hydrostate )
+
         GravitySolveAndKick!( Δt_Hydro_half, hydrostate, gravstate, gravcoeffs,
-                              ΔV, r, Z, rCoM, ZCoM )
+                              geometry )
 
     end
 
-    # Update primitives to reflect latest conservatives:
-    @threads for j in dN_Z 
+    # Inject momentum and mass from stellar winds if turned on:
+    if StellarWindFeedback
+        # Position of star along Z-axis:
+        Zmid = 0.5 * ( Z[1] + Z[end] )
+        Zc   = ifelse( BC_Z_bot === :Reflect, 0.0, Zmid )
+
+        # Inject momentum & mass:
+        InjectStellarWind!( Δt_Hydro, mstarZAMS, Zstar_Zsun, hydrostate, geometry, RT.ρ_star, Zc )
+    end
+
+    @threads for j in dN_Z
         @inbounds @simd for i in dN_r
-            # Recover primitives at geometric cell centers, from the 
-            # conservative variables at the cell centers:
-            u_r[i,j], u_Z[i,j], P[i,j] = GetPrimitive( ρ[i,j], ρu_r[i,j], ρu_Z[i,j], E[i,j], γad[i,j] )
+            # Adiabatic index & mean molecular weight (needed to initialize temperature):
+            γad[i,j] = Getγad( chemstate.xHII[i,j],  chemstate.xH2[i,j], 
+                               chemstate.xHeII[i,j], chemstate.xHeIII[i,j] )
+
+            μ        = Getμ( chemstate.xHII[i,j],  chemstate.xH2[i,j], 
+                             chemstate.xHeII[i,j], chemstate.xHeIII[i,j] )
+
+            # Recover primitives:
+            u_r[i,j], u_Z[i,j], P[i,j] = GetPrimitive( ρ[i,j], ρu_r[i,j], ρu_Z[i,j], E[i,j], e[i,j], γad[i,j] )
 
             # Ensure positive pressure:
             P[i,j] = max( P[i,j], P_floor )
+
+            # Get the latest temperature corresponding to e = e_dual to set the RSL for RT:
+            T[i,j] = e[i,j] * μ * (γad[i,j] - 1) * mH / ( ρ[i,j] * kB )
         end
     end
-    
-    # Initialize the internal energy density & adiabatic index (can change after gas fraction advection)
-    # for the thermochemistry sub-cycling: 
-    @threads for j in dN_Z 
-        @simd for i in dN_r
-            @inbounds begin 
-                γad[i,j] = Getγad( chemstate.xHII[i,j],  chemstate.xH2[i,j], 
-                                   chemstate.xHeII[i,j], chemstate.xHeIII[i,j] )
-                e[i,j]   = P[i,j] / ( γad[i,j] - 1 )
-            end
-        end
-    end 
 
     # Update the ∇u components, needed for the velocity terms in the RT:
     Update_∇u_RHD!( ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
                     u_r_L_r, u_r_R_r, u_r_L_Z, u_r_R_Z, 
                     u_Z_L_r, u_Z_R_r, u_Z_L_Z, u_Z_R_Z,
                     r, Z, inv_r_cell )
+
+    if BENCHMARK_RHD
+        t_HydroDust  = (time_ns() - t0)
+        t0           = 0.0
+    end
 
     ###############################################################
     #######                                                 #######
@@ -213,28 +222,21 @@ function UpdateRHD!( Δt_Hydro::Float64,
     # and for each RT CFL time-step we sub-cycle chemistry and heating/cooling.
 
     # Before sub-cycling, reset momentum change from radiation pressure to zero:
-    if Lyα
+    if !isnothing(LyaState)
         Reset_Δρu!( LyaState.Δρu_Lyα_r, LyaState.Δρu_Lyα_Z )
     end
     Reset_Δρu!( RT.Δρu_stellar_r,   RT.Δρu_stellar_Z )
     Reset_Δρu!( RT.Δρu_IR_r,        RT.Δρu_IR_Z )
 
     # Determine an updated reduced speed of light for the radiative transfer:
-    if Lyα
-        c̃     = FindRSL_StellarRT( RT.c̃, u_r, u_Z, ud_r, ud_Z, P, ρ, γad )
-        c̃_Lyα = FindRSL_LyαRT( LyaState.c̃_Lyα, u_r, u_Z, P, ρ, T, 
-                               chemstate.xHII, chemstate.xH2, γad, r, Z )
-
-        c̃max  = max( c̃, c̃_Lyα )
-        
-        # Set stellar and Lyα RT reduced speed of light to be the same, and 
-        # maximum of the two:
-        LyaState.c̃_Lyα = c̃max
-        RT.c̃           = c̃max
-    else
-        RT.c̃  = FindRSL_StellarRT( RT.c̃, u_r, u_Z, ud_r, ud_Z, P, ρ, γad )
+    RT.c̃  = FindRSL( RT.c̃, LyaState, hydrostate, chemstate, duststate, geometry )
+    if !isnothing(LyaState)
+        LyaState.c̃_Lyα = RT.c̃
     end
 
+    # ---------------------------------------------------------------------
+    # --------  Start sub-cycling of photo-thermochemistry  ---------------
+    # ---------------------------------------------------------------------
 
     t_RT  = 0.0 # Initialize the RT time 
     while t_RT < Δt_Hydro
@@ -250,12 +252,21 @@ function UpdateRHD!( Δt_Hydro::Float64,
                                              z, CoolingHeating,
                                              geometry,
                                              u_r_star_r, u_Z_star_Z, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r, 
-                                             LyaState, Lyα, 
+                                             LyaState, 
                                              RadPressure )
 
         # Update time:
         t_RT += Δt_RT
 
+    end
+
+    if BENCHMARK_RHD
+        t_SubCycle  = (time_ns() - t0)
+        t0          = 0.0
+
+        println("Hydro/dust advection & gravity solve:  ", t_HydroDust * 1e-9,  " s")
+        println("Sub-cycling (RT + photo-thermochemistry):  ", t_SubCycle * 1e-9, " s")
+        println("-------------------")
     end
 
     ###############################################################
@@ -264,24 +275,15 @@ function UpdateRHD!( Δt_Hydro::Float64,
     #######                                                 #######
     ###############################################################
 
-    # TODO: Lyα radiation pressure should be moved to sub-cycling,
-    # like for stellar & IR.
-
     if RadPressure && Hydro
-        # If radiation pressure feedback is turned on, deposit the momentum 
-        # computed during the photo-thermochemistry sub-cycling:
+        # If radiation pressure feedback is turned on, compute the 
+        # resulting forces from the accumulated momentum injected 
+        # during the sub-cycling (just a diagnostic):
 
         inv_Δt_Hydro = 1 / Δt_Hydro  # Convenient constant
         @threads for j in dN_Z
             @simd for i in dN_r
                 @inbounds begin
-
-                    # Add Lyα radiation pressure momentum to the gas:
-                    if Lyα
-                        ρu_r[i,j] += LyaState.Δρu_Lyα_r[i,j]
-                        ρu_Z[i,j] += LyaState.Δρu_Lyα_Z[i,j]
-                    end
-
                     # Update stellar radiation pressure forces (Lyα case is done below),
                     # mainly for setting the radiation pressure time-step limiter:
                     RT.f_stellar_r[i,j] = RT.Δρu_stellar_r[i,j] * inv_Δt_Hydro
@@ -294,7 +296,7 @@ function UpdateRHD!( Δt_Hydro::Float64,
             end # End of i-loop
         end # End of j-loop 
 
-        # NOTE: Work from radiation pressure is handled below, by updaing E.
+        # NOTE: Work from radiation pressure is handled below, by updating E.
     end
 
     # Update LyC and Lyman-Werner escape fractions (just diagnostics):
@@ -310,10 +312,9 @@ function UpdateRHD!( Δt_Hydro::Float64,
     # Update direct radiation pressure force diagnostics (just for analyzing after simulation):
     Update_M_F_dir!( RT, ΔV, BC_Z_bot )
 
-
     # Update Lyα forces f_Lyα, force multiplier M_F, luminosity L_Lyα, and Lyα escape fraction
-    # (all of these mainly for diagnostics and for setting the radiation pressure time-step):
-    if Lyα
+    # (all of these mainly for diagnostics):
+    if !isnothing(LyaState)
         if Gravity
             # If gravity is turned on, we also save force multiplier anti-parallel to gravity:
             LyaState.M_F, LyaState.M_F_antigravity, 
@@ -332,7 +333,6 @@ function UpdateRHD!( Δt_Hydro::Float64,
                                                             LyaState.L_Lyα, BC_Z_bot )
     end
 
-
     # Update gas temperature (+ adiabatic index), gas energy,
     # and primitives (for computing CFL time-step):
     @threads for j in dN_Z 
@@ -349,7 +349,7 @@ function UpdateRHD!( Δt_Hydro::Float64,
                 T[i,j]    = e[i,j] * μ * (γad[i,j] - 1) * mH / ( ρ[i,j] * kB )
 
                 # Update gas energy to reflect new temperature & momentum from radiation pressure:
-                E[i,j]    = e[i,j]  +  ( ρu_r[i,j]^2 + ρu_Z[i,j]^2 ) / ( 2 * ρ[i,j] )
+                E[i,j]    = e[i,j]  +  ( ρu_r[i,j] * ρu_r[i,j]  +  ρu_Z[i,j] * ρu_Z[i,j] ) / ( 2 * ρ[i,j] )
 
 
                 # Also update gas pressure & velocities, needed for the computing 
@@ -358,20 +358,23 @@ function UpdateRHD!( Δt_Hydro::Float64,
                 u_r[i,j]  = ρu_r[i,j] / ρ[i,j]
                 u_Z[i,j]  = ρu_Z[i,j] / ρ[i,j]
 
-                # Same for the dust:
-                ud_r[i,j], ud_Z[i,j] = GetDustVelocities( ρd[i,j], ρdud_r[i,j], ρdud_Z[i,j] )
-
             end
         end # End of i-loop 
     end # End of j-loop 
 
+    # Update dust velocities for each bin:
+    UpdateDustVelocities!( hydrostate )
+
     # Update gas velocity dispersions (useful diagnostic):
-    UpdateGasVelocityDispersion!( hydrostate, ΔV )
+    UpdateGasVelocityDispersion!( hydrostate, geometry )
 
     return nothing
 end
 
 
+""" This function sets up an RHD simulation in cylindrical coordinates, with a star of mass mstarZAMS (M⊙)
+    situated at the center of a cloud with a given initial properties (density, temperature, chemical abundances,
+    turbulence, etc.).  """
 function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                             Zstar_Zsun::Float64,  # Stellar metallicity Z_star / Z⊙
                                    DG₀::Float64,  # Dust-to-gas ratio (*not* normalized to Solar value)
@@ -411,7 +414,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                                xCO_ext::Float64,
                                xOI_ext::Float64,
                               xOII_ext::Float64,
-                             Zgas_Zsun::Float64,
+                            Zgas_Zsun₀::Float64,  # Initial gas metallicity in units of Solar metallicity 
                                      z::Float64,
                                  Hydro::Bool    = true,     # Hydrodynamics (on/off)
                                    Lyα::Bool    = true,     # Lyα RT (on/off)
@@ -420,6 +423,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                                Gravity::Bool    = true,
                            RadPressure::Bool    = true,
                             IRfeedback::Bool    = true,
+                   StellarWindFeedback::Bool    = false,
                  DustGrowthDestruction::Bool    = true,     # Dust growth & destruction (on if true, off if false)
                                    OTS::Bool    = false,    # On-the-spot approximation (on if true, off if false)
                              u_RMSturb::Float64 = 0.0,      # Initial turbulent RMS velocity 
@@ -427,8 +431,6 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                                N_Z_lin::Int     = 64,
                                N_r_log::Int     = 64,
                           N_Z_log_side::Int     = 64,
-                            N_ν_coarse::Int     = 200,
-                              N_ν_fine::Int     = 100,
                             BC_r_right::Symbol  = :Outflow,
                              BC_Z_left::Symbol  = :Reflect,
                             BC_Z_right::Symbol  = :Outflow,
@@ -448,7 +450,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     end
 
     # Initialize the RSL for M1 stellar & Lyα RT (will be updated adaptively each time-step)
-    c̃          = 30 * kms  
+    c̃          = c̃_min 
 
     # Setup cylindrical grid:
     LZ_uniform = min( LZ_uniform, Zmax )
@@ -482,15 +484,16 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
 
 
     if print_info
-        println(""" Number of threads used: $(Threads.nthreads())
-                    Julia version:          $(VERSION) """); flush(stdout)
+        println(""" 
+                Number of threads used: $(Threads.nthreads())
+                         Julia version: $(VERSION) """); flush(stdout)
         println("---------------------------------")
         if SaveData
-            println("Data will be saved to HDF5 file: $(FileName)."); flush(stdout)
+            println(" Data will be saved to HDF5 file: $(FileName). "); flush(stdout)
             println()
         end
         print(""" Simulation setup: A $(mstarZAMS) M⊙ star in a cloud of 
-                  initial maximum density nH = $(nH_core) cm⁻³, metallicity Z/Z⊙ = $(Zgas_Zsun),
+                  initial maximum density nH = $(nH_core) cm⁻³, initial metallicity Z/Z⊙ = $(Zgas_Zsun₀),
                   dust-to-gas ratio D/D⊙ = $(DG₀/DGsun). Initial turbulent RMS velocity 
                   is $(u_RMSturb/1e5) km s⁻¹.
 
@@ -502,6 +505,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                   Gravity:                     $(Gravity)
                   Lyα RT:                      $(Lyα)
                   Radiation pressure feedback: $(RadPressure)
+                  Stellar wind feedback:       $(StellarWindFeedback)
                   Dust growth & destruction:   $(DustGrowthDestruction)
                   On-the-spot approximation:   $(OTS)
 
@@ -515,15 +519,15 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     ###############################################################
 
     if print_info 
-        print("\r\033[KInitialising hydro & thermochemistry arrays..."); flush(stdout)
+        print("\r\033[KInitialising hydro, dust & thermochemistry arrays..."); flush(stdout)
     end
 
-    CoolingHeating = true 
+    # Cooling & heating should be turned on:
+    CoolingHeating = true  
 
     # Set up hydro state + ghost grid arrays:
-    N_scalars::Int        = 17       # Number of passive scalars (fixed from chemistry + dust)
-    BC_r_left::Symbol     = :Reflect # Always reflective BCs at inner r-boundary in cylindrical coordinates
-    hydrostate, ghostgrid = GenerateHydroArrays( r, rCoM, Z, ZCoM, 5 / 3, N_scalars,
+    BC_r_left::Symbol     = :Reflect     # Always reflective BCs at inner r-boundary in cylindrical coordinates
+    hydrostate, ghostgrid = GenerateHydroArrays( r, rCoM, Z, ZCoM, 5 / 3, N_dust, N_passivescalars,
                                                  BC_r_left, BC_r_right,  # Inner & outer r-BCs 
                                                  BC_Z_left, BC_Z_right   # Lower & outer Z-BCs
                                                   )
@@ -536,7 +540,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     u_Z    = hydrostate.u_Y
     E      = hydrostate.E
     P      = hydrostate.P 
-    e      = hydrostate.e 
+    e      = hydrostate.e_dual
     T      = hydrostate.T
     γad    = hydrostate.γad
 
@@ -544,19 +548,21 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     ρd     = hydrostate.ρd
     ρdud_r = hydrostate.ρdud_X
     ρdud_Z = hydrostate.ρdud_Y
-    ud_r   = hydrostate.ud_X
-    ud_Z   = hydrostate.ud_Y
+    ρdtot  = hydrostate.ρdtot
 
     # Initialize turbulent velocity fluctuations:
     SetupTurbulence!( u_RMSturb, Rcl, Zcl_pos, u_r, u_Z, r, Z, rCoM, ZCoM, ΔV, BC_Z_left )
 
     # Set up chemistry state struct, containing arrays for all species tracked,
     # e.g. xHII, xH2 etc. :
-    chemstate = InitializeChemistryArrays( N_r, N_Z, Zgas_Zsun, true )
+    ZC₀       = fCarbon  * Zgas_Zsun₀ * Zsun 
+    ZSil₀     = fSilicon * Zgas_Zsun₀ * Zsun 
+    Zgasrest₀ = (1 - fCarbon - fSilicon) * Zgas_Zsun₀ * Zsun 
+    chemstate = InitializeChemistryArrays( N_r, N_Z, ZC₀, ZSil₀, Zgasrest₀, true )
 
     # Cloud density properties:
-    ρcore  = max( Get_ρ_From_nH( nH_core, Zgas_Zsun, true ),  10 * ρ_floor )    # Density within cloud core
-    ρext   = max( Get_ρ_From_nH( nH_ext, Zgas_Zsun, true ),   10 * ρ_floor )    # Density far outside the cloud
+    ρcore  = max( Get_ρ_From_nH( nH_core, Zgas_Zsun₀, true ),  10 * ρ_floor )    # Density within cloud core
+    ρext   = max( Get_ρ_From_nH( nH_ext, Zgas_Zsun₀, true ),   10 * ρ_floor )    # Density far outside the cloud
     δr     = max( 2 * max( minimum(diff(r)), minimum(diff(Z)) ), 0.05 * Rcl )   # Determines fall-off in density outside cloud, in case power law is not used
 
     if ρcore < 1e3 * ρ_floor 
@@ -634,7 +640,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                     P[i,j] = ρ[i,j] * kB * T[i,j] / ( Getμ(xHII₀, xH2₀, xHeII₀, xHeIII₀) * mH )
                 else
                     T[i,j] = T_ext
-                    P[i,j] = ρ[i,j] * kB * T[i,j] / ( Getμ(xHII₀, xH2₀, xHeII₀, xHeIII₀) * mH )
+                    P[i,j] = ρ[i,j] * kB * T[i,j] / ( Getμ(xHII_ext, xH2_ext, xHeII_ext, xHeIII_ext) * mH )
                 end
 
                 # Gas momentum density:
@@ -647,12 +653,22 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                 # Energy density of gas, E = e + E_kin:
                 E[i,j]      = e[i,j]  +  0.5 * ρ[i,j] * (u_r[i,j]^2 + u_Z[i,j]^2)
 
-                # Dust density:
-                ρd[i,j]     = max( DG₀ * ρ[i,j], 10 * ρd_floor )
+                # Dust densities:
+                ρd[1,i,j]   = max( fd_Sil * DG₀ * ρ[i,j], 10 * ρd_floor )  # Silicate dust density 
+                ρd[2,i,j]   = max( fd_C   * DG₀ * ρ[i,j], 10 * ρd_floor )  # Graphite dust density 
+                ρd[3,i,j]   = max( fd_PAH * DG₀ * ρ[i,j], 10 * ρd_floor )  # PAH dust density 
+
+                @assert isapprox(fd_Sil + fd_C + fd_PAH, 1.0, rtol = 0.01) "Initial dust bin density fractions don't add up to 1."
 
                 # Dust momentum density (assume same velocity as gas initially):
-                ρdud_r[i,j] = ρd[i,j] * u_r[i,j]
-                ρdud_Z[i,j] = ρd[i,j] * u_Z[i,j]
+                ρdud_r[1,i,j] = ρd[1,i,j] * u_r[i,j]  # Silicate dust momentum
+                ρdud_Z[1,i,j] = ρd[1,i,j] * u_Z[i,j]
+
+                ρdud_r[2,i,j] = ρd[2,i,j] * u_r[i,j]  # Graphite dust momentum
+                ρdud_Z[2,i,j] = ρd[2,i,j] * u_Z[i,j]
+
+                ρdud_r[3,i,j] = ρd[3,i,j] * u_r[i,j]  # PAH dust momentum
+                ρdud_Z[3,i,j] = ρd[3,i,j] * u_Z[i,j]
                 
             end
         end # End of i-loop 
@@ -660,7 +676,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
 
 
     # Initialize total mass in simulation volume (for diagnostic purposes):
-    UpdateTotalMass!( hydrostate, ΔV )
+    UpdateTotalMass!( hydrostate, geometry )
 
     ###############################################################
     #######                                                 #######
@@ -670,12 +686,11 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
 
     # Initialize struct for dust properties/settings:
     Td₀       = 30.0
-    duststate = SetupDustState( DustGrowthDestruction, N_r, N_Z, Td₀, "DustData.txt", 
-                                "DustIRData.txt", true )
+    duststate = SetupDustState( DustGrowthDestruction, N_r, N_Z, Td₀ )
 
     # Sanity/safety check:
-    @assert size( duststate.Td ) == size( ρ ) "Dust temperature Td should have the same size 
-                                               as spatial grid."
+    @assert size( duststate.Td_Sil ) == size( ρ ) " Dust temperature Td should have the same size 
+                                                    as spatial grid. "
 
 
     ###############################################################
@@ -697,7 +712,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     
     # Generate struct with Lyα arrays + settings:
     LyαState::Union{LyαArrays,Nothing} =
-    Lyα ? GenerateLyαArrays( c̃, r, Z, T, Recoil, LyαDestruction, N_ν_coarse, N_ν_fine ) : nothing
+    Lyα ? GenerateLyαArrays( c̃, r, Z, T, Recoil, LyαDestruction ) : nothing
 
 
     ###############################################################
@@ -707,7 +722,7 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     ############################################################### 
 
     # Generate all stellar RT arrays, including J, H, inteface fluxes, 
-    # emissivities, and luminosities, for all 6 stellar RT bands:
+    # emissivities, and luminosities, for all 7 stellar + IR RT bands:
     RT = GenerateStellarRTArrays( mstarZAMS, Zstar_Zsun, ΔV, r, Z, 
                                   Zstar_pos, σstar_cell, c̃, OTS )
 
@@ -730,11 +745,12 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
         # Create save file:
         CreateHDF5File( FileName, N_r, N_Z, Nminsteps, Nmaxsteps, Nsaved, Gravity, 
                         Lyα, Recoil, LyαDestruction, RadPressure, IRfeedback,
+                        StellarWindFeedback,
                         DustGrowthDestruction, OTS, z, 
                         N_ν,
                         tmax, mstarZAMS, Zstar_Zsun, σstar_cell, 
                         Zstar_pos,
-                        DG₀, Zgas_Zsun,
+                        DG₀, Zgas_Zsun₀,
                         BC_r_right, BC_Z_left, BC_Z_right,
                         CFL, CFL_RT, c̃,
                         FileDescription )
@@ -752,16 +768,14 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
         save_index = 1
         t          = 0.0
         Δt_Hydro   = 0.0
-        if Lyα
+
+        if !isnothing(LyαState)
             # Update Lyα energy density before saving (will be zero - just for clarity):
             Update_e_Lyα!( LyαState.e_Lyα, LyαState.Δν, LyαState.J_Lyα )
-
-            SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, gravstate, duststate, RT,
-                                 LyαState, save_index, t, Δt_Hydro, Gravity )
-        else
-            SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, gravstate, duststate, RT,
-                                 save_index, t, Δt_Hydro, Gravity )
         end
+
+        SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, gravstate, duststate, RT,
+                             LyαState, save_index, t, Δt_Hydro, Gravity )
     end
 
     ###############################################################
@@ -773,8 +787,11 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     # Initialize the gravitational potential, so that we use an appropriate
     # first time-step:
     if Gravity
+        # Update total dust density ρdtot:
+        UpdateTotalDustDensity!( hydrostate )
+
         Update_Φ!( gravstate.Φ, gravstate.Φ_half, gravstate.Φ_old, gravstate.Φ_snapshot, 
-                   gravstate.ρtot, ρ, ρd, gravstate.ρ_bg,
+                   gravstate.ρtot, ρ, ρdtot, gravstate.ρ_bg,
                    gravcoeffs.RPoiss_ijp, gravcoeffs.RPoiss_ij, gravcoeffs.RPoiss_ijm,
                    gravcoeffs.ZPoiss_ijp, gravcoeffs.ZPoiss_ij, gravcoeffs.ZPoiss_ijm, 
                    gravcoeffs.Δτ_max, gravcoeffs.Δτ_min,
@@ -808,33 +825,11 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
     step             = 1          # Initialize the steps
     Δt_Hydro         = Inf        # Initialize the hydro time-step 
     while t < tmax
-
-        # Hydro & dust CFL time-step:
-        Δt_CFL      = GetCFLTimeStep( r, Z, ρ, P, u_r, u_Z, ud_r, ud_Z, γad )  
-
-        # Limit from gravitational acceleration time-scale:
-        if Gravity
-            Δt_Grav = GetGravityTimeStep( r, Z, gravstate.∂Φ∂r, gravstate.∂Φ∂Z, ρ )      
-        else
-            # Ignore limit in absence of gravity:
-            Δt_Grav = Inf    
-        end
-
-        # Limit from Radiation pressure acceleration time-scale:
-        if RadPressure 
-            if Lyα
-                Δt_RP = min( GetRadPressureTimeStep( r, Z, ρ, ρd, LyαState.f_Lyα_r, LyαState.f_Lyα_Z ),
-                             GetRadPressureTimeStep( r, Z, ρ, ρd, RT.f_stellar_r,   RT.f_stellar_Z ) )
-            else
-                Δt_RP = GetRadPressureTimeStep( r, Z, ρ, ρd, RT.f_stellar_r,   RT.f_stellar_Z )
-            end
-        else
-            # Ignore limit in absence of radiation pressure feedback:
-            Δt_RP   = Inf 
-        end
-
-        # Set hydro time-step:
-        Δt_Hydro = min( 1.25 * Δt_Hydro, Δt_CFL, Δt_RP, Δt_Grav, Δt_Resolve, tmax - t )
+        # Set global hydro time-step:
+        Δt_Hydro_max =  min( Δt_Resolve, tmax - t )
+        Δt_Hydro     =  Compute_RHD_TimeStep( Δt_Hydro, Δt_Hydro_max, hydrostate, gravstate, RT,  
+                                              LyαState, chemstate, duststate, geometry, 
+                                              Gravity, RadPressure )
 
         # Update hydro, gravity, thermochemistry, stellar RT:
         UpdateRHD!( Δt_Hydro, hydrostate, chemstate,
@@ -842,8 +837,8 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                     geometry, gravstate, gravcoeffs,
                     ghostgrid, 
                     LyαState, RT,
-                    Gravity, RadPressure, IRfeedback,
-                    z, Hydro, CoolingHeating, Lyα )
+                    Gravity, RadPressure, IRfeedback, StellarWindFeedback, 
+                    z, mstarZAMS, Zstar_Zsun, Hydro, CoolingHeating )
 
         # Update time & step: 
         t    += Δt_Hydro 
@@ -857,15 +852,11 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                 if Lyα
                     # Update Lyα energy density for saving:
                     Update_e_Lyα!( LyαState.e_Lyα, LyαState.Δν, LyαState.J_Lyα )
-
-                    # Save data:
-                    SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, gravstate, duststate, RT,
-                                         LyαState, save_index, t, Δt_Hydro, Gravity )
-                else
-                    # Save data:
-                    SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, gravstate, duststate, RT,
-                                         save_index, t, Δt_Hydro, Gravity )
                 end
+
+                # Save data:
+                SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, gravstate, duststate, RT,
+                                     LyαState, save_index, t, Δt_Hydro, Gravity )
             end
 
             # Move the 'next save' appointment forward until it is in the future 
@@ -885,10 +876,8 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
             println("\nSimulation stopped: Reached maximum number of global time-steps ($(Nmaxsteps)).")
             break
         end
-
       
     end # End of time-integration 
-
 
     return nothing
 end
@@ -900,10 +889,18 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
 
     PrintLYDIONLogo()
 
+    println(""" 
+            Number of threads used: $(Threads.nthreads())
+                     Julia version: $(VERSION) """); flush(stdout)
+    println("---------------------------------")
+    println(" Restarting RHD simulation from checkpoint in HDF5 file $(FileName)... ")
+    println( " " )
+
     # Initialize various variables and settings that will be needed after
     # we close the h5 open:
-    Gravity = false; Lyα = false; Recoil = false; RadPressure = false; IRfeedback = false; Hydro = true
-    LyαDestruction = true; DustGrowthDestruction = true
+    Gravity = false; Lyα = false; Recoil = false; RadPressure = false; IRfeedback = false; StellarWindFeedback = false
+    Hydro = true; LyαDestruction = true; DustGrowthDestruction = true
+    mstarZAMS = 0.0; Zstar_Zsun = 0.0
     z = 0.0; tmax = 0.0
     t = 0.0; step = 0; Δt_Hydro = 0.0
     c̃_saved = 0.0
@@ -964,6 +961,7 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         Recoil                 = parse_bool(get_attr(Settings, "Recoil"))
         RadPressure            = parse_bool(get_attr(Settings, "RadPressure"))
         IRfeedback             = parse_bool(get_attr(Settings, "IRfeedback"))
+        StellarWindFeedback    = parse_bool(get_attr(Settings, "StellarWindFeedback"))
         DustGrowthDestruction  = parse_bool(get_attr(Settings, "DustGrowth/Destruction"))
         OTS                    = parse_bool(get_attr(Settings, "OTS"))
         LyαDestruction         = haskey(attrs(Settings), "Lya_pd_on") ? parse_bool(get_attr(Settings, "Lya_pd_on")) : true
@@ -980,12 +978,6 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         Zstar_Zsun     = parse_f64(get_attr(Settings, "Z_star_Zsun"))
         σstar_cell     = parse_f64(get_attr(Settings, "σ_star_cell"))
         Zstar_pos      = parse_f64(get_attr(Settings, "Z_pos"))
-
-        # Dust-to-gas ratio:
-        DG₀            = parse_f64(get_attr(Settings, "Initial_DTG"))
-
-        # Gas metallicity:
-        Zgas_Zsun      = parse_f64(get_attr(Settings, "Zgas_Zsun"))
 
         # Get desired final time of simulation:
         if haskey(attrs(Settings), "tmax")
@@ -1037,29 +1029,31 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
 
         # Set up chemistry state struct, containing arrays for all species tracked,
         # e.g. xHII, xH2 etc. (not initialized to right values yet):
-        chemstate = InitializeChemistryArrays( N_r, N_Z, Zgas_Zsun, true )
+        chemstate = InitializeChemistryArrays( N_r, N_Z, 0.0, 0.0, 0.0, true )
 
-        chemstate.xHII    .=  CheckPoint["xHII"][:, :]
-        chemstate.xH2     .=  CheckPoint["xH2"][:, :]
-        chemstate.xHeII   .=  CheckPoint["xHeII"][:, :]
-        chemstate.xHeIII  .=  CheckPoint["xHeIII"][:, :]
-        chemstate.xDII    .=  CheckPoint["xDII"][:, :]
-        chemstate.xHD     .=  CheckPoint["xHD"][:, :]
-        chemstate.xCI     .=  CheckPoint["xCI"][:, :]
-        chemstate.xCII    .=  CheckPoint["xCII"][:, :]
-        chemstate.xCO     .=  CheckPoint["xCO"][:, :]
-        chemstate.xOI     .=  CheckPoint["xOI"][:, :]
-        chemstate.xOII    .=  CheckPoint["xOII"][:, :]
+        chemstate.xHII     .=  CheckPoint["xHII"][:, :]
+        chemstate.xH2      .=  CheckPoint["xH2"][:, :]
+        chemstate.xHeII    .=  CheckPoint["xHeII"][:, :]
+        chemstate.xHeIII   .=  CheckPoint["xHeIII"][:, :]
+        chemstate.xDII     .=  CheckPoint["xDII"][:, :]
+        chemstate.xHD      .=  CheckPoint["xHD"][:, :]
+        chemstate.xCI      .=  CheckPoint["xCI"][:, :]
+        chemstate.xCII     .=  CheckPoint["xCII"][:, :]
+        chemstate.xCO      .=  CheckPoint["xCO"][:, :]
+        chemstate.xOI      .=  CheckPoint["xOI"][:, :]
+        chemstate.xOII     .=  CheckPoint["xOII"][:, :]
+
+        chemstate.ZC       .= CheckPoint["ZC"][:, :]
+        chemstate.ZSil     .= CheckPoint["ZSil"][:, :]
+        chemstate.Zgasrest .= CheckPoint["Zgasrest"][:, :]
 
         # Set up dust state struct, containing dust properties:
-        Td₀       = 30.0
-        duststate = SetupDustState( DustGrowthDestruction, N_r, N_Z, Td₀, "DustData.txt", 
-                                   "DustIRData.txt", true )
+        Td₀       = 30.0      # Arbitrary dust temperature 
+        duststate = SetupDustState( DustGrowthDestruction, N_r, N_Z, Td₀ )
 
         # Setup hydro state (not initialized to right values yet) + ghost grid arrays:
-        N_scalars::Int        = 17
         BC_r_left::Symbol     = :Reflect # Always reflective BCs at inner r-boundary in cylindrical coordinates
-        hydrostate, ghostgrid = GenerateHydroArrays( r, rCoM, Z, ZCoM, 5 / 3, N_scalars,
+        hydrostate, ghostgrid = GenerateHydroArrays( r, rCoM, Z, ZCoM, 5 / 3, N_dust, N_passivescalars,
                                                      BC_r_left, BC_r_right,  # Inner & outer r-BCs 
                                                      BC_Z_left, BC_Z_right   # Lower & outer Z-BCs
                                                      )
@@ -1074,7 +1068,7 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         u_Z     = hydrostate.u_Y
         P       = hydrostate.P
         γad     = hydrostate.γad
-        e       = hydrostate.e
+        e       = hydrostate.e_dual
 
         ρd      = hydrostate.ρd
         ρdud_r  = hydrostate.ρdud_X
@@ -1087,12 +1081,21 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         ρu_r   .= CheckPoint["rMomentum"][:, :]
         ρu_Z   .= CheckPoint["ZMomentum"][:, :]
         E      .= CheckPoint["Energy"][:, :]
+        e      .= CheckPoint["e_dual"][:, :]
         T      .= CheckPoint["T"][:, :]
 
         # Same for dust:
-        ρd     .= CheckPoint["DustDensity"][:, :]
-        ρdud_r .= CheckPoint["DustrMomentum"][:, :]
-        ρdud_Z .= CheckPoint["DustZMomentum"][:, :]
+        ρd[1, :, :]     .= CheckPoint["DustDensity_Sil"][:, :]
+        ρdud_r[1, :, :] .= CheckPoint["DustrMomentum_Sil"][:, :]
+        ρdud_Z[1, :, :] .= CheckPoint["DustZMomentum_Sil"][:, :]
+        
+        ρd[2, :, :]     .= CheckPoint["DustDensity_C"][:, :]
+        ρdud_r[2, :, :] .= CheckPoint["DustrMomentum_C"][:, :]
+        ρdud_Z[2, :, :] .= CheckPoint["DustZMomentum_C"][:, :]
+        
+        ρd[3, :, :]     .= CheckPoint["DustDensity_PAH"][:, :]
+        ρdud_r[3, :, :] .= CheckPoint["DustrMomentum_PAH"][:, :]
+        ρdud_Z[3, :, :] .= CheckPoint["DustZMomentum_PAH"][:, :]
 
         dN_r = 1:N_r
         dN_Z = 1:N_Z
@@ -1104,11 +1107,8 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
 
                 # Get primitive variables: 
                 u_r[i,j], u_Z[i,j], P[i,j] = GetPrimitive( ρ[i,j], ρu_r[i,j], ρu_Z[i,j], 
-                                                           E[i,j], γad[i,j] )
+                                                           E[i,j], e[i,j], γad[i,j] )
                 P[i,j]  = max( P[i,j], P_floor )
-
-                # Gas internal energy density: 
-                e[i,j]  = P[i,j] / (γad[i,j] - 1)
 
                 # Mean molecular weight:
                 μ       = Getμ( chemstate.xHII[i,j], chemstate.xH2[i,j],
@@ -1122,11 +1122,14 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
                 end
                 T[i,j]  = T_frome
 
-                # Get dust velocities:
-                ud_r[i,j], ud_Z[i,j] = GetDustVelocities( ρd[i,j], ρdud_r[i,j], ρdud_Z[i,j] )
-
             end
         end
+
+        # Update dust velocities:
+        UpdateDustVelocities!( hydrostate )
+
+        # Update total dust density:
+        UpdateTotalDustDensity!( hydrostate )
 
         # Initialize struct + arrays for gravity state & coefficients:
         gravstate, gravcoeffs = 
@@ -1169,10 +1172,6 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         RT.H_r_IR   .= CheckPoint["H_r_IR"][:, :];    RT.H_r_IR_old .= RT.H_r_IR
         RT.H_Z_IR   .= CheckPoint["H_Z_IR"][:, :];    RT.H_Z_IR_old .= RT.H_Z_IR
 
-        # Get latest Strang-split order for hydro & stellar RT:
-        hydrostate.rfirst_Hydro = parse_bool(attrs(CheckPoint)["rfirst_Hydro"])
-        RT.rfirst_StellarRT     = parse_bool(attrs(CheckPoint)["rfirst_StellarRT"])
-
         # Initialize Lyα state:
         if Lyα
             # Get saved frequency grid:
@@ -1194,9 +1193,6 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
             LyαState.J_Lyα_old   .= LyαState.J_Lyα
             LyαState.H_r_Lyα_old .= LyαState.H_r_Lyα
             LyαState.H_Z_Lyα_old .= LyαState.H_Z_Lyα
-
-            # Get latest Strang-split order:
-            LyαState.rfirst_Lyα   = parse_bool(attrs(CheckPoint)["rfirst_Lya"])
 
             # Recompute e_Lyα:
             Update_e_Lyα!( LyαState.e_Lyα, LyαState.Δν, LyαState.J_Lyα )
@@ -1263,7 +1259,7 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
     # first time-step:
     if Gravity
         Update_Φ!( gravstate.Φ, gravstate.Φ_half, gravstate.Φ_old, gravstate.Φ_snapshot, 
-                   gravstate.ρtot, ρ, ρd, gravstate.ρ_bg,
+                   gravstate.ρtot, ρ, hydrostate.ρdtot, gravstate.ρ_bg,
                    gravcoeffs.RPoiss_ijp, gravcoeffs.RPoiss_ij, gravcoeffs.RPoiss_ijm,
                    gravcoeffs.ZPoiss_ijp, gravcoeffs.ZPoiss_ij, gravcoeffs.ZPoiss_ijm, 
                    gravcoeffs.Δτ_max, gravcoeffs.Δτ_min,
@@ -1272,13 +1268,13 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
 
         Update_∇Φ!( gravstate.∂Φ∂r, gravstate.∂Φ∂Z, gravstate.Φ, 
                     gravstate.f_gravity_r, gravstate.f_gravity_Z, ρ, 
-                    geometry.rCoM, geometry.ZCoM )
+                    geometry.r, geometry.Z, geometry.rCoM, geometry.ZCoM, 
+                    gravstate.P, gravstate.Q,
+                    BC_Z_left, gravstate.ℓmax )
     end
 
-
-    Δt_Resolve  = tmax / Nminsteps
-
     # ---- Initialize time-steps where data is saved ----
+    Δt_Resolve  = tmax / Nminsteps
     Δt_save     = tmax / ( Nsaved - 1 )
     save_tol    = 1e-12 * tmax                       # Tolerance to guard against round-off errors when deciding if to save data
     k           = floor((t + save_tol) / Δt_save)    # Number of completed save intervals
@@ -1296,33 +1292,11 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
 
     # Start time integration from the last saved time t:
     while t < tmax
-
-        # Hydro CFL time-step:
-        Δt_CFL = GetCFLTimeStep( r, Z, ρ, P, u_r, u_Z, ud_r, ud_Z, γad )  
-
-        # Limit from gravitational acceleration time-scale:
-        if Gravity
-            Δt_Grav = GetGravityTimeStep( r, Z, gravstate.∂Φ∂r, gravstate.∂Φ∂Z )      
-        else
-            # Ignore limit in absence of gravity:
-            Δt_Grav = Inf    
-        end
-
-        # Limit from Radiation pressure acceleration time-scale:
-        if RadPressure 
-            if Lyα
-                Δt_RP = min( GetRadPressureTimeStep( r, Z, ρ, ρd, LyαState.f_Lyα_r, LyαState.f_Lyα_Z ),
-                             GetRadPressureTimeStep( r, Z, ρ, ρd, RT.f_stellar_r,   RT.f_stellar_Z ) )
-            else
-                Δt_RP = GetRadPressureTimeStep( r, Z, ρ, ρd, RT.f_stellar_r,   RT.f_stellar_Z )
-            end
-        else
-            # Ignore limit in absence of radiation pressure feedback:
-            Δt_RP   = Inf 
-        end
-
-        # Set hydro time-step:
-        Δt_Hydro = min( 1.25 * Δt_Hydro, Δt_CFL, Δt_RP, Δt_Grav, Δt_Resolve, tmax - t )
+        # Set global hydro time-step:
+        Δt_Hydro_max =  min( Δt_Resolve, tmax - t )
+        Δt_Hydro     =  Compute_RHD_TimeStep( Δt_Hydro, Δt_Hydro_max, hydrostate, gravstate, RT,  
+                                              LyαState, chemstate, duststate, geometry, 
+                                              Gravity, RadPressure )
 
         # Update hydro, gravity, thermochemistry, stellar RT:
         UpdateRHD!( Δt_Hydro, hydrostate, chemstate,
@@ -1330,8 +1304,8 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
                     geometry, gravstate, gravcoeffs,
                     ghostgrid, 
                     LyαState, RT,
-                    Gravity, RadPressure, IRfeedback,
-                    z, Hydro, CoolingHeating, Lyα )
+                    Gravity, RadPressure, IRfeedback, StellarWindFeedback,
+                    z, mstarZAMS, Zstar_Zsun, Hydro, CoolingHeating )
 
         # Update time & step: 
         t    += Δt_Hydro 
@@ -1345,15 +1319,11 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
                 if Lyα
                     # Update Lyα energy density for saving:
                     Update_e_Lyα!( LyαState.e_Lyα, LyαState.Δν, LyαState.J_Lyα )
-
-                    # Save data:
-                    SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, gravstate, duststate, RT,
-                                         LyαState, save_index, t, Δt_Hydro, Gravity )
-                else
-                    # Save data:
-                    SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, gravstate, duststate, RT,
-                                         save_index, t, Δt_Hydro, Gravity )
                 end
+
+                # Save data:
+                SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, gravstate, duststate, RT,
+                                     LyαState, save_index, t, Δt_Hydro, Gravity )
             end
 
             # Move the 'next save' appointment forward until it is in the future 

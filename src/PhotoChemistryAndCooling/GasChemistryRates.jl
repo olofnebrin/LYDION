@@ -52,7 +52,7 @@ export krecHII_1, krecHII, krecHeII_1, krecHeII, krecHeIII_1, krecHeIII,
     See ref. (1). """       
 @inline function krecHII_A( T::Float64 )
     λHI       = 315614.0 / clamp( T, 1.0, 1e9 ) 
-    krecHII_A = 1.269e-13 * (λHI^1.503) / ( 1 + (λHI/0.522)^0.47 )^1.923
+    krecHII_A = @fastmath 1.269e-13 * (λHI^1.503) / ( 1 + (λHI/0.522)^0.47 )^1.923
     return krecHII_A
 end
 
@@ -61,7 +61,7 @@ end
     See ref. (1). """       
 @inline function krecHII_B( T::Float64 )
     λHI       = 315614.0 / clamp( T, 1.0, 1e9 ) 
-    krecHII_B = 2.753e-14 * (λHI^1.5) / ( 1 + (λHI/2.74)^0.407 )^2.242
+    krecHII_B = @fastmath 2.753e-14 * (λHI^1.5) / ( 1 + (λHI/2.74)^0.407 )^2.242
     return krecHII_B
 end
 
@@ -93,7 +93,7 @@ end
     See ref. (1). """       
 @inline function krecHeII_A( T::Float64 )
     λHeI       = 570670.0 / clamp( T, 1.0, 1e9 ) 
-    krecHeII_A = 3e-14 * (λHeI^0.654)
+    krecHeII_A = @fastmath 3e-14 * (λHeI^0.654)
     return krecHeII_A
 end
 
@@ -102,7 +102,7 @@ end
     See ref. (1). """       
 @inline function krecHeII_B( T::Float64 )
     λHeI       = 570670.0 / clamp( T, 1.0, 1e9 ) 
-    krecHeII_B = 1.26e-14 * (λHeI^0.75)
+    krecHeII_B = @fastmath 1.26e-14 * (λHeI^0.75)
     return krecHeII_B
 end
 
@@ -133,7 +133,7 @@ end
     See ref. (1). """       
 @inline function krecHeIII_A( T::Float64 )
     λHeII       = 1263030.0 / clamp( T, 1.0, 1e9 )  
-    krecHeIII_A = 2.538e-13 * (λHeII^1.503) / (1 + (λHeII/0.522)^0.47)^1.923
+    krecHeIII_A = @fastmath 2.538e-13 * (λHeII^1.503) / (1 + (λHeII/0.522)^0.47)^1.923
     return krecHeIII_A
 end
 
@@ -142,7 +142,7 @@ end
     See ref. (1). """       
 @inline function krecHeIII_B( T::Float64 )
     λHeII       = 1263030.0 / clamp( T, 1.0, 1e9 )  
-    krecHeIII_B = 5.506e-14 * (λHeII^1.5) / (1 + (λHeII/2.74)^0.407 )^2.242 
+    krecHeIII_B = @fastmath 5.506e-14 * (λHeII^1.5) / (1 + (λHeII/2.74)^0.407 )^2.242 
     return krecHeIII_B
 end
 
@@ -174,7 +174,7 @@ const kcollion_HI0 = 5.85e-11; const T_collionHI = 157809.1
 """ The H I collisional ionization rate (cm³ s⁻¹) by electrons,
     as a function of temperature T (K). See ref. (1). """
 @inline function kcollion_HI( T::Float64 )
-    kcollion_HI0 * sqrt(T) * exp( - T_collionHI / T ) / ( 1 + sqrt(T/1e5) )
+    @fastmath kcollion_HI0 * sqrt(T) * exp( - T_collionHI / T ) / ( 1 + sqrt(T/1e5) )
 end
 
 
@@ -183,7 +183,7 @@ const kcollion_HeI0 = 2.38e-11; const T_collionHeI = 285335.4
 """ The He I collisional ionization rate (cm³ s⁻¹) by electrons,
     as a function of temperature T (K). See ref. (1). """
 @inline function kcollion_HeI( T::Float64 )
-    kcollion_HeI0 * sqrt(T) * exp( - T_collionHeI / T ) / ( 1 + sqrt(T/1e5) )
+    @fastmath kcollion_HeI0 * sqrt(T) * exp( - T_collionHeI / T ) / ( 1 + sqrt(T/1e5) )
 end
 
 
@@ -192,7 +192,7 @@ const kcollion_HeII0 = 5.68e-12; const T_collionHeII = 631515.0
 """ The He II collisional ionization rate (cm³ s⁻¹) by electrons,
     as a function of temperature T (K). See ref. (1). """
 @inline function kcollion_HeII( T::Float64 )
-    kcollion_HeII0 * sqrt(T) * exp( - T_collionHeII / T ) / ( 1 + sqrt(T/1e5) )
+    @fastmath kcollion_HeII0 * sqrt(T) * exp( - T_collionHeII / T ) / ( 1 + sqrt(T/1e5) )
 end
 
 
@@ -211,8 +211,10 @@ const Tdust_crit_H2::Float64 = 600.0
     From Hollenbach & McKee (1979). """
 @inline function S_HI_ϵ_H2( T::Float64, Td::Float64 )
 
-    return  1 / ( ( 1  +  0.04 * (T + Td)^0.5  +  0.002 * T  +  8e-6 * (T^2) ) 
-                * ( 1  +  1e4 * exp( - Tdust_crit_H2 / Td ) ) )
+    @fastmath S_HI_ϵ = 1 / ( ( 1  +  0.04 * (T + Td)^0.5  +  0.002 * T  +  8e-6 * (T * T) ) 
+                           * ( 1  +  1e4 * exp( - Tdust_crit_H2 / Td ) ) )
+
+    return S_HI_ϵ
 end
 
 
@@ -224,20 +226,32 @@ const Const_vth_HI::Float64 = sqrt( 8 * kB / (π * mH) )  # Pre-factor for vth
     R_{dust,H₂} = (3/8) ∑_j (ρdj / ρgrj) × (1 / āgrj) × sqrt( 8 kB T / π mH ) × S_{HI} × ϵ_{H₂}
     
     See e.g. Hollenbach & McKee (1979) and Draine (2011). Uses pre-computed grain 
-    properties for silicate and graphite dust. """
-@inline function R_dustH2( T::Float64, ρd::Float64, Td::Float64 = 30.0 )
+    properties for silicate and graphite/PAH dust. """
+@inline function R_dustH2( T::Float64, 
+                          ρd::NTuple{3, Float64}, 
+                          Td::NTuple{3, Float64} )
+
+    # Unpack ρd and Td:
+    ρd_Sil, ρd_C, ρd_PAH = ρd 
+    Td_Sil, Td_C, Td_PAH = Td 
 
     # Clamp temperature (just for numerical reasons):
     T   = clamp( T, 0.0, 1e9 )  
 
     # Get vth = sqrt( 8 kB T / π mH ):
-    vth = Const_vth_HI * sqrt( T )
+    vth = @fastmath Const_vth_HI * sqrt( T )
 
     # Get S_{HI} × ϵ_{H₂}:
-    Sϵ  = S_HI_ϵ_H2( T, Td )
+    Sϵ_Sil  = S_HI_ϵ_H2( T, Td_Sil )
+    Sϵ_C    = S_HI_ϵ_H2( T, Td_C )
+    Sϵ_PAH  = S_HI_ϵ_H2( T, Td_PAH )
 
-    return ThreeEights * ρd * vth * Sϵ * ( inv_agr_sil * fsil         * inv_ρgr_sil  
-                                         + inv_agr_C   * OneMinusfsil * inv_ρgr_C   )
+    # Get R_{dust,H₂}:
+    @fastmath R_DustH2 = ThreeEights * vth * ( inv_agr_Sil * ρd_Sil * inv_ρgr_Sil * Sϵ_Sil 
+                                             + inv_agr_C   * ρd_C   * inv_ρgr_C   * Sϵ_C 
+                                             + inv_agr_PAH * ρd_PAH * inv_ρgr_C   * Sϵ_PAH )
+
+    return R_DustH2
 end
 
 
@@ -249,7 +263,7 @@ const T_k1 = 16200.0
 """ H + e⁻ → H⁻ + hν rate (cm³ s⁻¹; from Galli & Palla 1998). """
 @inline function k1( T::Float64 )
     T = clamp( T, 1.0, 1e5 )
-    return k1_0 * (T^0.928) * exp( - T/T_k1 )
+    return @fastmath k1_0 * (T^0.928) * exp( - T/T_k1 )
 end
 
 
@@ -264,8 +278,8 @@ const c10_k2 = 3.0424;    const c11_k2 = 3.2576e-14; const c12_k2 = 3.7741
 """ H⁻ + H → H₂ + e⁻ rate (cm³ s⁻¹; from Kreckel et al. 2010). """
 @inline function k2( T::Float64 )
     T = clamp( T, 1.0, 1e5 )
-    return c1_k2 * (T^c2_k2 + c3_k2 * T^c4_k2 + c5_k2 * T^c6_k2 ) / (
-                    1 + c7_k2 * T^c8_k2 + c9_k2 * T^c10_k2 + c11_k2 * T^c12_k2 )
+    return @fastmath c1_k2 * (T^c2_k2 + c3_k2 * T^c4_k2 + c5_k2 * T^c6_k2 ) / (
+                              1 + c7_k2 * T^c8_k2 + c9_k2 * T^c10_k2 + c11_k2 * T^c12_k2 )
 end
 
 
@@ -278,7 +292,7 @@ const T_k5 = 2e4
     is updated relative to Glover & Jappsen 2007).  """
 @inline function k5( T::Float64 )
     T = clamp( T, 1.0, 1e5 )
-    return k5_0 * (T^(-0.5)) * (1.0 + T/T_k5)
+    return @fastmath k5_0 * (T^(-0.5)) * (1.0 + T/T_k5)
 end
 
 
@@ -296,12 +310,12 @@ const c8_k15 = - 2.63128581e-6
 @inline function k15( T::Float64 )
     # Convenient definitions: 
     T  = clamp( T, 1.0, 1e5 )
-    x  = log( T / (eV/kB) ); x2 = x^2; x3 = x2*x; x4 = x3*x
+    x  = log( T / (eV/kB) ); x2 = x*x; x3 = x2*x; x4 = x3*x
     x5 = x4*x; x6 = x5*x; x7 = x6*x; x8 = x7*x 
 
     # Rate:
-    k15 = exp( c0_k15 + c1_k15*x + c2_k15*x2 + c3_k15*x3 + c4_k15*x4
-             + c5_k15*x5 + c6_k15*x6 + c7_k15*x7 + c8_k15*x8 )
+    @fastmath k15 = exp( c0_k15 + c1_k15*x + c2_k15*x2 + c3_k15*x3 + c4_k15*x4
+                       + c5_k15*x5 + c6_k15*x6 + c7_k15*x7 + c8_k15*x8 )
     
     return k15
 end
@@ -322,15 +336,15 @@ const c8_k16 = 2.4555012e-6;   const c9_k16 = - 8.0683825e-8
 function k16( T::Float64 )
     TeV = clamp( T, 1.0, 1e5 ) / (eV/kB)
     if TeV ≤ 0.1
-        return k16_0 * (TeV^1.78186)
+        return @fastmath k16_0 * (TeV^1.78186)
     else
         # Convenient definitions:
-        x = log( TeV ); x2 = x^2; x3 = x2*x; x4 = x3*x
+        x = log( TeV ); x2 = x*x; x3 = x2*x; x4 = x3*x
         x5 = x4*x; x6 = x5*x; x7 = x6*x; x8 = x7*x; x9 = x8*x 
 
         # Rate:
-        k16 = exp( c0_k16 + c1_k16*x + c2_k16*x2 + c3_k16*x3 + c4_k16*x4
-                   + c5_k16*x5 + c6_k16*x6 + c7_k16*x7 + c8_k16*x8 + c9_k16*x9 )
+        @fastmath k16 = exp( c0_k16 + c1_k16*x + c2_k16*x2 + c3_k16*x3 + c4_k16*x4
+                           + c5_k16*x5 + c6_k16*x6 + c7_k16*x7 + c8_k16*x8 + c9_k16*x9 )
 
         return k16
     end
@@ -348,9 +362,9 @@ const p_k17low = - 0.35; const p_k17high = - 0.90
 function k17( T::Float64 )
     T = clamp( T, 1.0, 1e5 )
     if T ≤ 8e3
-        return k17_0low * T^p_k17low
+        return @fastmath k17_0low * T^p_k17low
     else
-        return k17_0high * T^p_k17high
+        return @fastmath k17_0high * T^p_k17high
     end
 end
 
@@ -377,14 +391,14 @@ function kGP_H2( T::Float64,
     K16 = k16(T); K17 = k17(T)
 
     # CMB photodetachment rate of H⁻ (see Schauer et al. 2019):
-    TCMB    =   TCMB0 * (1 + z)
-    Γpd_CMB = ( Γpd_CMB10 * (TCMB^cpd_CMB1) * exp( - Tpd_CMB1 / TCMB )
-            +   Γpd_CMB20 * (TCMB^cpd_CMB2) * exp( - Tpd_CMB2 / TCMB ) )
+    TCMB    = @fastmath   TCMB0 * (1 + z)
+    Γpd_CMB = @fastmath ( Γpd_CMB10 * (TCMB^cpd_CMB1) * exp( - Tpd_CMB1 / TCMB )
+                      +   Γpd_CMB20 * (TCMB^cpd_CMB2) * exp( - Tpd_CMB2 / TCMB ) )
     # Total photodetachment rate from non-CMB photons + CMB photons:
-    Γpd_tot =   Γpd +  Γpd_CMB
+    Γpd_tot = @fastmath   Γpd +  Γpd_CMB
 
     # Full rate coefficient, assuming equilibrium abundance of H⁻:
-    kGP_H2  = ( K2 * K1 * nHI ) / ( (K2 + K16) * nHI  +  (K5 + K17) * nHII  +  K15 * ne  +  Γpd_tot )
+    kGP_H2  = @fastmath ( K2 * K1 * nHI ) / ( (K2 + K16) * nHI  +  (K5 + K17) * nHII  +  K15 * ne  +  Γpd_tot )
 
     return kGP_H2
 end
@@ -394,7 +408,7 @@ end
     See ref. (2) (taken from Forrey 2013). """
 @inline function k3B_H2( T::Float64 )
     T = clamp( T, 1.0, 1e5 )
-    return 6e-32 * T^(-0.25) + 2e-31 * T^(-0.5)
+    return @fastmath 6e-32 * T^(-0.25) + 2e-31 * T^(-0.5)
 end
 
 
@@ -413,16 +427,16 @@ function kdiss_H2HI( T::Float64,
     T = clamp( T, 100.0, 1e5 )
 
     # Low & high-density limits of the reaction rate:
-    kdisc_H2HI_low  = kdisc_H2HI_low0 * sqrt(T) * exp( - (1.0 + T_discH2HI_low/T) )
-    kdisc_H2HI_high = kdisc_H2HI_high0 * exp( - T_discH2HI_high/T )
+    kdisc_H2HI_low  = @fastmath kdisc_H2HI_low0 * sqrt(T) * exp( - (1.0 + T_discH2HI_low/T) )
+    kdisc_H2HI_high = @fastmath kdisc_H2HI_high0 * exp( - T_discH2HI_high/T )
 
     # Critical density for transition from low-density to high-density limits
     # (note that Glover et al. 2010 has "3.0", but in the reference cited (Lepp & Shull 1983)
     # it is actually "4.0", so I have corrected this):
     x   = log10(T/1e4)
-    ncr = 10^( 4.0 - 0.416 * x - 0.327 * x^2 )
+    ncr = @fastmath 10^( 4.0 - 0.416 * x - 0.327 * x*x )
 
-    return 10^( log10(kdisc_H2HI_high) - log10(kdisc_H2HI_high/kdisc_H2HI_low) / (1 + nHI/ncr) )
+    return @fastmath 10^( log10(kdisc_H2HI_high) - log10(kdisc_H2HI_high/kdisc_H2HI_low) / (1 + nHI/ncr) )
 end
 
 
@@ -439,16 +453,16 @@ function kdiss_H2H2( T::Float64,
     T = clamp( T, 100.0, 1e5 )
     
     # Low & high-density limits of the reaction rate:
-    kdisc_H2H2_low  = kdisc_H2H2_low0 * (T^4.1881) * exp( - T_discH2H2_low/T ) / (
-                      1.0 + 6.761e-6 * T   )^5.6881
+    kdisc_H2H2_low  = @fastmath kdisc_H2H2_low0 * (T^4.1881) * exp( - T_discH2H2_low/T ) / (
+                                1.0 + 6.761e-6 * T   )^5.6881
 
-    kdisc_H2H2_high = kdisc_H2H2_high0 * exp( - T_discH2H2_high/T )
+    kdisc_H2H2_high = @fastmath kdisc_H2H2_high0 * exp( - T_discH2H2_high/T )
 
     # Critical density for transition from low-density to high-density limits:
     x   = log10(T/1e4)
-    ncr = 10^( 4.845 - 1.3 * x + 1.62 * x^2 )
+    ncr = @fastmath 10^( 4.845 - 1.3 * x + 1.62 * x*x )
     
-    return 10^( log10(kdisc_H2H2_high) - log10(kdisc_H2H2_high/kdisc_H2H2_low) / (1 + nH2/ncr) )
+    return @fastmath 10^( log10(kdisc_H2H2_high) - log10(kdisc_H2H2_high/kdisc_H2H2_low) / (1 + nH2/ncr) )
 end
 
 
@@ -460,7 +474,7 @@ const p_discH2e  = 0.1121
     of temperature T (K). See Glover et al. (2010). """
 @inline function kdiss_H2e( T::Float64 )
     T = clamp( T, 100.0, 1e5 )
-    kdisc_H2e0 * (T^p_discH2e) * exp( - T_discH2e/T )
+    @fastmath kdisc_H2e0 * (T^p_discH2e) * exp( - T_discH2e/T )
 end
 
 
@@ -479,7 +493,7 @@ const c6_kdiscH2HII = - 1.8171411e-11; const c7_kdiscH2HII = 3.5311932e-13
     Reaction: H₂ + H⁺ → H + H₂⁺ """
 @inline function kdiss_H2HII( T::Float64 )
     T  = clamp( T, 100.0, 1e5 )
-    x  = log(T); x2 = x^2; x3 = x2*x; x4 = x3*x; x5 = x4*x 
+    x  = log(T); x2 = x*x; x3 = x2*x; x4 = x3*x; x5 = x4*x 
     x6 = x5*x;   x7 = x6*x
 
     max( 0.0, ( c0_kdiscH2HII + c1_kdiscH2HII * x + c2_kdiscH2HII * x2
@@ -506,7 +520,7 @@ const k51_D0 = 2.18e-9; const p_k51_D = 3.55e-1
 
 """ Rate (cm³ s⁻¹) for D⁺ + H → D + H⁺. See Faure+ (2023). """
 @inline function k51_D( T::Float64 )
-    k51_D0 * (T^p_k51_D)
+    @fastmath k51_D0 * (T^p_k51_D)
 end
 
 
@@ -514,7 +528,7 @@ const T_k50_D = 4.30e1
 
 """ Rate (cm³ s⁻¹) for D + H⁺ → D⁺ + H. See Faure+ (2023). """
 @inline function k50_D( T::Float64 )
-    k51_D(T) * exp( - T_k50_D / T )
+    @fastmath k51_D(T) * exp( - T_k50_D / T )
 end
 
 
@@ -531,7 +545,7 @@ const k53_D0 = 8.57e-10; const T_k53_D = 4.05e2
 
 """ Rate (cm³ s⁻¹) for H⁺ + HD → D⁺ + H₂. See Faure+ (2023). """
 @inline function k53_D( T::Float64 )
-    k53_D0 * exp( - T_k53_D / T )
+    @fastmath k53_D0 * exp( - T_k53_D / T )
 end
 
 
@@ -546,12 +560,12 @@ const k54_D0_high = 3.17e-10; const T_k54_D = 5207.0
 @inline function k54_D( T::Float64 )
     if T ≤ 2e3 
         T = clamp( T, 1.0, 2e3 )
-        x = log10(T); x2 = x^2; x3 = x2*x; x4 = x3*x; x5 = x4*x 
+        x = log10(T); x2 = x*x; x3 = x2*x; x4 = x3*x; x5 = x4*x 
 
-        k54_D = 10^( c0_k54_D + c1_k54_D*x + c2_k54_D*x2 + c3_k54_D*x3 + c4_k54_D*x4 + c5_k54_D*x5 )
+        k54_D = @fastmath 10^( c0_k54_D + c1_k54_D*x + c2_k54_D*x2 + c3_k54_D*x3 + c4_k54_D*x4 + c5_k54_D*x5 )
         return k54_D
     else
-        k54_D = k54_D0_high * exp( - T_k54_D / T )
+        k54_D = @fastmath k54_D0_high * exp( - T_k54_D / T )
         return k54_D
     end
 end
@@ -564,7 +578,7 @@ const c_k55_D = 173900.0
     See reaction 40 in Glover & Abel (2008). """
 @inline function k55_D( T::Float64 )
     T     = clamp( T, 1e2, 1e5 )
-    k55_D = k55_D0 * exp( - T_k55_D / T  +  c_k55_D / (T^2) )
+    k55_D = @fastmath k55_D0 * exp( - T_k55_D / T  +  c_k55_D / (T*T) )
     return k55_D
 end
 
@@ -584,8 +598,8 @@ end
     See Glover & Jappsen (2007). """
 @inline function kCIe( T::Float64 )
     T    = clamp( T, 1.0, 1e5 )
-    u    = 11.26 * eV / (kB * T)
-    return 6.85e-8 * (u^0.25) * exp(-u) / (0.193 + u)
+    u    = @fastmath 11.26 * eV / (kB * T)
+    return @fastmath 6.85e-8 * (u^0.25) * exp(-u) / (0.193 + u)
 end
 
 
@@ -594,8 +608,8 @@ end
     See Glover & Jappsen (2007). """
 @inline function kOIe( T::Float64 )
     T    = clamp( T, 1.0, 1e5 )
-    u    = 13.6 * eV / (kB * T)
-    return 3.59e-8 * (u^0.34) * exp(-u) / (0.073 + u)
+    u    = @fastmath 13.6 * eV / (kB * T)
+    return @fastmath 3.59e-8 * (u^0.34) * exp(-u) / (0.073 + u)
 end
 
 
@@ -607,14 +621,14 @@ const kCIIe_rr0 = 2.995e-9; const T_CIIrec = 49550.0
 @inline function kCIIe( T::Float64 )
     T        = clamp( T, 1.0, 1e5 )
     # Radiative recombination rate:
-    α        = sqrt(T / 6.67e-3)
-    β        = sqrt(T / 1.9436e6)
-    γ        = 0.7849  +  0.1597 * exp( - T_CIIrec / T )
-    kCIIe_rr = kCIIe_rr0 / ( α * ((1 + α)^(1-γ)) * ((1 + β)^(1+γ)) )
+    α        = @fastmath sqrt(T / 6.67e-3)
+    β        = @fastmath sqrt(T / 1.9436e6)
+    γ        = @fastmath 0.7849  +  0.1597 * exp( - T_CIIrec / T )
+    kCIIe_rr = @fastmath kCIIe_rr0 / ( α * ((1 + α)^(1-γ)) * ((1 + β)^(1+γ)) )
     # Dielectronic recombination rate:
-    kCIIe_dr = (T^(-3/2)) * ( 6.346e-9 * exp( - 12.17 / T )
-                            + 9.793e-9 * exp( - 73.8 / T )
-                            + 1.634e-6 * exp( - 15230.0 / T ) )
+    kCIIe_dr = @fastmath (T^(-3/2)) * ( 6.346e-9 * exp( - 12.17 / T )
+                                      + 9.793e-9 * exp( - 73.8 / T )
+                                      + 1.634e-6 * exp( - 15230.0 / T ) )
     return kCIIe_rr + kCIIe_dr
 end
 
@@ -625,10 +639,10 @@ end
 @inline function kOIIe( T::Float64 )
     T = clamp( T, 1.0, 1e5 )
     if T ≤ 400.0
-        KOIIe = 1.30e-10 * (T^(-0.64))
+        KOIIe = @fastmath 1.30e-10 * (T^(-0.64))
         return KOIIe
     else
-        KOIIe = 1.41e-10 * (T^(-0.66))  +  7.4e-4 * (T^(-1.5)) * exp(-175000.0/T)
+        KOIIe = @fastmath 1.41e-10 * (T^(-0.66))  +  7.4e-4 * (T^(-1.5)) * exp(-175000.0/T)
         return KOIIe
     end 
 end
@@ -649,13 +663,13 @@ const KCIH3plus0  = 1.04e-9; const p_CIH3plus  = 0.00231
     This correction is included here. """
 @inline function kCIH3plus( T::Float64 )
     T    = clamp( T, 1.0, 1e5 )
-    T300 = T / 300.0
+    T300 = @fastmath T / 300.0
 
-    KCIH3plus = (  KCIH3plus0 * (T300^p_CIH3plus) 
-                + (T^(-1.5)) * ( c1_CIH3plus * exp( - T1_CIH3plus / T ) 
-                               + c2_CIH3plus * exp( - T2_CIH3plus / T )
-                               + c3_CIH3plus * exp( - T3_CIH3plus / T )
-                               + c4_CIH3plus * exp( - T4_CIH3plus / T )) )
+    KCIH3plus = @fastmath (  KCIH3plus0 * (T300^p_CIH3plus) 
+                             + (T^(-1.5)) * ( c1_CIH3plus * exp( - T1_CIH3plus / T ) 
+                             + c2_CIH3plus * exp( - T2_CIH3plus / T )
+                             + c3_CIH3plus * exp( - T3_CIH3plus / T )
+                             + c4_CIH3plus * exp( - T4_CIH3plus / T )) )
 
     return KCIH3plus 
 end
@@ -668,7 +682,7 @@ const kCIIH2_10 = 2.31e-13; const T_CI = 23.0
     See Gong et al. (2017). """
 @inline function kCIIH2_1( T::Float64 )
     T = clamp( T, 1.0, 1e5 )
-    return kCIIH2_10 * T^(-1.3) * exp( - T_CI / T ) 
+    return @fastmath kCIIH2_10 * T^(-1.3) * exp( - T_CI / T ) 
 end
 
 
@@ -679,7 +693,7 @@ const kCIIH2_20 = 0.99e-13
     See Gong et al. (2017). """
 @inline function kCIIH2_2( T::Float64 )
     T = clamp( T, 1.0, 1e5 )
-    return kCIIH2_20 * T^(-1.3) * exp( - T_CI / T ) 
+    return @fastmath kCIIH2_20 * T^(-1.3) * exp( - T_CI / T ) 
 end
 
 
@@ -688,7 +702,7 @@ end
     See Gong et al. (2017). """
 @inline function kHIIOI( T::Float64 )
     T = clamp( T, 1.0, 1e5 )
-    return ( 1.1e-11 * T^0.517  +  4e-10 * T^0.00669 ) * exp( - 227.0/T )
+    return @fastmath ( 1.1e-11 * T^0.517  +  4e-10 * T^0.00669 ) * exp( - 227.0/T )
 end
 
 
@@ -697,7 +711,7 @@ end
     See Gong et al. (2017). """
 @inline function kOIIHI( T::Float64 )
     T = clamp( T, 1.0, 1e5 )
-    return 4.99e-11 * T^0.405  +  7.5e-10 * T^(-0.458) 
+    return @fastmath 4.99e-11 * T^0.405  +  7.5e-10 * T^(-0.458) 
 end
 
 
@@ -777,7 +791,7 @@ end
     See Gong et al. (2017). """
 @inline function kCHxHI( T::Float64 )
     T = clamp( T, 1.0, 1e5 )
-    2.81e-11 * (T^0.26)
+    @fastmath 2.81e-11 * (T^0.26)
 end
 
 
@@ -789,7 +803,7 @@ const T_OHxCI  = 0.108
     See Gong et al. (2017). """
 @inline function kOHxCI( T::Float64 )
     T = clamp( T, 1.0, 1e5 )
-    kOHxCI_0 * (T^p_OHxCI) * exp( T_OHxCI / T )
+    @fastmath kOHxCI_0 * (T^p_OHxCI) * exp( T_OHxCI / T )
 end
 
 
@@ -809,6 +823,6 @@ end
 @inline function kH3pluse( T::Float64 )
     T = clamp( T, 1.0, 1e5 )
     # Sum of the two rates given in Gong (4.54e-7 + 8.46e-7 = 13e-7):
-    return 13e-7 * T^(-0.52)
+    return @fastmath 13e-7 * T^(-0.52)
 end
 

@@ -16,7 +16,7 @@ using  Base.Threads              # For CPU acceleration
 export PreparePassiveScalars!, RecoverChemistryFromPassiveScalars!
 
 
-const Zgas_Zsun_floor::Float64 = 1e-10
+const Zgas_floor::Float64 = 1e-10 * Zsun 
 
 """ This function prepares all passive scalars for advection. """
 @views function PreparePassiveScalars!( HydroState::HydrodynamicsState, 
@@ -31,7 +31,9 @@ const Zgas_Zsun_floor::Float64 = 1e-10
     @. Chemistry.xHeI_adv = max( 1 - Chemistry.xHeII - Chemistry.xHeIII,  0.0 )
     @. Chemistry.xDI_adv  = max( 1 - Chemistry.xDII  - Chemistry.xHD,     0.0 )
     @. Chemistry.xCHx_adv = max( 1 - Chemistry.xCI   - Chemistry.xCII  -  Chemistry.xCO, 0.0 )
-    @. Chemistry.xOHx_adv = max( 1 - Chemistry.xOI   - Chemistry.xOII  -  C_over_O * Chemistry.xCO, 0.0 )
+    @. Chemistry.xOHx_adv = max( 1 - Chemistry.xOI   - Chemistry.xOII  
+                                 - Compute_nC_over_nO( Chemistry.ZC, Chemistry.Zgasrest ) * Chemistry.xCO, 
+                                 0.0 )
     
     # Prepare passive scalars for advection in the hydro code:
     @. S[:,:,1]  = ρ * Chemistry.xHI_adv 
@@ -43,14 +45,22 @@ const Zgas_Zsun_floor::Float64 = 1e-10
     @. S[:,:,7]  = ρ * Chemistry.xDI_adv 
     @. S[:,:,8]  = ρ * Chemistry.xDII
     @. S[:,:,9]  = ρ * Chemistry.xHD 
-    @. S[:,:,10] = ρ * Chemistry.xCHx_adv * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
-    @. S[:,:,11] = ρ * Chemistry.xCI      * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
-    @. S[:,:,12] = ρ * Chemistry.xCII     * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
-    @. S[:,:,13] = ρ * Chemistry.xCO      * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
-    @. S[:,:,14] = ρ * Chemistry.xOHx_adv * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
-    @. S[:,:,15] = ρ * Chemistry.xOI      * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
-    @. S[:,:,16] = ρ * Chemistry.xOII     * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
-    @. S[:,:,17] = ρ * max( Chemistry.Zgas_Zsun,  Zgas_Zsun_floor )
+
+    # Carbon species:
+    @. S[:,:,10] = ρ * Chemistry.xCHx_adv * max( Chemistry.ZC,  Zgas_floor )
+    @. S[:,:,11] = ρ * Chemistry.xCI      * max( Chemistry.ZC,  Zgas_floor )
+    @. S[:,:,12] = ρ * Chemistry.xCII     * max( Chemistry.ZC,  Zgas_floor )
+    @. S[:,:,13] = ρ * Chemistry.xCO      * max( Chemistry.ZC,  Zgas_floor )
+    # Oxygen species:
+    @. S[:,:,14] = ρ * Chemistry.xOHx_adv * max( Chemistry.Zgasrest,  Zgas_floor )
+    @. S[:,:,15] = ρ * Chemistry.xOI      * max( Chemistry.Zgasrest,  Zgas_floor )
+    @. S[:,:,16] = ρ * Chemistry.xOII     * max( Chemistry.Zgasrest,  Zgas_floor )
+
+    # We advect carbon metallicity (which controls carbonaceous dust growth), silicate 
+    # metallicity (controls silicate dust growth), and the rest of the metallicity:
+    @. S[:,:,17] = ρ * max( Chemistry.ZC,       Zgas_floor )
+    @. S[:,:,18] = ρ * max( Chemistry.ZSil,     Zgas_floor )
+    @. S[:,:,19] = ρ * max( Chemistry.Zgasrest, Zgas_floor )
 
     return nothing 
 end
@@ -72,13 +82,16 @@ function RecoverChemistryFromPassiveScalars!( HydroState::HydrodynamicsState,
     @threads for j in dN_Z 
         @inbounds @simd for i in dN_r 
             # Convenient variable:
-            inv_ρ        = 1 / max( ρ[i,j], ρ_floor )
+            inv_ρ  = 1 / max( ρ[i,j], ρ_floor )
 
-            # Recover gas metallicity:
-            Chemistry.Zgas_Zsun[i,j] = max( S[i,j,17] * inv_ρ,  Zgas_Zsun_floor )
+            # Recover gas metallicity (for carbon, silicate, and rest):
+            Chemistry.ZC[i,j]       = max( S[i,j,17] * inv_ρ,  Zgas_floor )
+            Chemistry.ZSil[i,j]     = max( S[i,j,18] * inv_ρ,  Zgas_floor )
+            Chemistry.Zgasrest[i,j] = max( S[i,j,19] * inv_ρ,  Zgas_floor )
 
-            # Another convenient variable:
-            inv_ZgasZsun = 1 / Chemistry.Zgas_Zsun[i,j]
+            # Convenient variables:
+            inv_ZC              = 1 / Chemistry.ZC[i,j]
+            inv_Zgasrest        = 1 / Chemistry.Zgasrest[i,j]
 
             # Recover preliminary abundance fractions:
             Chemistry.xHI_adv[i,j]   = S[i,j,1]  * inv_ρ
@@ -90,13 +103,13 @@ function RecoverChemistryFromPassiveScalars!( HydroState::HydrodynamicsState,
             Chemistry.xDI_adv[i,j]   = S[i,j,7]  * inv_ρ
             Chemistry.xDII[i,j]      = S[i,j,8]  * inv_ρ
             Chemistry.xHD[i,j]       = S[i,j,9]  * inv_ρ
-            Chemistry.xCHx_adv[i,j]  = S[i,j,10] * inv_ρ * inv_ZgasZsun
-            Chemistry.xCI[i,j]       = S[i,j,11] * inv_ρ * inv_ZgasZsun
-            Chemistry.xCII[i,j]      = S[i,j,12] * inv_ρ * inv_ZgasZsun
-            Chemistry.xCO[i,j]       = S[i,j,13] * inv_ρ * inv_ZgasZsun
-            Chemistry.xOHx_adv[i,j]  = S[i,j,14] * inv_ρ * inv_ZgasZsun
-            Chemistry.xOI[i,j]       = S[i,j,15] * inv_ρ * inv_ZgasZsun
-            Chemistry.xOII[i,j]      = S[i,j,16] * inv_ρ * inv_ZgasZsun
+            Chemistry.xCHx_adv[i,j]  = S[i,j,10] * inv_ρ * inv_ZC
+            Chemistry.xCI[i,j]       = S[i,j,11] * inv_ρ * inv_ZC
+            Chemistry.xCII[i,j]      = S[i,j,12] * inv_ρ * inv_ZC
+            Chemistry.xCO[i,j]       = S[i,j,13] * inv_ρ * inv_ZC
+            Chemistry.xOHx_adv[i,j]  = S[i,j,14] * inv_ρ * inv_Zgasrest
+            Chemistry.xOI[i,j]       = S[i,j,15] * inv_ρ * inv_Zgasrest
+            Chemistry.xOII[i,j]      = S[i,j,16] * inv_ρ * inv_Zgasrest
 
             ######## Ensure machine-precision normalization ######################
             inv_xHtot    = 1 / ( Chemistry.xHI_adv[i,j]  +  Chemistry.xHII[i,j]   +  2 * Chemistry.xH2[i,j] )
@@ -135,7 +148,7 @@ function RecoverChemistryFromPassiveScalars!( HydroState::HydrodynamicsState,
             xCI       = $(Chemistry.xCI[i,j])
             xCII      = $(Chemistry.xCII[i,j])
             xCO       = $(Chemistry.xCO[i,j])
-            Zgas_Zsun = $(Chemistry.Zgas_Zsun[i,j])
+            ZC        = $(Chemistry.ZC[i,j])
                 
             Occurred after gas fraction advection, but before renormalization. """
 
@@ -158,14 +171,15 @@ function RecoverChemistryFromPassiveScalars!( HydroState::HydrodynamicsState,
             # Normalize oxygen species (OHₓ is not needed after advection, since it's 
             # obtained from conservation), in such a way that the CO abundance 
             # remain consistent/unchanged:
-            f_renorm =  ( max( ( 1 - C_over_O * Chemistry.xCO[i,j] ), 0.0 ) 
-                        / ( Chemistry.xOHx_adv[i,j] +  Chemistry.xOI[i,j]  +  Chemistry.xOII[i,j] ) )
+            nC_over_nO =  Compute_nC_over_nO( Chemistry.ZC[i,j], Chemistry.Zgasrest[i,j] )
+            f_renorm   =  ( max( ( 1 - nC_over_nO * Chemistry.xCO[i,j] ), 0.0 ) 
+                          / ( Chemistry.xOHx_adv[i,j]  +  Chemistry.xOI[i,j]  +  Chemistry.xOII[i,j] ) )
             
             Chemistry.xOI[i,j]    = Chemistry.xOI[i,j]  * f_renorm
             Chemistry.xOII[i,j]   = Chemistry.xOII[i,j] * f_renorm
 
-        end
-    end
+        end # End of i-loop 
+    end # End of j-loop 
 
     return nothing
 end

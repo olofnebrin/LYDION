@@ -23,9 +23,9 @@ export SetupCylindricalGrid, SetupCylindricalGrid_FromSaved, SetupCartesianGrid
 
 """ Compute the cell centroid in a cell extending from 
     r_{i-1/2} to r_{i+1/2}. """
-function Get_Single_rCoM_Cylindrical( r_phalf::T, # r_{i+1/2}
-                                      r_mhalf::T  # r_{i-1/2}
-                                      ) where {T<:AbstractFloat}
+@inline function Get_Single_rCoM_Cylindrical( r_phalf::T, # r_{i+1/2}
+                                              r_mhalf::T  # r_{i-1/2}
+                                             ) where {T<:AbstractFloat}
 
     rCoM = (T(2)/T(3)) * ( r_phalf^3  -  r_mhalf^3 ) / ( r_phalf^2  -  r_mhalf^2 )
 
@@ -36,8 +36,8 @@ end
     the radial direction, *given* interface values r.
     
     Works only for the cylindrical r-coordinate. """
-function Get_rCoM_Cylindrical!( r::AbstractArray{T}, 
-                             rCoM::AbstractArray{T} ) where {T<:AbstractFloat}
+@inline function Get_rCoM_Cylindrical!( r::AbstractArray{T}, 
+                                     rCoM::AbstractArray{T} ) where {T<:AbstractFloat}
 
     N_r  = length( r ) - 1  # Number of radial grid points 
     dN_r = 1:N_r
@@ -57,8 +57,8 @@ end
     
     Works for both cylindrical & Cartesian 
     coordinates. """
-function Get_ZCoM!( Z::AbstractArray{T}, 
-                 ZCoM::AbstractArray{T} ) where {T<:AbstractFloat}
+@inline function Get_ZCoM!( Z::AbstractArray{T}, 
+                         ZCoM::AbstractArray{T} ) where {T<:AbstractFloat}
 
     N_Z  = length( Z ) - 1  # Number of vertical grid points 
     dN_Z = 1:N_Z 
@@ -77,9 +77,9 @@ end
     *given* interface values r and Z.
     
     Works for cylindrical coordinates. """
-function Get_ΔV_Cylindrical!( r::AbstractArray{T}, 
-                              Z::AbstractArray{T},
-                             ΔV::AbstractArray{T, 2} ) where {T<:AbstractFloat}
+@inline function Get_ΔV_Cylindrical!( r::AbstractArray{T}, 
+                                      Z::AbstractArray{T},
+                                     ΔV::AbstractArray{T, 2} ) where {T<:AbstractFloat}
 
     N_r  = length( r ) - 1  # Number of radial grid points         
     N_Z  = length( Z ) - 1  # Number of vertical grid points 
@@ -103,15 +103,17 @@ end
     along the r-direction, given interface values r and Z.
     
     Works for cylindrical coordinates. """
-function Get_A_r_Cylindrical!( r::AbstractArray{T}, 
-                               Z::AbstractArray{T},
-                             A_r::AbstractArray{T, 2} ) where {T<:AbstractFloat}
+@inline function Get_A_r_Cylindrical!( r::AbstractArray{T}, 
+                                       Z::AbstractArray{T},
+                                     A_r::AbstractArray{T, 2} ) where {T<:AbstractFloat}
 
     N_r  = length( r ) - 1  # Number of radial grid points         
     N_Z  = length( Z ) - 1  # Number of vertical grid points 
     dN_Z = 1:N_Z 
 
     @assert size( A_r ) == (N_r + 1, N_Z)
+
+    @assert r[1] == 0.0 "Innermost interface r[1] = r_{1/2} must be 0 in cylindrical coordinates."
 
     @inbounds for j in dN_Z 
         ΔZ = Z[j+1] - Z[j]
@@ -128,9 +130,9 @@ end
     along the Z-direction, given interface values r and Z.
     
     Works for cylindrical coordinates. """
-function Get_A_Z_Cylindrical!( r::AbstractArray{T}, 
-                               Z::AbstractArray{T},
-                             A_Z::AbstractArray{T, 2} ) where {T<:AbstractFloat}
+@inline function Get_A_Z_Cylindrical!( r::AbstractArray{T}, 
+                                       Z::AbstractArray{T},
+                                     A_Z::AbstractArray{T, 2} ) where {T<:AbstractFloat}
 
     N_r  = length( r ) - 1  # Number of radial grid points         
     N_Z  = length( Z ) - 1  # Number of vertical grid points 
@@ -150,9 +152,9 @@ end
 
 """ This function populates ⟨1/r⟩, needed for the geometric 
     source term in problems in cylindrical coordinates. """
-function Get_inv_r_cell_Cylindrical!( inv_r_cell::AbstractArray{T},
-                                               r::AbstractArray{T}
-                                     ) where {T<:AbstractFloat}
+@inline function Get_inv_r_cell_Cylindrical!( inv_r_cell::AbstractArray{T},
+                                                       r::AbstractArray{T}
+                                           ) where {T<:AbstractFloat}
 
     N_r  = length( r ) - 1  # Number of radial grid points     
     dN_r = 1:N_r 
@@ -170,10 +172,10 @@ end
 """ This function computes w⁺_{i,s} and w⁻_{i,s} for the cylindrical r-coordinate,
     for all radial cells i, and with s ∈ (-1, 0, 1). These coefficients are needed 
     for the WENO3 interface reconstruction, and are constants for a given grid. """
-function Get_WENO3_w_plus_w_minus_r!( r::AbstractArray{T, 1},
-                            w_plus_i_p1::AbstractArray{T, 1},  # w⁺_{i,1}
-                           w_minus_i_p1::AbstractArray{T, 1}   # w⁻_{i,1}
-                                     ) where {T<:AbstractFloat}
+@inline function Get_WENO3_w_plus_w_minus_r!( r::AbstractArray{T, 1},
+                                    w_plus_i_p1::AbstractArray{T, 1},  # w⁺_{i,1}
+                                   w_minus_i_p1::AbstractArray{T, 1}   # w⁻_{i,1}
+                                            ) where {T<:AbstractFloat}
 
   N_r  = length(r) - 1
   dN_r = 1:N_r
@@ -231,10 +233,10 @@ end
 """ This function computes w⁺_{j,s} and w⁻_{j,s} for the cylindrical Z-coordinate (a Cartesian one),
     for all verical cells j, and with s ∈ (-1, 0, 1). These coefficients are needed 
     for the WENO3 interface reconstruction, and are constants for a given grid. """
-function Get_WENO3_w_plus_w_minus_Z!( Z::AbstractArray{T, 1},
-                            w_plus_j_p1::AbstractArray{T, 1},  # w⁺_{j,1}
-                           w_minus_j_p1::AbstractArray{T, 1}   # w⁻_{j,1}
-                                     ) where {T<:AbstractFloat}
+@inline function Get_WENO3_w_plus_w_minus_Z!( Z::AbstractArray{T, 1},
+                                    w_plus_j_p1::AbstractArray{T, 1},  # w⁺_{j,1}
+                                   w_minus_j_p1::AbstractArray{T, 1}   # w⁻_{j,1}
+                                            ) where {T<:AbstractFloat}
 
   N_Z  = length(Z) - 1
   dN_Z = 1:N_Z
@@ -660,7 +662,6 @@ function SetupCylindricalGrid( rmax::T,      rmax_lin::T,
     w_plus_j_p1  = zeros( T, N_Z )
     w_minus_j_p1 = zeros( T, N_Z )
 
-
     if BC_Z_bot == :Outflow
         # In this case we want log, then uniform, then log grid for the Z-axis. 
 
@@ -975,6 +976,38 @@ function SetupCylindricalGrid_FromSaved( r::AbstractArray{T}, rCoM::AbstractArra
     w_plus_j_p1  = zeros( T, N_Z )
     w_minus_j_p1 = zeros( T, N_Z )
 
+    # Get grid r-intervals (and inverse intervals) needed for M1 advection:
+    Δr_L           = zeros( T, N_r ) # r[i+1]    - rCoM[i]
+    Δr_R           = zeros( T, N_r ) # rCoM[i+1] - r[i+1]
+    inv_dr_i_im1   = zeros( T, N_r ) # 1 / ( rCoM[i]   - rCoM[i-1] )
+    inv_dr_ip1_i   = zeros( T, N_r ) # 1 / ( rCoM[i+1] - rCoM[i]   )
+    inv_dr_ip2_ip1 = zeros( T, N_r ) # 1 / ( rCoM[i+2] - rCoM[i+1] )
+
+    # Fill the intervals for interior cells, and return the boundary values:
+
+    inv_dr_i_im1_InnerBoundary, inv_dr_ip1_i_InnerBoundary, inv_dr_ip2_ip1_InnerBoundary,
+    Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+    inv_dr_i_im1_OuterBoundary, inv_dr_ip1_i_OuterBoundary, inv_dr_ip2_ip1_OuterBoundary,
+    Δr_L_OuterBoundary, Δr_R_OuterBoundary = Compute_Grid_Differences!( Δr_L, Δr_R, 
+                                             inv_dr_i_im1, inv_dr_ip1_i, inv_dr_ip2_ip1,
+                                             r, rCoM )
+
+    # Get grid Z-intervals (and inverse intervals) needed for M1 advection:
+    ΔZ_L           = zeros( T, N_Z ) # Z[j+1]    - ZCoM[j]
+    ΔZ_R           = zeros( T, N_Z ) # ZCoM[j+1] - Z[j+1]
+    inv_dZ_j_jm1   = zeros( T, N_Z ) # 1 / ( ZCoM[j]   - ZCoM[j-1] )
+    inv_dZ_jp1_j   = zeros( T, N_Z ) # 1 / ( ZCoM[j+1] - ZCoM[j]   )
+    inv_dZ_jp2_jp1 = zeros( T, N_Z ) # 1 / ( ZCoM[j+2] - ZCoM[j+1] )
+
+    # Fill the intervals for interior cells, and return the boundary values:
+
+    inv_dZ_j_jm1_InnerBoundary, inv_dZ_jp1_j_InnerBoundary, inv_dZ_jp2_jp1_InnerBoundary,
+    ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+    inv_dZ_j_jm1_OuterBoundary, inv_dZ_jp1_j_OuterBoundary, inv_dZ_jp2_jp1_OuterBoundary,
+    ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary = Compute_Grid_Differences!( ΔZ_L, ΔZ_R, 
+                                             inv_dZ_j_jm1, inv_dZ_jp1_j, inv_dZ_jp2_jp1,
+                                             Z, ZCoM )
+
     # Get A_r, A_Z, inv_r_cell ≡ ⟨1/r⟩, and WENO3 weights:
     Get_A_r_Cylindrical!( r, Z, A_r )
     Get_A_Z_Cylindrical!( r, Z, A_Z )
@@ -996,7 +1029,20 @@ function SetupCylindricalGrid_FromSaved( r::AbstractArray{T}, rCoM::AbstractArra
                                    w_i_m1_r, w_i_0_r, w_i_p1_r, w_j_m1_Z, w_j_0_Z, w_j_p1_Z,
                                    q_i_m1_r, q_i_0_r, q_i_p1_r, q_j_m1_Z, q_j_0_Z, q_j_p1_Z,
                                    w_plus_i_p1, w_minus_i_p1, 
-                                   w_plus_j_p1, w_minus_j_p1  )
+                                   w_plus_j_p1, w_minus_j_p1, 
+
+                                   Δr_L, Δr_R, inv_dr_i_im1, inv_dr_ip1_i, inv_dr_ip2_ip1,
+                                   inv_dr_i_im1_InnerBoundary, inv_dr_ip1_i_InnerBoundary, inv_dr_ip2_ip1_InnerBoundary,
+                                   Δr_L_InnerBoundary, Δr_R_InnerBoundary,
+                                   inv_dr_i_im1_OuterBoundary, inv_dr_ip1_i_OuterBoundary, inv_dr_ip2_ip1_OuterBoundary,
+                                   Δr_L_OuterBoundary, Δr_R_OuterBoundary,
+
+                                   ΔZ_L, ΔZ_R, inv_dZ_j_jm1, inv_dZ_jp1_j, inv_dZ_jp2_jp1,
+                                   inv_dZ_j_jm1_InnerBoundary, inv_dZ_jp1_j_InnerBoundary, inv_dZ_jp2_jp1_InnerBoundary,
+                                   ΔZ_L_InnerBoundary, ΔZ_R_InnerBoundary,
+                                   inv_dZ_j_jm1_OuterBoundary, inv_dZ_jp1_j_OuterBoundary, inv_dZ_jp2_jp1_OuterBoundary,
+                                   ΔZ_L_OuterBoundary, ΔZ_R_OuterBoundary
+                                   )
 end
 
 ###############################################################
@@ -1012,9 +1058,9 @@ end
     *given* interface values X and Y.
     
     Works for Cartesian coordinates. """
-function Get_ΔV_Cartesian!( X::AbstractArray{T}, 
-                            Y::AbstractArray{T},
-                           ΔV::AbstractArray{T, 2} ) where {T<:AbstractFloat}
+@inline function Get_ΔV_Cartesian!( X::AbstractArray{T}, 
+                                    Y::AbstractArray{T},
+                                   ΔV::AbstractArray{T, 2} ) where {T<:AbstractFloat}
 
     N_X  = length( X ) - 1  # Number of X grid points         
     N_Y  = length( Y ) - 1  # Number of Y grid points 
@@ -1040,9 +1086,9 @@ end
     Works for Cartesian coordinates. (NOTE: No dependence on Y,
     but for compatabilitiy with the cylindrical-focused hydro code, 
     we still use a matrix for A_X). """
-function Get_A_X_Cartesian!( X::AbstractArray{T}, 
-                             Y::AbstractArray{T},
-                           A_X::AbstractArray{T, 2} ) where {T<:AbstractFloat}
+@inline function Get_A_X_Cartesian!( X::AbstractArray{T}, 
+                                     Y::AbstractArray{T},
+                                   A_X::AbstractArray{T, 2} ) where {T<:AbstractFloat}
 
     N_X  = length( X ) - 1  # Number of X grid points         
     N_Y  = length( Y ) - 1  # Number of Y grid points 
@@ -1067,9 +1113,9 @@ end
     Works for Cartesian coordinates. (NOTE: No dependence on X,
     but for compatabilitiy with the cylindrical-focused hydro code, 
     we still use a matrix for A_Y). """
-function Get_A_Y_Cartesian!( X::AbstractArray{T}, 
-                             Y::AbstractArray{T},
-                           A_Y::AbstractArray{T, 2} ) where {T<:AbstractFloat}
+@inline function Get_A_Y_Cartesian!( X::AbstractArray{T}, 
+                                     Y::AbstractArray{T},
+                                   A_Y::AbstractArray{T, 2} ) where {T<:AbstractFloat}
 
     N_X  = length( X ) - 1  # Number of X grid points         
     N_Y  = length( Y ) - 1  # Number of Y grid points 

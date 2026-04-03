@@ -9,8 +9,8 @@ yr   = 3.1556926e7
 kyr  = 1e3 * yr
 kms  = 1e5
 
-#filename_Lya =  "Aaron_RHDSim_Solar_Lya_256.h5"
-filename_Lya =  "RHDSim_Lya_64x64_2026-02-12.h5"
+#filename_Lya =  "Aaron_RHDSim_Lya_n4_Z2_128x128.h5"
+filename_Lya =  "RHDSim_Lya_128x128_2026-03-31.h5"
 
 with h5py.File(filename_Lya, "r") as file:
     M_F       = file["M_F_History"][:]

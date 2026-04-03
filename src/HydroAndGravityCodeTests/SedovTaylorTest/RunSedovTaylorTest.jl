@@ -6,7 +6,7 @@ using .SedovTaylorTest         # The Sedov-Taylor test setup
 ρ₀::Float64                        =  1.0
 γ::Float64                         =  5 / 3
 Eblast::Float64                    =  1.0
-tmax::Float64                      =  0.4          # Stop simulation at t = tmax (unless it stops automatically earlier)
+tmax::Float64                      =  0.4          # Stop simulation at t = tmax (default: 0.4)
 Rmax::Float64                      =  1.5          # Simulation volume size in r-direction    
 Zmax::Float64                      =  Rmax      
 N_r::Int                           =  256

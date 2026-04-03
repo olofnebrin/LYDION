@@ -23,6 +23,7 @@ function CreateHDF5File( FileName::String,                # File name
                    LyαDestruction::Bool,                  # Whether Lyα destruction (pd > 0) is on/off (relevant only if Lyα is on)
                       RadPressure::Bool,                  # Whether radiation pressure feedback is on/off
                        IRfeedback::Bool,                  # Whether in addition to stellar radiation pressure feedback, IR feedback is on/off
+              StellarWindFeedback::Bool,                  # Whether stellar wind feedback is on/off
             DustGrowthDestruction::Bool,                  # Whether dust/growth destruction is on/off
                               OTS::Bool,                  # Whether the on-the-spot approximation is on/off
                                 z::Float64,               # Redshift 
@@ -33,7 +34,7 @@ function CreateHDF5File( FileName::String,                # File name
                       σ_star_cell::Float64 = 3.0,         # Gaussian extent of star(s) in units of cell width 
                             Z_pos::Float64 = 0.0,         # Central Z-position of stellar mass
                               DG₀::Float64 = Dsun,        # Initial dust-to-gas ratio 
-                        Zgas_Zsun::Float64 = 1.0,         # Gas metallicity
+                       Zgas_Zsun₀::Float64 = 1.0,         # Initial gas metallicity
                        BC_r_right::Symbol  = :Outflow,    # BCs at outer r-boundary 
                         BC_Z_left::Symbol  = :Reflect,    # BCs at lower Z-boundary
                        BC_Z_right::Symbol  = :Outflow,    # BCs at upper Z-boundary
@@ -85,10 +86,10 @@ function CreateHDF5File( FileName::String,                # File name
         attrs(settings)["Z_pos"]       = string(Z_pos)
 
         # Save initial dust-to-gas ratio:
-        attrs(settings)["Initial_DTG"] = string(DG₀)
+        attrs(settings)["Initial_DTG"]       = string(DG₀)
 
-        # Save gas metallicity: 
-        attrs(settings)["Zgas_Zsun"]   = string(Zgas_Zsun)
+        # Save initial gas metallicity: 
+        attrs(settings)["Initial_Zgas_Zsun"] = string(Zgas_Zsun₀)
 
         # Save redshift:
         attrs(settings)["z"] = string(z)
@@ -120,6 +121,9 @@ function CreateHDF5File( FileName::String,                # File name
         # Save IR radiation pressure feedback setting (on/off) (NOTE: Only matters if RadPressure = true):
         attrs(settings)["IRfeedback"]  = string(IRfeedback)
 
+        # Save stellar wind feedback setting (on/off):
+        attrs(settings)["StellarWindFeedback"] = string(StellarWindFeedback)
+
         # Save on-the-spot approximation setting (on/off):
         attrs(settings)["OTS"]         = string(OTS)
 
@@ -142,36 +146,44 @@ function CreateHDF5File( FileName::String,                # File name
         attrs(CheckPoint)["dt"]         = 0.0
         attrs(CheckPoint)["step"]       = 0
 
-        # Hydro CheckPoint (Float64)
-        attrs(CheckPoint)["rfirst_Hydro"] = true  
-
         create_dataset(CheckPoint, "GasDensity", Float64, (N_r, N_Z))
         create_dataset(CheckPoint, "rMomentum",  Float64, (N_r, N_Z))
         create_dataset(CheckPoint, "ZMomentum",  Float64, (N_r, N_Z))
         create_dataset(CheckPoint, "Energy",     Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "e_dual",     Float64, (N_r, N_Z))
 
         # Thermo-chemistry CheckPoint
-        create_dataset(CheckPoint, "T",      Float64, (N_r, N_Z))
-        create_dataset(CheckPoint, "xHII",   Float64, (N_r, N_Z))
-        create_dataset(CheckPoint, "xH2",    Float64, (N_r, N_Z))
-        create_dataset(CheckPoint, "xHeII",  Float64, (N_r, N_Z))
-        create_dataset(CheckPoint, "xHeIII", Float64, (N_r, N_Z))
-        create_dataset(CheckPoint, "xDII",   Float64, (N_r, N_Z))
-        create_dataset(CheckPoint, "xHD",    Float64, (N_r, N_Z))
-        create_dataset(CheckPoint, "xCI",    Float64, (N_r, N_Z))
-        create_dataset(CheckPoint, "xCII",   Float64, (N_r, N_Z))
-        create_dataset(CheckPoint, "xCO",    Float64, (N_r, N_Z))
-        create_dataset(CheckPoint, "xOI",    Float64, (N_r, N_Z))
-        create_dataset(CheckPoint, "xOII",   Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "T",        Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xHII",     Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xH2",      Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xHeII",    Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xHeIII",   Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xDII",     Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xHD",      Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xCI",      Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xCII",     Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xCO",      Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xOI",      Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "xOII",     Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "ZC",       Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "ZSil",     Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "Zgasrest", Float64, (N_r, N_Z))
 
         # Dust CheckPoint:
-        create_dataset(CheckPoint, "DustDensity",   Float64, (N_r, N_Z))
-        create_dataset(CheckPoint, "DustrMomentum", Float64, (N_r, N_Z))
-        create_dataset(CheckPoint, "DustZMomentum", Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "DustDensity_Sil",   Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "DustrMomentum_Sil", Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "DustZMomentum_Sil", Float64, (N_r, N_Z))
+
+        create_dataset(CheckPoint, "DustDensity_C",   Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "DustrMomentum_C", Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "DustZMomentum_C", Float64, (N_r, N_Z))
+
+        create_dataset(CheckPoint, "DustDensity_PAH",   Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "DustrMomentum_PAH", Float64, (N_r, N_Z))
+        create_dataset(CheckPoint, "DustZMomentum_PAH", Float64, (N_r, N_Z))
 
         # Stellar RT CheckPoint:
-        attrs(CheckPoint)["RSL"]              = c̃
-        attrs(CheckPoint)["rfirst_StellarRT"] = true
+        attrs(CheckPoint)["RSL"] = c̃
 
         create_dataset(CheckPoint, "J_opt",    Float64, (N_r, N_Z))
         create_dataset(CheckPoint, "H_r_opt",  Float64, (N_r, N_Z))
@@ -203,8 +215,6 @@ function CreateHDF5File( FileName::String,                # File name
 
         # Lyα RT CheckPoint:
         if Lyα
-            attrs(CheckPoint)["rfirst_Lya"] = true  
-
             create_dataset(CheckPoint, "J_Lya", Float64,
                           (N_r, N_Z, N_ν);
                           chunk = (N_r, N_Z, 1))
@@ -244,14 +254,30 @@ function CreateHDF5File( FileName::String,                # File name
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
-        # Create a 3D dataset (r, Z, time) for the dust temperature:
-        create_dataset(file, "Tdust_History", Float32,
+        # Create a 3D dataset (r, Z, time) for the dust temperatures:
+        create_dataset(file, "Tdust_Sil_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        create_dataset(file, "Tdust_C_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        create_dataset(file, "Tdust_PAH_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        # Create a 3D dataset (r, Z, time) for the IR radiation temperature:
+        create_dataset(file, "Trad_History", Float32,
                        (N_r, N_Z, Nsaved);
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
         # Create a 3D dataset (r, Z, time) for the silicate grain charge:
-        create_dataset(file, "Zgr_sil_History", Float32,
+        create_dataset(file, "Zgr_Sil_History", Float32,
                        (N_r, N_Z, Nsaved);
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
@@ -262,20 +288,58 @@ function CreateHDF5File( FileName::String,                # File name
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
-        # Create a 3D dataset (r, Z, time) for the dust density:
-        create_dataset(file, "DustDensity_History", Float32,
+        # Create a 3D dataset (r, Z, time) for the PAH grain charge:
+        create_dataset(file, "Zgr_PAH_History", Float32,
                        (N_r, N_Z, Nsaved);
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
-        # Create a 3D dataset (r, Z, time) for the r-direction dust momentum density:
-        create_dataset(file, "DustrMomentum_History", Float32,
+        # Create a 3D dataset (r, Z, time) for the silicate dust density:
+        create_dataset(file, "DustDensity_Sil_History", Float32,
                        (N_r, N_Z, Nsaved);
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
-        # Create a 3D dataset (r, Z, time) for the Z-direction dust momentum density:
-        create_dataset(file, "DustZMomentum_History", Float32,
+        # Create a 3D dataset (r, Z, time) for the graphite dust density:
+        create_dataset(file, "DustDensity_C_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        # Create a 3D dataset (r, Z, time) for the PAH dust density:
+        create_dataset(file, "DustDensity_PAH_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        # Create a 3D dataset (r, Z, time) for the r-direction dust momentum densities:
+        create_dataset(file, "DustrMomentum_Sil_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        create_dataset(file, "DustrMomentum_C_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        create_dataset(file, "DustrMomentum_PAH_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        # Create a 3D dataset (r, Z, time) for the Z-direction dust momentum densities:
+        create_dataset(file, "DustZMomentum_Sil_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        create_dataset(file, "DustZMomentum_C_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        create_dataset(file, "DustZMomentum_PAH_History", Float32,
                        (N_r, N_Z, Nsaved);
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
@@ -346,8 +410,32 @@ function CreateHDF5File( FileName::String,                # File name
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
+        # Create a 3D dataset (r, Z, time) for the carbon gas metallicity:
+        create_dataset(file, "ZC_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        # Create a 3D dataset (r, Z, time) for the Si gas metallicity:
+        create_dataset(file, "ZSil_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        # Create a 3D dataset (r, Z, time) for the rest of the gas metallicity:
+        create_dataset(file, "Zgasrest_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
         # Create a 3D dataset (r, Z, time) for the optical intensity:
         create_dataset(file, "J_opt_History", Float32,
+                       (N_r, N_Z, Nsaved);
+                       chunk = (N_r, N_Z, 1),
+                       filters = Filters.Deflate(3))
+
+        # Create a 3D dataset (r, Z, time) for the FUV intensity:
+        create_dataset(file, "J_FUV_History", Float32,
                        (N_r, N_Z, Nsaved);
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
@@ -630,6 +718,7 @@ function SaveRHDTimeStepHDF5( FileName::String,
                              gravstate::GravityState{Float64},
                                   dust::DustState,
                                     RT::StellarRTArrays,
+                                   Lya::Union{LyαArrays, Nothing},
                                   step::Int,
                                      t::Float64,
                                     Δt::Float64,
@@ -659,28 +748,58 @@ function SaveRHDTimeStepHDF5( FileName::String,
         dset_T[:, :, step]            = hydrostate.T
 
         # Save dust temperatures at current time-step:
-        dset_Td                       = file["Tdust_History"]
-        dset_Td[:, :, step]           = dust.Td
+        dset_Td_Sil                   = file["Tdust_Sil_History"]
+        dset_Td_Sil[:, :, step]       = dust.Td_Sil
 
-        # Save silicate grain charges at current time-step 
-        dset_Zgr_sil                  = file["Zgr_sil_History"]
-        dset_Zgr_sil[:, :, step]      = dust.Zgr_sil
+        dset_Td_C                     = file["Tdust_C_History"]
+        dset_Td_C[:, :, step]         = dust.Td_C
 
-        # Save graphite grain charges at current time-step 
+        dset_Td_PAH                   = file["Tdust_PAH_History"]
+        dset_Td_PAH[:, :, step]       = dust.Td_PAH
+
+        # Save IR radiation temperature at current time-step:
+        dset_Trad                     = file["Trad_History"]
+        dset_Trad[:, :, step]         = dust.Trad
+
+        # Save grain charges at current time-step 
+        dset_Zgr_Sil                  = file["Zgr_Sil_History"]
+        dset_Zgr_Sil[:, :, step]      = dust.Zgr_Sil
+
         dset_Zgr_C                    = file["Zgr_C_History"]
         dset_Zgr_C[:, :, step]        = dust.Zgr_C
 
-        # Save dust density at current time-step:
-        dset_ρd                       = file["DustDensity_History"]
-        dset_ρd[:, :, step]           = hydrostate.ρd
+        dset_Zgr_PAH                  = file["Zgr_PAH_History"]
+        dset_Zgr_PAH[:, :, step]      = dust.Zgr_PAH
+
+        # Save dust densities at current time-step:
+        dset_ρd_Sil                   = file["DustDensity_Sil_History"]
+        dset_ρd_Sil[:, :, step]       = @view hydrostate.ρd[1,:,:]
+
+        dset_ρd_C                     = file["DustDensity_C_History"]
+        dset_ρd_C[:, :, step]         = @view hydrostate.ρd[2,:,:]
+
+        dset_ρd_PAH                   = file["DustDensity_PAH_History"]
+        dset_ρd_PAH[:, :, step]       = @view hydrostate.ρd[3,:,:]
 
         # Save r-direction momentum densities at current time-step:
-        dset_ρdud_r                   = file["DustrMomentum_History"]
-        dset_ρdud_r[:, :, step]       = hydrostate.ρdud_X
+        dset_ρdud_r_Sil               = file["DustrMomentum_Sil_History"]
+        dset_ρdud_r_Sil[:, :, step]   = @view hydrostate.ρdud_X[1,:,:]
+
+        dset_ρdud_r_C                 = file["DustrMomentum_C_History"]
+        dset_ρdud_r_C[:, :, step]     = @view hydrostate.ρdud_X[2,:,:]
+
+        dset_ρdud_r_PAH               = file["DustrMomentum_PAH_History"]
+        dset_ρdud_r_PAH[:, :, step]   = @view hydrostate.ρdud_X[3,:,:]
 
         # Save Z-direction momentum densities at current time-step:
-        dset_ρdud_Z                   = file["DustZMomentum_History"]
-        dset_ρdud_Z[:, :, step]       = hydrostate.ρdud_Y
+        dset_ρdud_Z_Sil               = file["DustZMomentum_Sil_History"]
+        dset_ρdud_Z_Sil[:, :, step]   = @view hydrostate.ρdud_Y[1,:,:]
+
+        dset_ρdud_Z_C                 = file["DustZMomentum_C_History"]
+        dset_ρdud_Z_C[:, :, step]     = @view hydrostate.ρdud_Y[2,:,:]
+
+        dset_ρdud_Z_PAH               = file["DustZMomentum_PAH_History"]
+        dset_ρdud_Z_PAH[:, :, step]   = @view hydrostate.ρdud_Y[3,:,:]
 
         # Save xHII at current time-step:
         dset_xHII                     = file["xHII_History"]
@@ -726,9 +845,23 @@ function SaveRHDTimeStepHDF5( FileName::String,
         dset_xOII                     = file["xOII_History"]
         dset_xOII[:, :, step]         = chemstate.xOII
 
+        # Save metallicities at current time-step:
+        dset_ZC                       = file["ZC_History"]
+        dset_ZC[:, :, step]           = chemstate.ZC
+
+        dset_ZSil                     = file["ZSil_History"]
+        dset_ZSil[:, :, step]         = chemstate.ZSil
+
+        dset_Zgasrest                 = file["Zgasrest_History"]
+        dset_Zgasrest[:, :, step]     = chemstate.Zgasrest
+
         # Save optical intensity at current time-step:
         dset_J_opt                    = file["J_opt_History"]
         dset_J_opt[:, :, step]        = RT.J_opt
+
+        # Save FUV intensity at current time-step:
+        dset_J_FUV                    = file["J_FUV_History"]
+        dset_J_FUV[:, :, step]        = RT.J_FUV
 
         # Save LW intensity at current time-step:
         dset_J_LW                     = file["J_LW_History"]
@@ -768,266 +901,8 @@ function SaveRHDTimeStepHDF5( FileName::String,
         dset_M_F_dir                  = file["M_F_dir_History"]
         dset_M_F_dir[step]            = RT.M_F_dir
 
-        # Save IR force multiplier:
-        dset_M_F_IR                   = file["M_F_IR_History"]
-        dset_M_F_IR[step]             = RT.M_F_IR
-        
-        dset_M_F_IR_antigrav          = file["M_F_IR_History_antigrav_direction"]
-        dset_M_F_IR_antigrav[step]    = RT.M_F_IR_antigravity
-
-        # Save IR luminosity:
-        dset_L_IR                     = file["L_IR_History"]
-        dset_L_IR[step]               = RT.Lum_IR
-
-        # Save mass-weighted velocity dispersion components & 
-        # total velocity dispersion:
-        dset_σ_r                      = file["rVelocityDispersion_History"]
-        dset_σ_r[step]                = hydrostate.σ_X
-
-        dset_σ_Z                      = file["ZVelocityDispersion_History"]
-        dset_σ_Z[step]                = hydrostate.σ_Y 
-
-        dset_σ                        = file["VelocityDispersion_History"]
-        dset_σ[step]                  = hydrostate.σ
-
-        # Save total gas & dust mass in simulation volume:
-        dset_M_simvol                 = file["TotalGasMass_History"]
-        dset_M_simvol[step]           = hydrostate.M_simvol
-
-        dset_Md_simvol                = file["TotalDustMass_History"]
-        dset_Md_simvol[step]          = hydrostate.Md_simvol
-
-        if Gravity
-            # Save gravitational forces per unit volume:
-            dset_f_gravity_r              = file["f_gravity_r_History"]
-            dset_f_gravity_r[:, :, step]  = gravstate.f_gravity_r
-
-            dset_f_gravity_Z              = file["f_gravity_Z_History"]
-            dset_f_gravity_Z[:, :, step]  = gravstate.f_gravity_Z
-        end
-
-        ###############################################################
-        #######                                                 #######
-        #######           C H E C K P O I N T  D A T A          #######
-        #######                                                 #######
-        ###############################################################
-
-        CheckPoint = file["Checkpoint"]
-        
-        # Current time & time-step:
-        attrs(CheckPoint)["t_current"] = t
-        attrs(CheckPoint)["step"]      = step
-        attrs(CheckPoint)["dt"]        = Δt  
-
-        # Current RSL:
-        attrs(CheckPoint)["RSL"]       = RT.c̃
-
-        # Current Strang-split orders: 
-        attrs(CheckPoint)["rfirst_Hydro"]      = hydrostate.rfirst_Hydro
-        attrs(CheckPoint)["rfirst_StellarRT"]  = RT.rfirst_StellarRT
-
-        # Hydro CheckPoint:
-        CheckPoint["GasDensity"][:, :] = hydrostate.ρ
-        CheckPoint["rMomentum"][:, :]  = hydrostate.ρu_X
-        CheckPoint["ZMomentum"][:, :]  = hydrostate.ρu_Y
-        CheckPoint["Energy"][:, :]     = hydrostate.E
-        CheckPoint["T"][:, :]          = hydrostate.T
-
-        # Chemistry CheckPoint:
-        CheckPoint["xHII"][:, :]       = chemstate.xHII
-        CheckPoint["xH2"][:, :]        = chemstate.xH2
-        CheckPoint["xHeII"][:, :]      = chemstate.xHeII
-        CheckPoint["xHeIII"][:, :]     = chemstate.xHeIII
-        CheckPoint["xDII"][:, :]       = chemstate.xDII
-        CheckPoint["xHD"][:, :]        = chemstate.xHD
-        CheckPoint["xCI"][:, :]        = chemstate.xCI 
-        CheckPoint["xCII"][:, :]       = chemstate.xCII 
-        CheckPoint["xCO"][:, :]        = chemstate.xCO
-        CheckPoint["xOI"][:, :]        = chemstate.xOI 
-        CheckPoint["xOII"][:, :]       = chemstate.xOII 
-
-        # Dust CheckPoint:
-        CheckPoint["DustDensity"][:, :]    = hydrostate.ρd
-        CheckPoint["DustrMomentum"][:, :]  = hydrostate.ρdud_X
-        CheckPoint["DustZMomentum"][:, :]  = hydrostate.ρdud_Y
-
-        # Stellar RT CheckPoint:
-        CheckPoint["J_opt"][:, :]      = RT.J_opt
-        CheckPoint["J_FUV"][:, :]      = RT.J_FUV
-        CheckPoint["J_LW"][:, :]       = RT.J_LW
-        CheckPoint["J_EUV1"][:, :]     = RT.J_EUV1
-        CheckPoint["J_EUV2"][:, :]     = RT.J_EUV2
-        CheckPoint["J_EUV3"][:, :]     = RT.J_EUV3 
-        CheckPoint["J_IR"][:, :]       = RT.J_IR
-
-        CheckPoint["H_r_opt"][:, :]    = RT.H_r_opt
-        CheckPoint["H_r_FUV"][:, :]    = RT.H_r_FUV
-        CheckPoint["H_r_LW"][:, :]     = RT.H_r_LW
-        CheckPoint["H_r_EUV1"][:, :]   = RT.H_r_EUV1
-        CheckPoint["H_r_EUV2"][:, :]   = RT.H_r_EUV2
-        CheckPoint["H_r_EUV3"][:, :]   = RT.H_r_EUV3 
-        CheckPoint["H_r_IR"][:, :]     = RT.H_r_IR
-
-        CheckPoint["H_Z_opt"][:, :]    = RT.H_Z_opt
-        CheckPoint["H_Z_FUV"][:, :]    = RT.H_Z_FUV
-        CheckPoint["H_Z_LW"][:, :]     = RT.H_Z_LW
-        CheckPoint["H_Z_EUV1"][:, :]   = RT.H_Z_EUV1
-        CheckPoint["H_Z_EUV2"][:, :]   = RT.H_Z_EUV2
-        CheckPoint["H_Z_EUV3"][:, :]   = RT.H_Z_EUV3 
-        CheckPoint["H_Z_IR"][:, :]     = RT.H_Z_IR
-
-    end # End of h5open
-
-    return nothing
-end
-
-
-""" Save simulation data from one time-step into a
-    given prepared HDF5 file. """
-function SaveRHDTimeStepHDF5( FileName::String, 
-                            hydrostate::HydrodynamicsState{Float64},
-                             chemstate::ChemistryState{Float64},
-                             gravstate::GravityState{Float64},
-                                  dust::DustState,
-                                    RT::StellarRTArrays,
-                                   Lya::LyαArrays,
-                                  step::Int,
-                                     t::Float64,
-                                    Δt::Float64,
-                               Gravity::Bool
-                               )
-
-    h5open(FileName, "r+") do file 
-
-        # Save the time of the current time-step:
-        dset_t                        = file["Times"]
-        dset_t[step]                  = t
-
-        # Save gas densities at current time-step:
-        dset_ρ                        = file["GasDensity_History"]
-        dset_ρ[:, :, step]            = hydrostate.ρ
-
-        # Save r-direction momentum densities at current time-step:
-        dset_ρu_r                     = file["rMomentum_History"]
-        dset_ρu_r[:, :, step]         = hydrostate.ρu_X
-
-        # Save Z-direction momentum densities at current time-step:
-        dset_ρu_Z                     = file["ZMomentum_History"]
-        dset_ρu_Z[:, :, step]         = hydrostate.ρu_Y
-
-        # Save temperatures at current time-step:
-        dset_T                        = file["T_History"]
-        dset_T[:, :, step]            = hydrostate.T
-
-        # Save dust temperatures at current time-step:
-        dset_Td                       = file["Tdust_History"]
-        dset_Td[:, :, step]           = dust.Td
-
-        # Save silicate grain charges at current time-step 
-        dset_Zgr_sil                  = file["Zgr_sil_History"]
-        dset_Zgr_sil[:, :, step]      = dust.Zgr_sil
-
-        # Save graphite grain charges at current time-step 
-        dset_Zgr_C                    = file["Zgr_C_History"]
-        dset_Zgr_C[:, :, step]        = dust.Zgr_C
-
-        # Save dust density at current time-step:
-        dset_ρd                       = file["DustDensity_History"]
-        dset_ρd[:, :, step]           = hydrostate.ρd
-
-        # Save r-direction momentum densities at current time-step:
-        dset_ρdud_r                   = file["DustrMomentum_History"]
-        dset_ρdud_r[:, :, step]       = hydrostate.ρdud_X
-
-        # Save Z-direction momentum densities at current time-step:
-        dset_ρdud_Z                   = file["DustZMomentum_History"]
-        dset_ρdud_Z[:, :, step]       = hydrostate.ρdud_Y
-
-        # Save xHII at current time-step:
-        dset_xHII                     = file["xHII_History"]
-        dset_xHII[:, :, step]         = chemstate.xHII
-
-        # Save xH2 at current time-step:
-        dset_xH2                      = file["xH2_History"]
-        dset_xH2[:, :, step]          = chemstate.xH2
-
-        # Save xHeII at current time-step:
-        dset_xHeII                    = file["xHeII_History"]
-        dset_xHeII[:, :, step]        = chemstate.xHeII
-
-        # Save xHeIII at current time-step:
-        dset_xHeIII                   = file["xHeIII_History"]
-        dset_xHeIII[:, :, step]       = chemstate.xHeIII
-
-        # Save xDII at current time-step:
-        dset_xDII                     = file["xDII_History"]
-        dset_xDII[:, :, step]         = chemstate.xDII
-
-        # Save xHD at current time-step:
-        dset_xHD                      = file["xHD_History"]
-        dset_xHD[:, :, step]          = chemstate.xHD
-
-        # Save xCI at current time-step:
-        dset_xCI                      = file["xCI_History"]
-        dset_xCI[:, :, step]          = chemstate.xCI
-
-        # Save xCII at current time-step:
-        dset_xCII                     = file["xCII_History"]
-        dset_xCII[:, :, step]         = chemstate.xCII
-
-        # Save xCO at current time-step:
-        dset_xCO                      = file["xCO_History"]
-        dset_xCO[:, :, step]          = chemstate.xCO
-
-        # Save xOI at current time-step:
-        dset_xOI                      = file["xOI_History"]
-        dset_xOI[:, :, step]          = chemstate.xOI
-
-        # Save xOII at current time-step:
-        dset_xOII                     = file["xOII_History"]
-        dset_xOII[:, :, step]         = chemstate.xOII
-
-        # Save optical intensity at current time-step:
-        dset_J_opt                    = file["J_opt_History"]
-        dset_J_opt[:, :, step]        = RT.J_opt
-
-        # Save LW intensity at current time-step:
-        dset_J_LW                     = file["J_LW_History"]
-        dset_J_LW[:, :, step]         = RT.J_LW
-
-        # Save EUV1 intensity at current time-step:
-        dset_J_EUV1                   = file["J_EUV1_History"]
-        dset_J_EUV1[:, :, step]       = RT.J_EUV1
-
-        # Save EUV2 intensity at current time-step:
-        dset_J_EUV2                   = file["J_EUV2_History"]
-        dset_J_EUV2[:, :, step]       = RT.J_EUV2
-
-        # Save EUV3 intensity at current time-step:
-        dset_J_EUV3                   = file["J_EUV3_History"]
-        dset_J_EUV3[:, :, step]       = RT.J_EUV3
-
-        # Save IR intensity at current time-step:
-        dset_J_IR                     = file["J_IR_History"]
-        dset_J_IR[:, :, step]         = RT.J_IR
-
-        # Save stellar radiation pressure forces:
-        dset_f_stellar_r              = file["f_stellar_r_History"]
-        dset_f_stellar_r[:, :, step]  = RT.f_stellar_r
-
-        dset_f_stellar_Z              = file["f_stellar_Z_History"]
-        dset_f_stellar_Z[:, :, step]  = RT.f_stellar_Z
-
-        # Save LyC and LW escape fractions:
-        dset_f_esc_LyC                = file["f_esc_LyC_History"]
-        dset_f_esc_LyC[step]          = RT.f_esc_LyC
-
-        dset_f_esc_LW                 = file["f_esc_LW_History"]
-        dset_f_esc_LW[step]           = RT.f_esc_LW
-
-        # Save direct stellar radiation pressure force multipliers:
-        dset_M_F_dir                  = file["M_F_dir_History"]
-        dset_M_F_dir[step]            = RT.M_F_dir
+        dset_M_F_dir_antigrav         = file["M_F_dir_antigrav_direction_History"]
+        dset_M_F_dir_antigrav[step]   = RT.M_F_dir_antigravity
 
         # Save IR force multiplier:
         dset_M_F_IR                   = file["M_F_IR_History"]
@@ -1073,53 +948,55 @@ function SaveRHDTimeStepHDF5( FileName::String,
         #######                                                 #######
         ###############################################################
 
-        # Save Lyα energy density for all cells:
-        dset_e_Lyα                  = file["e_Lya_History"]
-        dset_e_Lyα[:, :, step]      = Lya.e_Lyα
+        if !isnothing(Lya)
+            # Save Lyα energy density for all cells:
+            dset_e_Lyα                  = file["e_Lya_History"]
+            dset_e_Lyα[:, :, step]      = Lya.e_Lyα
 
-        # Save Lyα frequency-integrated emissivity:
-        dset_∫dν_js_Lyα             = file["js_Lya_History"]
-        dset_∫dν_js_Lyα[:, :, step] = Lya.∫dν_js_Lyα
+            # Save Lyα frequency-integrated emissivity:
+            dset_∫dν_js_Lyα             = file["js_Lya_History"]
+            dset_∫dν_js_Lyα[:, :, step] = Lya.∫dν_js_Lyα
 
-        # Save Lyα forces:
-        dset_f_Lya_r                = file["f_Lya_r_History"]
-        dset_f_Lya_r[:, :, step]    = Lya.f_Lyα_r
+            # Save Lyα forces:
+            dset_f_Lya_r                = file["f_Lya_r_History"]
+            dset_f_Lya_r[:, :, step]    = Lya.f_Lyα_r
 
-        dset_f_Lya_Z                = file["f_Lya_Z_History"]
-        dset_f_Lya_Z[:, :, step]    = Lya.f_Lyα_Z
+            dset_f_Lya_Z                = file["f_Lya_Z_History"]
+            dset_f_Lya_Z[:, :, step]    = Lya.f_Lyα_Z
 
-        # Save Lyα destruction probability:
-        dset_pd                     = file["pd_History"]
-        dset_pd[:, :, step]         = Lya.pd
+            # Save Lyα destruction probability:
+            dset_pd                     = file["pd_History"]
+            dset_pd[:, :, step]         = Lya.pd
 
-        # Save force multiplier:
-        dset_M_F                    = file["M_F_History"]
-        dset_M_F[step]              = Lya.M_F
+            # Save force multiplier:
+            dset_M_F                    = file["M_F_History"]
+            dset_M_F[step]              = Lya.M_F
         
-        dset_M_F_antigrav           = file["M_F_History_antigrav_direction"]
-        dset_M_F_antigrav[step]     = Lya.M_F_antigravity
+            dset_M_F_antigrav           = file["M_F_History_antigrav_direction"]
+            dset_M_F_antigrav[step]     = Lya.M_F_antigravity
 
-        # Save Lyα luminosity:
-        dset_L_Lyα                  = file["L_Lya_History"]
-        dset_L_Lyα[step]            = Lya.L_Lyα
+            # Save Lyα luminosity:
+            dset_L_Lyα                  = file["L_Lya_History"]
+            dset_L_Lyα[step]            = Lya.L_Lyα
 
-        # Save Lyα escape fraction:
-        dset_f_esc_Lyα              = file["f_esc_Lya_History"]
-        dset_f_esc_Lyα[step]        = Lya.f_esc_Lyα
+            # Save Lyα escape fraction:
+            dset_f_esc_Lyα              = file["f_esc_Lya_History"]
+            dset_f_esc_Lyα[step]        = Lya.f_esc_Lyα
 
-        # Save Lyα spectrum at the outer boundary cells:
-        dset_J_edge  = file["J_Lya_EdgeSpectra"]
-        dset_ridx    = file["J_Lya_Edge_rIndex"]
-        dset_zidx    = file["J_Lya_Edge_ZIndex"]
+            # Save Lyα spectrum at the outer boundary cells:
+            dset_J_edge  = file["J_Lya_EdgeSpectra"]
+            dset_ridx    = file["J_Lya_Edge_rIndex"]
+            dset_zidx    = file["J_Lya_Edge_ZIndex"]
 
-        N_edge       = length(dset_ridx)
-        @inbounds for edge in 1:N_edge
-            # Get i and j indices:
-            i_r = dset_ridx[edge]
-            i_Z = dset_zidx[edge]
+            N_edge       = length(dset_ridx)
+            @inbounds for edge in 1:N_edge
+                # Get i and j indices:
+                i_r = dset_ridx[edge]
+                i_Z = dset_zidx[edge]
 
-            # Access & save the Lyα spectrum J(νC) at the edge indices: 
-            dset_J_edge[edge, :, step] = @view Lya.J_Lyα[i_r, i_Z, :]
+                # Access & save the Lyα spectrum J(νC) at the edge indices: 
+                dset_J_edge[edge, :, step] = @view Lya.J_Lyα[i_r, i_Z, :]
+            end
         end
 
         ###############################################################
@@ -1138,16 +1015,12 @@ function SaveRHDTimeStepHDF5( FileName::String,
         # Current RSL:
         attrs(CheckPoint)["RSL"]       = RT.c̃
 
-        # Current Strang-split orders: 
-        attrs(CheckPoint)["rfirst_Hydro"]      = hydrostate.rfirst_Hydro
-        attrs(CheckPoint)["rfirst_StellarRT"]  = RT.rfirst_StellarRT
-        attrs(CheckPoint)["rfirst_Lya"]        = Lya.rfirst_Lyα
-
         # Hydro CheckPoint:
         CheckPoint["GasDensity"][:, :] = hydrostate.ρ
         CheckPoint["rMomentum"][:, :]  = hydrostate.ρu_X
         CheckPoint["ZMomentum"][:, :]  = hydrostate.ρu_Y
         CheckPoint["Energy"][:, :]     = hydrostate.E
+        CheckPoint["e_dual"][:, :]     = hydrostate.e_dual 
         CheckPoint["T"][:, :]          = hydrostate.T
 
         # Chemistry CheckPoint:
@@ -1162,11 +1035,22 @@ function SaveRHDTimeStepHDF5( FileName::String,
         CheckPoint["xCO"][:, :]        = chemstate.xCO
         CheckPoint["xOI"][:, :]        = chemstate.xOI 
         CheckPoint["xOII"][:, :]       = chemstate.xOII 
+        CheckPoint["ZC"][:, :]         = chemstate.ZC
+        CheckPoint["ZSil"][:, :]       = chemstate.ZSil
+        CheckPoint["Zgasrest"][:, :]   = chemstate.Zgasrest
 
         # Dust CheckPoint:
-        CheckPoint["DustDensity"][:, :]    = hydrostate.ρd
-        CheckPoint["DustrMomentum"][:, :]  = hydrostate.ρdud_X
-        CheckPoint["DustZMomentum"][:, :]  = hydrostate.ρdud_Y
+        CheckPoint["DustDensity_Sil"][:, :]   = @view hydrostate.ρd[1, :, :]
+        CheckPoint["DustDensity_C"][:, :]     = @view hydrostate.ρd[2, :, :]
+        CheckPoint["DustDensity_PAH"][:, :]   = @view hydrostate.ρd[3, :, :]
+
+        CheckPoint["DustrMomentum_Sil"][:, :] = @view hydrostate.ρdud_X[1, :, :]
+        CheckPoint["DustrMomentum_C"][:, :]   = @view hydrostate.ρdud_X[2, :, :]
+        CheckPoint["DustrMomentum_PAH"][:, :] = @view hydrostate.ρdud_X[3, :, :]
+
+        CheckPoint["DustZMomentum_Sil"][:, :] = @view hydrostate.ρdud_Y[1, :, :]
+        CheckPoint["DustZMomentum_C"][:, :]   = @view hydrostate.ρdud_Y[2, :, :]
+        CheckPoint["DustZMomentum_PAH"][:, :] = @view hydrostate.ρdud_Y[3, :, :]
 
         # Stellar RT CheckPoint:
         CheckPoint["J_opt"][:, :]      = RT.J_opt
@@ -1194,9 +1078,11 @@ function SaveRHDTimeStepHDF5( FileName::String,
         CheckPoint["H_Z_IR"][:, :]     = RT.H_Z_IR
 
         # Lyα CheckPoint:
-        CheckPoint["J_Lya"][:, :, :]   = Lya.J_Lyα
-        CheckPoint["H_r_Lya"][:, :, :] = Lya.H_r_Lyα
-        CheckPoint["H_Z_Lya"][:, :, :] = Lya.H_Z_Lyα
+        if !isnothing(Lya)
+            CheckPoint["J_Lya"][:, :, :]   = Lya.J_Lyα
+            CheckPoint["H_r_Lya"][:, :, :] = Lya.H_r_Lyα
+            CheckPoint["H_Z_Lya"][:, :, :] = Lya.H_Z_Lyα
+        end
 
     end # End of h5open
 

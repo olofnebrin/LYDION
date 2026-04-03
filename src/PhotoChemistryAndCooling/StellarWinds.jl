@@ -11,9 +11,10 @@
 
 """
 
-using DelimitedFiles          # For reading data from files
+using  DelimitedFiles          # For reading data from files
+using .Structs: HydrodynamicsState, GeometryCylindrical
 
-export dmdt_wind, u_wind, dpdt_wind
+export dmdt_wind, u_wind, dpdt_wind, InjectStellarWind!
 
 
 dmdtwindData  = readdlm( joinpath(@__DIR__, "RIGELfits/Mw_W.txt") )  # Data for fitting the wind mass loss rate (in M⊙/yr)
@@ -89,7 +90,7 @@ end
 """ The stellar wind velocity (cm s⁻¹) for a star of ZAMS mass mstarZAMS (M⊙)
     and metallicity Zstar_Zsun (in Solar units). """
 function u_wind( mstarZAMS::Float64, 
-               Zstar_Zsun::Float64 )
+                Zstar_Zsun::Float64 )
 
     x = log10( mstarZAMS )
     if Zstar_Zsun < 1e-6
@@ -154,9 +155,88 @@ end
 
 """ The momentum injection rate (cgs units) from stellar winds, from a star of
     ZAMS mass mstarZAMS (M⊙) and metallicity Zstar_Zsun (in Solar units). """
-function dpdt_wind( mstarZAMS::Float64, 
-                   Zstar_Zsun::Float64 )
+@inline function dpdt_wind( mstarZAMS::Float64, 
+                           Zstar_Zsun::Float64 )
 
     return dmdt_wind(mstarZAMS, Zstar_Zsun) * u_wind(mstarZAMS, Zstar_Zsun)
 end
+
+
+""" This function injects the stellar wind momentum & mass over a time-step Δt. """
+function InjectStellarWind!( Δt::Float64, 
+                      mstarZAMS::Float64, 
+                     Zstar_Zsun::Float64,
+                          Hydro::HydrodynamicsState,
+                       Geometry::GeometryCylindrical,
+                         ρ_star::AbstractMatrix{Float64},
+                             Zc::Float64 = 0.0 )
+
+    # Unpack arrays:
+    ρ      = Hydro.ρ
+    ρu_r   = Hydro.ρu_X
+    ρu_Z   = Hydro.ρu_Y 
+    E      = Hydro.E 
+    rCoM   = Geometry.rCoM
+    ZCoM   = Geometry.ZCoM
+    ΔV     = Geometry.ΔV 
+    inv_ΔV = Geometry.inv_ΔV 
+
+    # Grid:
+    N_r, N_Z = size( ΔV )
+    dN_r     = 1:N_r 
+    dN_Z     = 1:N_Z
+
+    # Convenient constant:
+    inv_mstarZAMS_cgs = 1 / ( mstarZAMS * Msun )
+
+    # Mass and momentum from the stellar wind to be dumped into the gas
+    # over the time-step Δt:
+    Δm_wind = dmdt_wind( mstarZAMS, Zstar_Zsun ) * Δt 
+    Δp_wind = Δm_wind * u_wind( mstarZAMS, Zstar_Zsun )
+    
+    @threads for j in dN_Z 
+        @inbounds @simd for i in dN_r
+            # Distance from position of the star, located ar (r,Z) = (0, Zc):
+            δZ         = ZCoM[j] - Zc
+            d_star     = hypot( rCoM[i], δZ )
+
+            # Fraction of star's mass in this cell:
+            f_ij       = ρ_star[i,j] * ΔV[i,j] * inv_mstarZAMS_cgs
+
+            # Stellar wind mass & momentum to be added to the cell:
+            Δm_ij      = f_ij * Δm_wind 
+            Δp_ij      = f_ij * Δp_wind 
+
+            # Corresponding mass & momentum densities:
+            Δρ_ij      = Δm_ij * inv_ΔV[i,j]
+            Δρu_ij     = Δp_ij * inv_ΔV[i,j]
+
+            # Get r & Z unit vectors pointing from the star's position:
+            inv_d_star = 1 / d_star
+            nr         = rCoM[i] * inv_d_star
+            nZ         = δZ      * inv_d_star
+
+            # Change in momentum in r & Z-directions:
+            Δρu_r      = Δρu_ij * nr
+            Δρu_Z      = Δρu_ij * nZ
+
+            # Compute internal energy density, consistent with E:
+            e_int      = max( E[i,j] - ( ρu_r[i,j] * ρu_r[i,j]  +  ρu_Z[i,j] * ρu_Z[i,j] ) / ( 2 * ρ[i,j] ), 
+                              e_dual_floor )
+
+            # Add momentum density:
+            ρu_r[i,j] += Δρu_r
+            ρu_Z[i,j] += Δρu_Z
+
+            # Update gas density:
+            ρ[i,j]    += Δρ_ij
+
+            # Update gas energy, keeping internal energy density the same:
+            E[i,j]     = e_int  +  ( ρu_r[i,j] * ρu_r[i,j]  +  ρu_Z[i,j] * ρu_Z[i,j] ) / ( 2 * ρ[i,j] )
+        end
+    end
+
+    return nothing 
+end
+
 

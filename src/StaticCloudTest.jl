@@ -61,16 +61,11 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
                               umax::Float64 = 0.0,        # Maximum gas velocity (km/s), at cloud edge (Hubble flow is assumed, u ∝ R) 
                             Recoil::Bool    = false,      # Whether atomic recoil is turned on (if true) or not (if false)
                              θhole::Float64 = 0.0,        # Opening angle (radians) of a hole in the cloud (0 for uniform cloud)
-                             L_Lyα::Float64 = 1e5 * Lsun, # Total Lyα luminosity within spherical radius Rs 
                IonizedSourceRegion::Bool    = false,      # Whether the emission region is ionized (if true) or not (if false)
-                               Rcl::Float64 = pc,         # Cloud radius (no real impact on the test setup)
-                                Zc::Float64 = 0.0,        # Cloud center position 
-                     tmax_unitless::Float64 = 4.0,       # Maximum time for time integration, in units (aτ_cl)^(1/3) Rcl / c̃
-                        BC_r_right::Symbol  = :Outflow,   # Lyα boundary conditions at outer r-boundary 
+                     tmax_unitless::Float64 = 2.0,        # Maximum time for time integration, in units (aτ_cl)^(1/3) Rcl / c̃
                           BC_Z_bot::Symbol  = :Reflect,   # Lyα boundary conditions at lower Z-boundary 
-                          BC_Z_top::Symbol  = :Outflow,   # Lyα boundary conditions at upper r-boundary 
-                           N_r_lin::Int     = 16,
-                           N_Z_lin::Int     = 16,
+                           N_r_lin::Int     = 64,
+                           N_Z_lin::Int     = 64,
                          Nminsteps::Int     = 300,
                          Nmaxsteps::Int     = 100000,
                             Nsaved::Int     = 300,
@@ -78,27 +73,39 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
                           FileName::String  = "StaticCloudTest.h5"
                              )
 
-    Rmax     = 1.4 * Rcl
+    L_Lyα    = 1e5 * Lsun # Fix Lyα luminosity, since it has no real impact on any static cloud test  
+    Rcl      = pc         # Fix the cloud radius to 1 pc, since it has no real impact on any static cloud test  
+    Rmax     = 1.1 * Rcl
     Rmax_lin = Rmax 
     Zmax     = Rmax 
-    Zmax_lin = Zmax    
+    Zmax_lin = Zmax   
+
+    if BC_Z_bot === :Reflect 
+        # Place cloud center at bottom (midplane symmetry assumed)
+        Zc = 0.0
+    else
+        # Place cloud at center of box:
+        Zc = 0.5 * Zmax  
+    end
     
     # RSL can be set to the speed of light:
-    c̃        = c
+    c̃          = c
+
+    # Other BCs:
+    BC_r_left  = :Reflect
+    BC_r_right = :Outflow 
+    BC_Z_top   = :Outflow 
 
     # Setup uniform cylindrical grid:
     geometry   = SetupCylindricalGrid( Rmax, Rmax_lin, Zmax, Zmax_lin, 
                                        N_r_lin, 0, 
-                                       N_Z_lin, 0 )
+                                       N_Z_lin, 0,
+                                       BC_Z_bot )
     r          = geometry.r
     rCoM       = geometry.rCoM
     Z          = geometry.Z
     ZCoM       = geometry.ZCoM
-    A_r        = geometry.A_r 
-    A_Z        = geometry.A_Z 
     ΔV         = geometry.ΔV
-    inv_ΔV     = geometry.inv_ΔV
-    inv_r_cell = geometry.inv_r_cell 
 
     # Grid intervals:
     N_r        = length( rCoM )
@@ -123,6 +130,7 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
     # Initialize Lyα arrays:
     LyaState   = GenerateLyαArrays( c̃, r, Z, T, Recoil )
     J          = LyaState.J_Lyα
+    J_old      = LyaState.J_Lyα_old
     H_r        = LyaState.H_r_Lyα
     H_Z        = LyaState.H_Z_Lyα
     H_r_old    = LyaState.H_r_Lyα_old
@@ -143,12 +151,6 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
 
     # Update the Lyα Voigt profile & emission profile for all cells:
     UpdateVoigtAndEmissionProfile!( LyaState, T )
-
-    if IonizedSourceRegion
-        xHII_SourceRegion = 1.0
-    else
-        xHII_SourceRegion = 0.0
-    end
 
     # Source region radius:
     Rs   = rs * Rcl 
@@ -174,30 +176,44 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
         @simd for i in dN_r 
             @inbounds begin
 
-                # Distance from cloud center at the edge of this cell:
-                Rrface  = sqrt( r[i+1]^2   +  (ZCoM[j] - Zc)^2  )
-                RZface  = sqrt( rCoM[i]^2  +  (Z[j+1]  - Zc)^2  )
-                RCoM    = sqrt( rCoM[i]^2  +  (ZCoM[j] - Zc)^2 )
+                # Distance from cloud center to this cell:
+                RCoM         = sqrt( rCoM[i]^2  +  (ZCoM[j] - Zc)^2 )
 
                 # H I number density, opacities, destruction probability:
-                θpolar = acos( (ZCoM[j] - Zc) / RCoM )    # Polar angle
-                θ      = min( θpolar, π - θpolar )        # Allow for two polar holes (in positive & negative Z directions)
-                if RCoM < Rcl && RCoM > Rs && θ > θhole
-                    nHI        = nHI₀
+                θpolar       = acos( (ZCoM[j] - Zc) / RCoM )    # Polar angle
+                θ            = min( θpolar, π - θpolar )        # Allow for two polar holes (in positive & negative Z directions)
+                InsideCloud  = (RCoM < Rcl) && (θ > θhole)      # True if inside the H I cloud, false if not 
+                InsideSource = (RCoM < Rs)
+
+                xHII         = 0.0 # Initialize H II fraction 
+                if InsideSource
+                    # Set ionization fraction inside the emission region:
+                    if IonizedSourceRegion
+                        xHII = 1.0
+                    else
+                        xHII = 0.0
+                    end
+                end
+
+                # Set cloud properties, if we're inside the cloud: 
+                if InsideCloud
+                    nHI        = nHI₀ * (1 - xHII)
                     α_Lyα[i,j] = nHI * Compute_σ0(T[i,j])
                     αc[i,j]    = αc₀
                     pd[i,j]    = pd₀
-                elseif RCoM < Rs
-                    nHI        = max( (1 - xHII_SourceRegion), 0.0 ) * nHI₀ 
-                    α_Lyα[i,j] = nHI * Compute_σ0(T[i,j])
-                    αc[i,j]    = αc₀
-                    pd[i,j]    = pd₀
-                else 
+                else
                     # No H I or absorption/destruction outside the cloud: 
                     nHI        = 0.0
-                    α_Lyα[i,j] = nHI * Compute_σ0(T[i,j])
+                    α_Lyα[i,j] = 0.0
                     αc[i,j]    = 0.0
                     pd[i,j]    = 0.0
+                end
+
+                # Lyα frequency-integrated emissivity:
+                if InsideCloud && InsideSource
+                    ∫dν_js_Lyα[i,j] = 3 * L_Lyα / (Four_π^2 * Rs^3)
+                else
+                    ∫dν_js_Lyα[i,j] = 0.0
                 end
 
                 # Get flux opacity:
@@ -206,27 +222,13 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
                 end
 
                 # Get gas velocity field:
-                if RCoM ≤ Rcl
-                    # Within RCoM ≤ Rcl we have Hubble flow:
-                    u_r[i,j], u_Z[i,j], ∂u_r_∂r[i,j], ∂u_r_∂Z[i,j], 
-                    ∂u_Z_∂r[i,j], ∂u_Z_∂Z[i,j], u_r_over_r[i,j] = GetHubbleFlow( rCoM[i], ZCoM[j], umax * kms, Rcl, Zc )
-                end
+                u_r[i,j], u_Z[i,j], ∂u_r_∂r[i,j], ∂u_r_∂Z[i,j], 
+                ∂u_Z_∂r[i,j], ∂u_Z_∂Z[i,j], u_r_over_r[i,j] = GetHubbleFlow( rCoM[i], ZCoM[j], umax * kms, Rcl, Zc )
 
-                # Get u at the cell interfaces (NOTE: this loop can't be threaded!):
-                if Rrface ≤ Rcl 
-                    u_r_star[i+1,j], _, _, _, _, _, _ = GetHubbleFlow( r[i+1], ZCoM[j], umax * kms, Rcl, Zc )
-                end
+                # Get u at the cell interfaces:
+                u_r_star[i+1,j], _, _, _, _, _, _ = GetHubbleFlow( r[i+1], ZCoM[j], umax * kms, Rcl, Zc )
 
-                if RZface ≤ Rcl 
-                    _, u_Z_star[i,j+1], _, _, _, _, _ = GetHubbleFlow( rCoM[i], Z[j+1], umax * kms, Rcl, Zc )
-                end
-
-                # Lyα frequency-integrated emissivity:
-                if RCoM ≤ Rs
-                    ∫dν_js_Lyα[i,j] = 3 * L_Lyα / (Four_π^2 * Rs^3)
-                else
-                    ∫dν_js_Lyα[i,j] = 0.0
-                end
+                _, u_Z_star[i,j+1], _, _, _, _, _ = GetHubbleFlow( rCoM[i], Z[j+1], umax * kms, Rcl, Zc )
 
             end
         end # End of i-loop 
@@ -244,7 +246,9 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
     CFL         = 0.4
     Δt_CFL      = GetRHDCFLTimeStep(r, Z, c̃, u_r, u_Z, CFL)
     t           = 0.0
-    tmax        = tmax_unitless * (Compute_a(T₀) * τcl)^(1/3) * Rcl / c̃
+    aτcl        = Compute_a(T₀) * τcl
+    tdiff       = (aτcl)^(1/3) * Rcl / c̃
+    tmax        = tmax_unitless * tdiff
 
     # Initialize time-steps where data is saved 
     Δt_save     = tmax / ( Nsaved - 1 )
@@ -252,11 +256,18 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
     save_index  = 0
     save_tol    = 1e-12 * tmax # Tolerance to guard against round-off errors when deciding if to save data
 
+    # Create arrays for storing the spherically averaged e_Lyα profile:
+    Nbins_sph   = min( N_r_lin, N_Z_lin )
+    V_bins_sph  = zeros( Float64, Nbins_sph )
+    R_binedges  = LinRange( 0.0, Rmax, Nbins_sph + 1 )
+    e_Lyα_sph   = zeros( Float64, Nbins_sph )
+
     # Create HDF5 file:
-    CreateHDF5File( FileName, N_r, N_Z, Nsaved, size(J,3) )
-    SaveGridHDF5File( FileName, geometry )
+    CreateHDF5File( FileName, aτcl, N_r, N_Z, Nsaved, size(J,3), Nbins_sph )
+    SaveGridHDF5File( FileName, geometry, Rcl )
     SaveLyαFreqGridHDF5File( FileName, LyaState )
     SaveAnalyticalSolutionHDF5File( FileName, ZCoM, τcl, T₀, Rcl, L_Lyα )
+    SaveSphericalBinsHDF5File( FileName, R_binedges, Rcl )
 
     if print_info
         print("\r\033[KStarting time evolution..."); flush(stdout)
@@ -275,23 +286,25 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
         Δt     = min(Δt_CFL, tmax - t)
         c̃Δt    = c̃ * Δt
 
-        # 1) Lyα emission & absorption, and radiation pressure:
-        #t0 = time_ns()
-        LyαEmissionAbsorptionUpdate!( J, H_r, H_Z,
+        # Step 1: M1 advection of Lyα
+        AdvectLyα!( c̃Δt, LyaState, geometry, 
+                    u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
+                    BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top )
+
+        # Step 2: Lyα emission/absorption
+        LyαEmissionAbsorptionUpdate!( J, J_old, H_r, H_Z,
                                       H_r_old, H_Z_old,
                                       ∫dν_js_Lyα, ϕ_ν,
                                       Hvoigt, α_Lyα, αc, α_F, pd,
                                       Δρu_r, Δρu_Z, Δν,
                                       c̃, Δt )
-        #t_emit += (time_ns() - t0)
 
-        # 2) M1 spatial advection + frequency diffusion + Doppler shift
-        #t0 = time_ns()
-        UpdateLyαJandH!( Δt, c̃, LyaState, geometry,
-                         T,
-                         u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-                         BC_r_left, BC_r_right, BC_Z_bot, BC_Z_top )
-        #t_adv += (time_ns() - t0)
+        # Step 3) Frequency diffusion/advection of Lyα
+        FrequencyUpdateJLyα_AllCells!( c̃Δt, LyaState, T, 
+                                       ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r, 
+                                       true )
+
+        println( maximum(LyaState.e_Lyα) )
 
         # Update Lyα forces f_Lyα, force multiplier, and M_F:
         LyaState.M_F, LyaState.L_Lyα = Update_f_Lyα_MF_L_Lyα!( LyaState.f_Lyα_r, LyaState.f_Lyα_Z, Δρu_r, Δρu_Z, 
@@ -311,8 +324,11 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
             # Update Lyα energy density for saving:
             Update_e_Lyα!( e_Lyα, Δν, J )
 
+            # Compute spherical average profile from e_Lyα(r,Z):
+            SphericalAverageProfile!( e_Lyα_sph, e_Lyα, R_binedges, V_bins_sph, ΔV, rCoM, ZCoM, Zc )
+
             # Save data:
-            SaveTimeStepHDF5( FileName, LyaState, save_index, t )
+            SaveTimeStepHDF5( FileName, LyaState, save_index, t / tdiff, e_Lyα_sph )
 
             # Move the 'next save' appointment forward until it is in the future 
             while t ≥ t_next_save - save_tol
@@ -320,11 +336,10 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
             end
         end
 
-
         # Compute progress fraction
         progress_frac = t / tmax
         # Update the progress bar description to show simulation time and percent
-        prog.desc = @sprintf("t = %.2e yr (%.1f%%)", t / yr, 100 * progress_frac)
+        prog.desc     = @sprintf("t = %.2e yr (%.1f%%)", t / yr, 100 * progress_frac)
         # Update the bar progress value
         update!( prog, Int(round(100 * progress_frac)) )
 

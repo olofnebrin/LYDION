@@ -48,11 +48,18 @@ function UpdateSedovTest!( Δt_Hydro::Float64,
     w_plus_i_p1 = geometry.w_plus_i_p1;  w_minus_i_p1 = geometry.w_minus_i_p1   
     w_plus_j_p1 = geometry.w_plus_j_p1;  w_minus_j_p1 = geometry.w_minus_j_p1
 
+    # MonCen:
+    cF_r = geometry.cF_r 
+    cB_r = geometry.cB_r 
+    cF_Z = geometry.cF_Z 
+    cB_Z = geometry.cB_Z 
+
     # Hydro state arrays (cell-averaged):
     ρ           = hydrostate.ρ;        ρu_r        = hydrostate.ρu_X 
     ρu_Z        = hydrostate.ρu_Y;     E           = hydrostate.E
     u_r         = hydrostate.u_X;      u_Z         = hydrostate.u_Y 
     P           = hydrostate.P;        γad         = hydrostate.γad 
+    e           = hydrostate.e_dual
 
     # Grid size & intervals:
     N_r, N_Z    = size( ρ )
@@ -71,9 +78,9 @@ function UpdateSedovTest!( Δt_Hydro::Float64,
                  w_i_m1_r, w_i_0_r, w_i_p1_r, w_j_m1_Z, w_j_0_Z, w_j_p1_Z, 
                  q_i_m1_r, q_i_0_r, q_i_p1_r, q_j_m1_Z, q_j_0_Z, q_j_p1_Z,  
 
-              w_plus_i_p1, w_minus_i_p1,  w_plus_j_p1, w_minus_j_p1,
+                 w_plus_i_p1, w_minus_i_p1,  w_plus_j_p1, w_minus_j_p1,
 
-                 Val(:Cylindrical), inv_r_cell )  
+                 Val(:Cylindrical), inv_r_cell, cF_r, cB_r, cF_Z, cB_Z )  
 
     # Update primitives to reflect latest conservatives,
     # so that we can set the CFL time-step for the scalar advection:
@@ -81,7 +88,7 @@ function UpdateSedovTest!( Δt_Hydro::Float64,
         @inbounds @simd for i in dN_r
             # Recover primitives at geometric cell centers, from the 
             # conservative variables at the cell centers:
-            u_r[i,j], u_Z[i,j], P[i,j] = GetPrimitive( ρ[i,j], ρu_r[i,j], ρu_Z[i,j], E[i,j], γad[i,j] )
+            u_r[i,j], u_Z[i,j], P[i,j] = GetPrimitive( ρ[i,j], ρu_r[i,j], ρu_Z[i,j], E[i,j], e[i,j], γad[i,j] )
 
             # Ensure positive pressure:
             P[i,j] = max( P[i,j], P_floor )
@@ -156,7 +163,7 @@ function SetupSedovTaylorTest( ρ₀::Float64,
     u_Z  = hydrostate.u_Y
     E    = hydrostate.E
     P    = hydrostate.P 
-    e    = hydrostate.e 
+    e    = hydrostate.e_dual
     γad  = hydrostate.γad
 
     # Dust arrays (not really active in the test, but needs to be initialized)
@@ -202,6 +209,9 @@ function SetupSedovTaylorTest( ρ₀::Float64,
 
                 # Set the gas pressure, assuming initially static gas:
                 P[i,j] = max( (γad[i,j] - 1) * E[i,j], P_floor )
+
+                # Gas internal energy density e = P / (γ - 1):
+                e[i,j] = P[i,j] / ( γad[i,j] - 1 )
                 
             end
         end # End of i-loop 

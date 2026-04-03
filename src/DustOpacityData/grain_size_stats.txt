@@ -1,0 +1,14 @@
+# Grain size statistics for WD01 dust model (R_V = 5.5, b_C = 3e-5)
+# PAH/graphite split at a_split_C = 0.001 μm
+# Graphite optical data (PAH file) used for a < 0.010000000000000002 μm
+#
+# Area-weighted mean grain sizes <a>_area = ∫a³(∂n/∂a)da / ∫a²(∂n/∂a)da:
+  a_area_PAH      = 5.6236e-08 cm  =  5.6236e-04 μm
+  a_area_graphite = 5.2953e-06 cm  =  5.2953e-02 μm
+  a_area_silicate = 1.3820e-05 cm  =  1.3820e-01 μm
+#
+# Dust mass fractions f_s = M_s / M_tot:
+  f_PAH           = 0.021835
+  f_graphite      = 0.251721
+  f_silicate      = 0.726444
+  f_PAH + f_C + f_Sil = 1.000000  (sanity check, should be 1)

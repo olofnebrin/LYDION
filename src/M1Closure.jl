@@ -31,7 +31,7 @@ const DEBUG_M1Closure = false
 end
 
  
-const fmin::Float64         = 1e-10     
+const fmin::Float64         = 1e-10 
 const fmax::Float64         = 1.0 - 1e-10  # To avoid rounding errors from calculation of χ 
 const fmin_squared::Float64 = fmin * fmin 
 const Jeps::Float64         = 1e-60
@@ -48,7 +48,7 @@ const Heps_squared::Float64 = Heps * Heps
     # Squared magnitude of H:
     Hmag_squared = H_r * H_r  +  H_Z * H_Z
 
-    if J ≤ Jeps || Hmag_squared ≤ Heps_squared || Hmag_squared ≤ fmin_squared * J * J
+    if J ≤ Jeps || Hmag_squared ≤ Heps_squared || Hmag_squared ≤ fmin_squared * J * J 
         # If the flux is near zero, or if we have ≈ no intensity at all,
         # we assume isotropic intensity:
         D_rr = OneThird
@@ -90,8 +90,7 @@ end
                                                   nZ::Float64 )
        
     # Compute f:
-    #f = clamp( f, fmin, fmax )
-    if f > fmin
+    if f > fmin 
         f = min( f, fmax )
         χ = χ_L84( f )
 

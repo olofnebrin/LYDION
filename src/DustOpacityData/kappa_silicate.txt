@@ -1,0 +1,13 @@
+# Dust opacities for species: Silicate
+# Computed by ComputeDustOpacities.jl (LYDION)
+# Grain size distribution: Weingartner & Draine (2001), R_V = 5.5, b_C = 3e-5
+# BB temperature: Teff = 48000.0 K
+# Columns: Band  E_low (eV)  E_high (eV)  κ_abs (cm² g⁻¹)  κ_F (cm² g⁻¹)
+#
+opt         1.0000      5.8000    5.978168e+03    1.686906e+04
+FUV         5.8000     11.2000    1.708525e+04    2.207326e+04
+LW         11.2000     13.6000    1.799163e+04    2.175388e+04
+EUV1       13.6000     24.6000    1.530059e+04    1.850705e+04
+EUV2       24.6000     54.4000    1.372961e+04    1.456295e+04
+EUV3       54.4000   1000.0000    1.303637e+04    1.323523e+04
+Lya        10.1900     10.2100    1.842922e+04    2.217000e+04

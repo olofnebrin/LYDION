@@ -337,7 +337,7 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
                            Φ_old::AbstractArray{Float64, 2},
                             ρtot::AbstractArray{Float64, 2},
                                ρ::AbstractArray{Float64, 2}, # Gass density 
-                              ρd::AbstractArray{Float64, 2}, # Dust density 
+                           ρdtot::AbstractArray{Float64, 2}, # Total (i.e. sum over bins) dust density 
                             ρ_bg::AbstractArray{Float64, 2}, # Background density (e.g. stars, or DM)
                       RPoiss_ijp::AbstractArray{Float64, 2},
                        RPoiss_ij::AbstractArray{Float64, 2},
@@ -366,7 +366,7 @@ const check_every::Int  = 10           # Check for convergence every 10 step (by
     dN_Z_int   = 2:(N_Z-2) # Exclude inner & outer boundary
 
     # Fill total gravitating mass:
-    ρtot      .= ρ  .+  ρd  .+  ρ_bg
+    ρtot      .= ρ  .+  ρdtot  .+  ρ_bg
 
     # Enforce Dirichlet BC values once before iteration (and keep them fixed)
     ComputeMultiPoleMoments!( Q, P[:,1], ρtot, rCoM, ZCoM, ΔV, ℓmax, BC_Z_bot )
@@ -573,7 +573,7 @@ function Update_Φ!( Φ::AbstractArray{Float64, 2},
            Φ_snapshot::AbstractArray{Float64, 2},
                  ρtot::AbstractArray{Float64, 2},
                     ρ::AbstractArray{Float64, 2},
-                   ρd::AbstractArray{Float64, 2},
+                ρdtot::AbstractArray{Float64, 2},
                  ρ_bg::AbstractArray{Float64, 2},
            RPoiss_ijp::AbstractArray{Float64, 2},
             RPoiss_ij::AbstractArray{Float64, 2},
@@ -608,7 +608,7 @@ function Update_Φ!( Φ::AbstractArray{Float64, 2},
         Φ_old    .= Φ_snapshot
 
         # Do a set of ADI iterations & check for convergence:
-        Converged = Update_Φ_ADI!( Φ, Φ_half, Φ_old, ρtot, ρ, ρd, ρ_bg,
+        Converged = Update_Φ_ADI!( Φ, Φ_half, Φ_old, ρtot, ρ, ρdtot, ρ_bg,
                                    RPoiss_ijp, RPoiss_ij, RPoiss_ijm,
                                    ZPoiss_ijp, ZPoiss_ij, ZPoiss_ijm,
                                    Δτ_max, Δτ_min, k_iter,
@@ -834,7 +834,7 @@ const tol_GravUpdate::Float64 = 1e-6
     Poisson equation again. Returns true if we should, false otherwise. """
 function ShouldWeUpdateΦ( Φ::AbstractArray{Float64, 2},
                           ρ::AbstractArray{Float64, 2},
-                         ρd::AbstractArray{Float64, 2},
+                      ρdtot::AbstractArray{Float64, 2},
                        ρ_bg::AbstractArray{Float64, 2},
                  RPoiss_ijp::AbstractArray{Float64, 2},
                   RPoiss_ij::AbstractArray{Float64, 2},
@@ -871,7 +871,7 @@ function ShouldWeUpdateΦ( Φ::AbstractArray{Float64, 2},
                 end
 
                 # Compute Φ':
-                Φ_prime  = ( - Four_π_G * ( ρ[i,j] + ρd[i,j] + ρ_bg[i,j] )
+                Φ_prime  = ( - Four_π_G * ( ρ[i,j] + ρdtot[i,j] + ρ_bg[i,j] )
                              + RPoiss_ijp[i,j] * Φ[i+1,j]  +  RPoiss_ijm[i,j] * Φ_im1
                              + ZPoiss_ijp[i,j] * Φ[i,j+1]  +  ZPoiss_ijm[i,j] * Φ_jm1 ) / ( RPoiss_ij[i,j] + ZPoiss_ij[i,j] )
 
@@ -887,4 +887,3 @@ function ShouldWeUpdateΦ( Φ::AbstractArray{Float64, 2},
 
     return ShouldWeUpdate
 end
-

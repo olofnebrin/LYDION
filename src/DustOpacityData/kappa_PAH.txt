@@ -1,0 +1,13 @@
+# Dust opacities for species: PAH (a < 0.001 μm)
+# Computed by ComputeDustOpacities.jl (LYDION)
+# Grain size distribution: Weingartner & Draine (2001), R_V = 5.5, b_C = 3e-5
+# BB temperature: Teff = 48000.0 K
+# Columns: Band  E_low (eV)  E_high (eV)  κ_abs (cm² g⁻¹)  κ_F (cm² g⁻¹)
+#
+opt         1.0000      5.8000    2.268161e+05    2.268170e+05
+FUV         5.8000     11.2000    2.862510e+05    2.862542e+05
+LW         11.2000     13.6000    5.918128e+05    5.918432e+05
+EUV1       13.6000     24.6000    1.084056e+06    1.084178e+06
+EUV2       24.6000     54.4000    2.834321e+05    2.835037e+05
+EUV3       54.4000   1000.0000    8.809530e+04    8.816752e+04
+Lya        10.1900     10.2100    3.313096e+05    3.313148e+05

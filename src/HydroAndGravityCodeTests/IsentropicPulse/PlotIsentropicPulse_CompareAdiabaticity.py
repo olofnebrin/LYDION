@@ -6,7 +6,7 @@ from matplotlib.ticker import AutoMinorLocator, LogLocator, NullFormatter
 
 # ---------------- User inputs ----------------
 script_dir  = os.path.dirname(os.path.abspath(__file__))
-N           = [32, 64, 128, 256, 512]          # Grid resolution(s) to plot
+N           = [32, 64, 128, 256, 1024]          # Grid resolution(s) to plot
 gamma       = 5.0/3.0
 Axis        = "r"                              # kept for compatibility (not used below)
 ErrorNorm   = "L2"                             # "L1" or "L2"

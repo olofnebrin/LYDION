@@ -30,7 +30,8 @@ from PlotCosmetics import (
 )
 
 # ---------------- user inputs ----------------
-filename    = "RHDSim_Lya_64x64_2026-02-12.h5"
+#filename    = "RHDSim_NoLya_512x1024_2026-02-10.h5"
+filename    = "RHDSim_NoLya_64x64_2026-02-28.h5"
 frameskip   = 1
 save_mp4    = True
 outname     = "density_temperature_cinematic_2panel.mp4"
@@ -38,7 +39,7 @@ fps         = 20
 dpi         = 300
 
 # view half-size (pc)
-half_pc     = 3.0
+half_pc     = 3
 
 # scale bar
 scalebar_pc = 1.0
@@ -47,18 +48,18 @@ scalebar_pc = 1.0
 midplane_symmetry = True   # True => center at z=0 ; False => center at z=Zmax/2
 
 # pretty mirroring options
-mirror_r = False             # show ±r
-mirror_z = False            # show ±z
+mirror_r = False           # show ±r
+mirror_z = True            # show ±z
 
 # ---------------------------------------------
 
 # --- norms (set these the way you like) ---
 # Density:
-vmin_nH, vmax_nH = 10.0, 1e5
+vmin_nH, vmax_nH = 1e1, 1e5
 norm_nH = LogNorm(vmin=vmin_nH, vmax=vmax_nH, clip=True)
 
 # Temperature (tweak!)
-T_vmin, T_vmax = 10.0, 2e4   # for HII-focused, try (1e3, 2e4) or (3e3, 3e4)
+T_vmin, T_vmax = 1.0, 1e5   # for HII-focused, try (1e3, 2e4) or (3e3, 3e4)
 norm_T = LogNorm(vmin=T_vmin, vmax=T_vmax, clip=True)
 # ------------------------------------------
 
@@ -198,8 +199,11 @@ cbL = InsetColorBar(
     labelsize=18,
     tick_labelsize=18
 )
+
 cbL.set_ticks([10.0, 1e3, 1e5])
 cbL.set_ticklabels([r"10", r"$10^{3}$", r"$10^{5}$"])
+#cbL.set_ticks([1e3, 1e5, 1e7])
+#cbL.set_ticklabels([r"$10^{3}$", r"$10^{5}$", r"$10^{7}$"])
 
 # RIGHT: Temperature
 imR = axR.pcolormesh(Rplot, Zplot, T0, norm=norm_T, shading="auto", cmap=cmap_for("temperature"))

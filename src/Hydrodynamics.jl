@@ -2,9 +2,8 @@
 """ FILE:           Hydrodynamics.jl
 
     PURPOSE:        This file contains the basic 2D hydrodynamics code, relying on a 
-                    finite volume method, with third-order WENO3 cell reconstruction.
-                    Strang splitting is used to dimensionally split the problem, which 
-                    formally reduces the convergence to second order in space. 
+                    finite volume method, with an unsplit third-order WENO3 cell reconstruction,
+                    and third-order RK3 time integration.
 
                     The code can be applied to axi-symmetric problems in cylindrical coordinates, 
                     as well as 2D Cartesian problems. 
@@ -29,7 +28,7 @@ using Base.Threads           # For CPU acceleration
 using Printf
 
 
-export GetPrimitive, GetCFLTimeStep, 
+export GetPrimitive, GetCFLTimeStep, UpdateTotalDustDensity!,
        GetGravityTimeStep, GetRadPressureTimeStep, Getγad, Getμ, UpdateHydro!, 
        GravitySolveAndKick!, GravityKick!, UpdateTotalMass!, UpdateGasVelocityDispersion!, 
        GenerateHydroArrays
@@ -43,18 +42,21 @@ export GetPrimitive, GetCFLTimeStep,
 # Below are the main settings controlling the hydro solver,
 # which you can change.
 
-const CFL::Float64         =  0.4        # CFL factor for gas tim                            (< 1, default: 0.4)
-const C_Grav::Float64      =  0.1        # Sets the gravity-limited time-step                (default: 0.1)
-const C_RP::Float64        =  0.1        # Sets the rad. presure-limited time-step           (default: 0.1)
-const ρ_floor::Float64     =  1e-10 * mH # Gas density floor                                 (default: 10⁻¹⁰ mH per cm⁻³)
-const ρd_floor::Float64    =  1e-13 * mH # Dust density floor                                (default: 10⁻¹³ mH per cm⁻³)
-const P_floor::Float64     =  1e-30      # Gas pressure floor                                (default: 10⁻³⁰ in cgs units)
-const γmon::Float64        =  5 / 3      # Adiabatic index of monoatomic gas
-const γdia::Float64        =  7 / 5      # Adiabatic index of diatomic gas
-const SteepFallBack::Bool  =  false      # Whether to use fall backs to cell centers = cell average (default: false)
-const DEBUG_Hydro::Bool    =  false      # Checks for non-physical values & errors, on if true      (default: true)
+const CFL::Float64          =  0.4                   # CFL factor                                        (< 1, default: 0.4)
+const η1_dual::Float64      =  1e-3                  # Determines when to use e_dual vs. E - Ekin to set the gas pressure 
+const η2_dual::Float64      =  0.1                   # Determines when to sync e_dual with E - Ekin 
+const C_Grav::Float64       =  0.1                   # Sets the gravity-limited time-step                (default: 0.1)
+const γmon::Float64         =  5 / 3                 # Adiabatic index of monoatomic gas = 5 / 3
+const γdia::Float64         =  7 / 5                 # Adiabatic index of diatomic gas   = 7 / 5
+const ρ_floor::Float64      =  1e-10 * mH            # Gas density floor                                        (default: 10⁻¹⁰ mH per cm⁻³)
+const ρd_floor::Float64     =  1e-13 * mH            # Dust density floor                                       (default: 10⁻¹³ mH per cm⁻³)
+const ρd_IGNORE::Float64    =  1.1 * ρd_floor        # Set dust = gas velocities below this threshold           (default: 1.1 × ρd_floor)
+const DG_th::Float64        =  1e-6 * DGsun          # Set dust = gas velocities for ρd/ρ below this threhsold  (default: 10⁻⁶ × DGsun)
+const P_floor::Float64      =  1e-30                 # Gas pressure floor                                       (default: 10⁻³⁰ in cgs units)
+const e_dual_floor::Float64 =  P_floor / (γmon - 1)  # Floor for the dual internal energy density
+const DEBUG_Hydro::Bool     =  false                 # Checks for non-physical values & errors, on if true      (default: true)
 
-export CFL, C_Grav, C_RP, ρ_floor, ρd_floor, P_floor, γmon, γdia  
+export CFL, C_Grav, C_RP, ρ_floor, ρd_floor, ρd_IGNORE, DG_th, P_floor, γmon, γdia  
 
 
 ###############################################################
@@ -65,18 +67,31 @@ export CFL, C_Grav, C_RP, ρ_floor, ρd_floor, P_floor, γmon, γdia
 
 
 """ Converts from conservative variables (ρ, ρu_X, ρu_Y, E) to 
-    primitive ones (u_X, u_Y, P).  """
+    primitive ones (u_X, u_Y, P). Also uses the dual formalism 
+    internal energy density e_dual to decide how to compute the 
+    pressure P.  """
 @inline function GetPrimitive(  ρ::Float64, # Gas density
                              ρu_X::Float64, # Gas momentum per unit volume in r-direction
                              ρu_Y::Float64, # Gas momentum per unit volume in Z-direction
-                                E::Float64, # Total gas energy 
+                                E::Float64, # Total gas energy density  
+                           e_dual::Float64, # Internal energy density from the dual formalism 
                               γad::Float64  # Adiabatic index 
                                )
     inv_ρ = 1 / ρ
     u_X   = ρu_X * inv_ρ
     u_Y   = ρu_Y * inv_ρ
     u_sq  = u_X * u_X  +  u_Y * u_Y
-    P     = (γad - 1) * ( E  -  ρ * u_sq / 2 )
+    Ekin  = 0.5 * ρ * u_sq
+
+    if ( E - Ekin ) < η1_dual * E 
+        # In this case, we use pressure derived from e to avoid 
+        # large errors from cancellations:
+        P = (γad - 1) * e_dual
+    else
+        # Otherwise, use pressure derived from E:
+        P = (γad - 1) * ( E  -  Ekin )
+    end
+
     return u_X, u_Y, P
 end
 
@@ -91,28 +106,160 @@ end
                                  )
     ρu_X = ρ * u_X 
     ρu_Y = ρ * u_Y
-    E    = P / (γad - 1)  +  ρ * (u_X * u_X  +  u_Y * u_Y) / 2 
+    E    = P / (γad - 1)  +  0.5 * ρ * (u_X * u_X  +  u_Y * u_Y) 
     return ρu_X, ρu_Y, E
 end
 
 
+@inline function SyncDualInternalEnergy!( Hydro::HydrodynamicsState )
+
+    # Unpack arrays:
+    e_dual     = Hydro.e_dual
+    E          = Hydro.E 
+    ρ          = Hydro.ρ
+    ρu_X       = Hydro.ρu_X
+    ρu_Y       = Hydro.ρu_Y
+    BC_X_left  = Hydro.BC_X_left 
+    BC_X_right = Hydro.BC_X_right
+    BC_Y_left  = Hydro.BC_Y_left 
+    BC_Y_right = Hydro.BC_Y_right
+
+    # Grid size & intervals:
+    N_X, N_Y = size( ρ )
+    dN_X     = 1:N_X 
+    dN_Y     = 1:N_Y 
+
+    @threads for j in dN_Y 
+        @inbounds @simd for i in dN_X
+
+            inv_ρ  = 1 / ρ[i,j]
+            Ekin   = 0.5 * ( ρu_X[i,j] * ρu_X[i,j]  +  ρu_Y[i,j] * ρu_Y[i,j] ) * inv_ρ 
+            e_cons = E[i,j] - Ekin 
+
+            if i ≥ 2 
+                Eim1 = E[i-1,j]
+            else 
+                # For i = 1, determine E[0,j] from BCs:
+                if BC_X_left === :Periodic
+                    # For periodic BCs:
+                    Eim1 = E[N_X,j]
+                else
+                    # For reflective or outflow BCs:
+                    Eim1 = E[1,j]
+                end
+            end 
+
+            if i ≤ N_X - 1
+                Eip1 = E[i+1,j]
+            else
+                # For i = N_X, determine E[N_X+1,j] from BCs:
+                if BC_X_right === :Periodic
+                    # For periodic BCs:
+                    Eip1 = E[1,j]
+                else
+                    # For reflective or outflow BCs:
+                    Eip1 = E[N_X,j]
+                end
+            end
+
+            if j ≥ 2
+                Ejm1 = E[i,j-1]
+            else 
+                # For j = 1, determine E[i,0] from BCs:
+                if BC_Y_left === :Periodic
+                    # For periodic BCs:
+                    Ejm1 = E[i,N_Y]
+                else
+                    # For reflective or outflow BCs:
+                    Ejm1 = E[i,1]
+                end
+            end 
+
+            if j ≤ N_Y - 1
+                Ejp1 = E[i,j+1]
+            else
+                # For j = N_Y, determine E[i,N_Y+1] from BCs:
+                if BC_Y_right === :Periodic
+                    # For periodic BCs:
+                    Ejp1 = E[i,1]
+                else
+                    # For reflective or outflow BCs:
+                    Ejp1 = E[i,N_Y]
+                end
+            end
+
+            # If the kinetic energy is not too large compared to E in stencil,
+            # set e_dual equal to e_cons = E - Ekin. Otherwise leave it untouched.
+            if e_cons > η2_dual * max( E[i,j], Eim1, Eip1, Ejm1, Ejp1 )
+                e_dual[i,j] = max( e_cons, e_dual_floor )
+            else 
+                e_dual[i,j] = max( e_dual[i,j], e_dual_floor )
+            end
+
+        end
+    end
+
+    return nothing 
+end
+
+
+""" This function updates the total dust density for all cells. """
+function UpdateTotalDustDensity!( Hydro::HydrodynamicsState )
+
+    N_dust, N_X, N_Y = size( Hydro.ρd )
+    dN_X             = 1:N_X 
+    dN_Y             = 1:N_Y 
+    dN_dust          = 1:N_dust
+
+    @threads for j in dN_Y 
+        @inbounds @simd for i in dN_X 
+
+            Hydro.ρdtot[i,j] = 0.0
+            ∑ρd              = 0.0
+            for bin in dN_dust
+                ∑ρd += Hydro.ρd[bin,i,j]
+            end
+
+            # Save total dust density for cell (i,j)
+            Hydro.ρdtot[i,j] = ∑ρd
+        end
+    end
+
+    return nothing 
+end
+
+
+const inv_Dimensions::Float64 = 1 / 2 
+
 """ The default CFL time-step. Computes min( Δr / (cs + u), Δr / ud ),
     over all cells. To avoid unnecessary allocations, this is 
     done in a for loop. """
-@inline function GetCFLTimeStep(  X::AbstractVector{Float64}, # Interface r-values
-                                  Y::AbstractVector{Float64}, # Interface Z-values
-                                  ρ::AbstractMatrix{Float64}, # Gas density 
-                                  P::AbstractMatrix{Float64}, # Gas pressure 
-                                u_X::AbstractMatrix{Float64}, # Gas velocity in r-direction
-                                u_Y::AbstractMatrix{Float64}, # Gas velocity in Z-direction 
-                               ud_r::AbstractMatrix{Float64}, # Dust velocity in r-direction
-                               ud_Z::AbstractMatrix{Float64}, # Dust velocity in Z-direction 
-                                γad::AbstractMatrix{Float64}  # Adiabatic index 
+@inline function GetCFLTimeStep( Hydro::HydrodynamicsState, 
+                                  Geom::Union{GeometryCylindrical, GeometryCartesian}
                                  )
 
-    N_X, N_Y    = size( ρ )  # Grid size
+    # Unpack arrays:
+    ρ     = Hydro.ρ
+    P     = Hydro.P
+    u_X   = Hydro.u_X
+    u_Y   = Hydro.u_Y
+    ud_X  = Hydro.ud_X
+    ud_Y  = Hydro.ud_Y
+    γad   = Hydro.γad 
+
+    if Geom isa GeometryCylindrical
+        X = Geom.r 
+        Y = Geom.Z 
+    else
+        X = Geom.X 
+        Y = Geom.Y 
+    end
+
+    # Grid size & intervals: 
+    N_X, N_Y    = size( ρ )  
     dN_X        = 1:N_X
     dN_Y        = 1:N_Y
+    dN_dust     = 1:Hydro.N_dust
 
     if DEBUG_Hydro
         @assert length(X) == N_X + 1 "X must have N_X + 1 entries"
@@ -134,11 +281,22 @@ end
                 @assert P[i,j] > 0.0 && ρ[i,j] > 0.0 "P[$(i),$(j)] = $(P[i,j]) and ρ[$(i),$(j)] = $(ρ[i,j]) in GetCFLTimeStep."
             end
 
-            cs = sqrt( γad[i,j] * P[i,j] / ρ[i,j] )
+            # Sound speed:
+            cs  = sqrt( γad[i,j] * P[i,j] / ρ[i,j] )
+
+            # Magnitudes of gas and dust velocities:
+            u      = hypot( u_X[i,j],  u_Y[i,j] )
+            ud_max = 0.0
+            for bin in dN_dust 
+                ud_bin  = hypot( ud_X[bin,i,j], ud_Y[bin,i,j] )
+                ud_max  = max( ud_max, ud_bin )
+            end
 
             # Compute the local CFL time-scale:
-            Δt = min( ΔX / (cs + abs(u_X[i,j])), ΔX / abs(ud_r[i,j]), 
-                      ΔY / (cs + abs(u_Y[i,j])), ΔY / abs(ud_Z[i,j])  )
+            Δx      = min( ΔX, ΔY )
+            Δt_gas  = inv_Dimensions * Δx / ( u + cs )
+            Δt_dust = inv_Dimensions * Δx / ud_max
+            Δt      = min( Δt_gas, Δt_dust )
             
             if Δt < local_min_ΔtHydro 
                 # Update the smallest time-scale found:
@@ -155,13 +313,18 @@ end
 end
 
 
-const t_ff0::Float64 = sqrt( 3 * π / (32 * G) )
+const t_ff0::Float64 = sqrt( 3 * π / (32 * G) )  # Constant for the free-fall time 
 
+""" This function sets the maximum allowed time-step in the presence of 
+    self-gravity, such that accurate evolution is obtained. More specifically,
+    the time-step is limited by the acceleration time-scale, and the free-fall 
+    time. """
 @inline function GetGravityTimeStep( X::AbstractVector{Float64}, # Interface X-values
                                      Y::AbstractVector{Float64}, # Interface Y-values
                                   ∂Φ∂X::AbstractMatrix{Float64}, # X-component of ∇Φ  
                                   ∂Φ∂Y::AbstractMatrix{Float64}, # Y-component of ∇Φ 
-                                     ρ::AbstractMatrix{Float64}
+                                     ρ::AbstractMatrix{Float64},
+                                 ρdtot::AbstractMatrix{Float64},
                                     )
 
     N_X, N_Y = size( ∂Φ∂X )
@@ -184,7 +347,7 @@ const t_ff0::Float64 = sqrt( 3 * π / (32 * G) )
                           sqrt( 2 * ΔY / abs(∂Φ∂Y[i,j]) ) )
 
             # Compute the local free-fall time:
-            t_ff   = t_ff0 / sqrt( ρ[i,j] )
+            t_ff   = t_ff0 / sqrt( ρ[i,j] + ρdtot[i,j] )
 
             # Get the minimum of the two:
             Δt_g   = min( Δt_acc, t_ff )
@@ -200,55 +363,6 @@ const t_ff0::Float64 = sqrt( 3 * π / (32 * G) )
     end
 
     return C_Grav * min_Δt
-end
-
-
-""" This function computes the maximum time-step that can be taken 
-    to retain accuracy, for a given radiation pressure force 
-    per unit volume f_rad = (f_rad_X, f_rad_Y). Computed as:
-    
-    Δt ≤ C_RP × sqrt( 2 Δr / abs(a_rad) ) 
-       = C_RP × sqrt( 2 Δr ρ / abs(f_rad) ) """
-@inline function GetRadPressureTimeStep( X::AbstractVector{Float64}, # Interface X-values
-                                         Y::AbstractVector{Float64}, # Interface Y-values
-                                         ρ::AbstractMatrix{Float64}, # Gas density 
-                                        ρd::AbstractMatrix{Float64}, # Dust density 
-                                   f_rad_X::AbstractMatrix{Float64}, # X-component of radiation pressure force per unit volume 
-                                   f_rad_Y::AbstractMatrix{Float64}, # Y-component of radiation pressure force per unit volume 
-                                         )
-
-    N_X, N_Y = size( f_rad_X )
-    dN_X     = 1:N_X 
-    dN_Y     = 1:N_Y 
-
-    min_Δt   = Inf64  # Initialize the minimum local time-scale
-    @inbounds for j in dN_Y
-        ΔY           = Y[j+1] - Y[j] # Vertical cell width
-        local_min_Δt = min_Δt   # Local variable for tracking smallest time-step 
-
-        @simd for i in dN_X 
-
-            # Compute the horizontal cell width (same for all j-indices):
-            ΔX   = X[i+1] - X[i]
-
-            # Total mass density:
-            ρtot = ρ[i,j] + ρd[i,j]
-
-            # Compute the local acceleration time-scale:
-            Δt   = min( sqrt( 2 * ΔX * ρtot / abs(f_rad_X[i,j]) ), 
-                        sqrt( 2 * ΔY * ρtot / abs(f_rad_Y[i,j]) ) )
-            
-            if Δt < local_min_Δt
-                # Update the smallest time-scale found:
-                local_min_Δt = Δt 
-            end
-
-        end
-
-        min_Δt = min( min_Δt, local_min_Δt )
-    end
-
-    return C_RP * min_Δt
 end
 
 
@@ -375,38 +489,52 @@ end
 
 """ Just a small useful function for computing dust velocities in a single cell,
     e.g. the ghost cells. """
-@inline function GetDustVelocities( ρd::Float64, ρdud_r::Float64, ρdud_Z::Float64 )
+@inline function GetDustVelocities( ρd::Float64, ρdud_X::Float64, ρdud_Y::Float64, 
+                                     ρ::Float64,    u_X::Float64,    u_Y::Float64 )
 
-    if ρd > ρd_floor
+    if ρd > ρd_IGNORE  &&  ρd > DG_th * ρ
         inv_ρd  = 1 / ρd
-        ud_r    = ρdud_r * inv_ρd 
-        ud_Z    = ρdud_Z * inv_ρd
+        ud_X    = ρdud_X * inv_ρd 
+        ud_Y    = ρdud_Y * inv_ρd
     else
-        ud_r    = 0.0
-        ud_Z    = 0.0
+        # For negligible dust densities, assume it travels with the gas:
+        ud_X    = u_X
+        ud_Y    = u_Y
     end
 
-    return ud_r, ud_Z 
+    return ud_X, ud_Y 
 end
 
 
 """ This function updates dust velocities in all interior (i.e. non-ghost)
     cells. """
-@inline function UpdateDustVelocities!( ρd::AbstractArray{Float64, 2},
-                                    ρdud_r::AbstractArray{Float64, 2},
-                                    ρdud_Z::AbstractArray{Float64, 2},
-                                      ud_r::AbstractArray{Float64, 2},
-                                      ud_Z::AbstractArray{Float64, 2}
-                                      )
+@inline function UpdateDustVelocities!( Hydro::HydrodynamicsState )
 
-    N_r, N_Z = size( ρd )
-    dN_r     = 1:N_r 
-    dN_Z     = 1:N_Z 
+    # Unpack arrays:
+    ρd      = Hydro.ρd
+    ρdud_X  = Hydro.ρdud_X
+    ρdud_Y  = Hydro.ρdud_Y
+    ud_X    = Hydro.ud_X
+    ud_Y    = Hydro.ud_Y
 
-    @threads for j in dN_Z 
-        @inbounds @simd for i in dN_r
+    ρ       = Hydro.ρ
+    u_X     = Hydro.u_X
+    u_Y     = Hydro.u_Y
 
-            ud_r[i,j], ud_Z[i,j] = GetDustVelocities( ρd[i,j], ρdud_r[i,j], ρdud_Z[i,j] )
+    # Grid size & intervals:
+    N_dust, N_X, N_Y = size( ρd )
+    dN_X             = 1:N_X
+    dN_Y             = 1:N_Y 
+    dN_dust          = 1:N_dust 
+
+    @threads for j in dN_Y
+        @inbounds @simd for i in dN_X
+
+            for bin in dN_dust
+                ud_X[bin,i,j], ud_Y[bin,i,j] = GetDustVelocities( ρd[bin,i,j], 
+                                                                  ρdud_X[bin,i,j], ρdud_Y[bin,i,j], 
+                                                                  ρ[i,j], u_X[i,j], u_Y[i,j] )
+            end
 
         end # End of i-loop 
     end # End of j-loop 
@@ -426,18 +554,24 @@ const ng::Int64 = 2    # Number of ghost layers per side
 const dng       = 1:ng # Convenient interval, often needed below 
 
 
-const ϵ_Shock_HLL::Float64         = 1.0 # Critical value of shock-indicator for switching to HLL (default = 1.0)
-const Shock_HLL::Int               = 1   # Just an arbitrary constant to track cells where we want to revert to HLL 
-const ϵ_Shock_HLL_and_PLM::Float64 = 4.0 # Critical value of shock-indicator to flag as a very strong shock, 
-                                         # where we revert to HLL + PLM reconstruction (default = 4.0)
+const ϵ_Shock_HLL::Float64             = 1.0   # Critical value of shock-indicator for switching to HLL (default = 1.0)
+const Shock_HLL::Int                   = 1     # Just an arbitrary constant to track cells where we want to revert to HLL 
+const ϵ_Shock_HLL_and_PLM::Float64     = 4.0   # Critical value of shock-indicator to flag as a very strong shock, 
+                                               # where we revert to HLL + PLM reconstruction (default = 4.0)
+
+const ϵ_ρGradient_HLL_and_PLM::Float64 = 100.0 # Revert to HLL + PLM if gas/dust density gradients exceed this factor (default = 100)
 
 @inline function UpdateShockFinder!( Shock::AbstractMatrix{Int}, 
-                                         P::AbstractMatrix{Float64}
-                                     )
+                                         P::AbstractMatrix{Float64},
+                                         ρ::AbstractMatrix{Float64}, 
+                                        ρd::AbstractArray{Float64, 3} )
 
+    # Grid & intervals 
     N_X, N_Y = size( P )
+    N_dust   = size( ρd, 1 )
     dN_X     = 1:N_X 
     dN_Y     = 1:N_Y
+    dN_dust  = 1:N_dust 
 
     @threads for j in dN_Y
         @inbounds @simd for i in dN_X
@@ -451,11 +585,25 @@ const ϵ_Shock_HLL_and_PLM::Float64 = 4.0 # Critical value of shock-indicator to
             inv_P   = 1 / max( min( P[i,j], P[im1,j], P[ip1,j], P[i,jm1], P[i,jp1] ), P_floor )
             ΔP      = ( abs( P[ip1,j] - P[im1,j] ) + abs( P[i,jp1] - P[i,jm1] ) ) * inv_P
 
-            if ΔP ≥ ϵ_Shock_HLL_and_PLM 
+            # Also take into account strong gradients ρ and ρd:
+            inv_ρ   = 1 / max( min( ρ[i,j], ρ[im1,j], ρ[ip1,j], ρ[i,jm1], ρ[i,jp1] ), ρ_floor )
+            Δρ      = ( abs( ρ[ip1,j] - ρ[im1,j] ) + abs( ρ[i,jp1] - ρ[i,jm1] ) ) * inv_ρ
+
+            Δρd_max = 0.0
+            for bin in dN_dust 
+                inv_ρd  = 1 / max( min( ρd[bin,i,j], ρd[bin,im1,j], ρd[bin,ip1,j], ρd[bin,i,jm1], ρd[bin,i,jp1] ), ρd_floor )
+                Δρd     = ( abs( ρd[bin,ip1,j] - ρd[bin,im1,j] ) + abs( ρd[bin,i,jp1] - ρd[bin,i,jm1] ) ) * inv_ρd
+
+                Δρd_max = max( Δρd, Δρd_max )
+            end
+
+            Δρ_tot  = max( Δρ, Δρd_max )
+
+            if ΔP ≥ ϵ_Shock_HLL_and_PLM  ||  Δρ_tot ≥ ϵ_ρGradient_HLL_and_PLM
                 # In this case, we have a strong shock, and flag it so that we use 
                 # both HLL + linear reconstruction (instead of WENO3) near it:
                 Shock[i,j] = Shock_HLL_and_PLM  # (This arbitrary constant is defined in the WENO3 module)
-            elseif ΔP ≥ ϵ_Shock_HLL && ΔP < ϵ_Shock_HLL_and_PLM 
+            elseif ΔP ≥ ϵ_Shock_HLL  &&  ΔP < ϵ_Shock_HLL_and_PLM 
                 # In this case, we have a notable shock, and flag it so that we use 
                 # HLL near the shock:
                 Shock[i,j] = Shock_HLL 
@@ -518,18 +666,20 @@ end
                                                ρu_Xc::AbstractMatrix{Float64},
                                                ρu_Yc::AbstractMatrix{Float64},
                                                   Ec::AbstractMatrix{Float64},
-                                                 ρdc::AbstractMatrix{Float64},
-                                             ρdud_Xc::AbstractMatrix{Float64},
-                                             ρdud_Yc::AbstractMatrix{Float64},
+                                                 ρdc::AbstractArray{Float64, 3},
+                                             ρdud_Xc::AbstractArray{Float64, 3},
+                                             ρdud_Yc::AbstractArray{Float64, 3},
                                                   
                                                    ρ::AbstractMatrix{Float64},
                                                 ρu_X::AbstractMatrix{Float64},
                                                 ρu_Y::AbstractMatrix{Float64},
                                                    E::AbstractMatrix{Float64},
                                                  γad::AbstractMatrix{Float64},
-                                                  ρd::AbstractMatrix{Float64},
-                                              ρdud_X::AbstractMatrix{Float64},
-                                              ρdud_Y::AbstractMatrix{Float64},
+                                                  ρd::AbstractArray{Float64, 3},
+                                              ρdud_X::AbstractArray{Float64, 3},
+                                              ρdud_Y::AbstractArray{Float64, 3},
+
+                                              e_dual::AbstractMatrix{Float64},
                                                    
                                             w_i_m1_X::AbstractVector{Float64},
                                              w_i_0_X::AbstractVector{Float64},
@@ -542,181 +692,254 @@ end
                                                 )
 
     N_X, N_Y = size( ρ )
+    N_dust   = size( ρd, 1 )
     dN_Xint  = 2:(N_X - 1)
     dN_Y     = 1:N_Y 
+    dN_dust  = 1:N_dust
 
     # Innermost boundary i = 1:
     @threads for j in dN_Y
         @inbounds begin
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
+
             if BC_X_left == :Reflect 
                 ρ_0      =   ρ[1,j]
                 ρu_X_0   = - ρu_X[1,j]
                 ρu_Y_0   =   ρu_Y[1,j]
                 E_0      =   E[1,j]
-
-                ρd_0     =   ρd[1,j]
-                ρdud_X_0 = - ρdud_X[1,j]
-                ρdud_Y_0 =   ρdud_Y[1,j]
             elseif BC_X_left == :Outflow
                 # If not reflective, we have outflow conditions: 
                 ρ_0      =   ρ[1,j]
                 ρu_X_0   =   ρu_X[1,j]
                 ρu_Y_0   =   ρu_Y[1,j]
                 E_0      =   E[1,j] 
-
-                ρd_0     =   ρd[1,j]
-                ρdud_X_0 =   ρdud_X[1,j]
-                ρdud_Y_0 =   ρdud_Y[1,j]
             elseif BC_X_left == :Periodic 
                 ρ_0      =   ρ[N_X,j]
                 ρu_X_0   =   ρu_X[N_X,j]
                 ρu_Y_0   =   ρu_Y[N_X,j]
                 E_0      =   E[N_X,j] 
-
-                ρd_0     =   ρd[N_X,j]
-                ρdud_X_0 =   ρdud_X[N_X,j]
-                ρdud_Y_0 =   ρdud_Y[N_X,j]
             else 
                 error("No boundary conditions assigned in the X (or r) direction at i = 1!")
-            end
-
+            end    
+            
             # RECONSTRUCT ⟨ρ⟩ᵢ → ρ(rcᵢ) AT i = 1:
-            ρc[1,j]      = w_i_m1_X[1] * ρ_0  +  w_i_0_X[1] * ρ[1,j]  +  w_i_p1_X[1] * ρ[2,j]
-            τ_ρ          = SteepOrNot( ρc[1,j], ρ_0, ρ[1,j], ρ[2,j] )
-
-            ρdc[1,j]     = w_i_m1_X[1] * ρd_0  +  w_i_0_X[1] * ρd[1,j]  +  w_i_p1_X[1] * ρd[2,j]   # Dust 
-            τ_ρd         = SteepOrNot( ρdc[1,j], ρd_0, ρd[1,j], ρd[2,j] )
+            ρc[1,j]        = w_i_m1_X[1] * ρ_0  +  w_i_0_X[1] * ρ[1,j]  +  w_i_p1_X[1] * ρ[2,j]
+            τ_ρ            = SteepOrNot( ρc[1,j], ρ_0, ρ[1,j], ρ[2,j] )
 
             # RECONSTRUCT ⟨ρu_X⟩ᵢ → ρu_X(rcᵢ) AT i = 1:
-            ρu_Xc[1,j]   = w_i_m1_X[1] * ρu_X_0  +  w_i_0_X[1] * ρu_X[1,j]  +  w_i_p1_X[1] * ρu_X[2,j]
-            τ_ρu_X       = SteepOrNot( ρu_Xc[1,j], ρu_X_0, ρu_X[1,j], ρu_X[2,j] )
-
-            ρdud_Xc[1,j] = w_i_m1_X[1] * ρdud_X_0  +  w_i_0_X[1] * ρdud_X[1,j]  +  w_i_p1_X[1] * ρdud_X[2,j]  # Dust
-            τ_ρdud_X     = SteepOrNot( ρdud_Xc[1,j], ρdud_X_0, ρdud_X[1,j], ρdud_X[2,j] )
+            ρu_Xc[1,j]     = w_i_m1_X[1] * ρu_X_0  +  w_i_0_X[1] * ρu_X[1,j]  +  w_i_p1_X[1] * ρu_X[2,j]
+            τ_ρu_X         = SteepOrNot( ρu_Xc[1,j], ρu_X_0, ρu_X[1,j], ρu_X[2,j] )
 
             # RECONSTRUCT ⟨ρu_Y⟩ᵢ → ρu_Y(rcᵢ) AT i = 1:
-            ρu_Yc[1,j]   = w_i_m1_X[1] * ρu_Y_0  +  w_i_0_X[1] * ρu_Y[1,j]  +  w_i_p1_X[1] * ρu_Y[2,j]
-            τ_ρu_Y       = SteepOrNot( ρu_Yc[1,j], ρu_Y_0, ρu_Y[1,j], ρu_Y[2,j] )
-
-            ρdud_Yc[1,j] = w_i_m1_X[1] * ρdud_Y_0  +  w_i_0_X[1] * ρdud_Y[1,j]  +  w_i_p1_X[1] * ρdud_Y[2,j]
-            τ_ρdud_Y     = SteepOrNot( ρdud_Yc[1,j], ρdud_Y_0, ρdud_Y[1,j], ρdud_Y[2,j] )
+            ρu_Yc[1,j]     = w_i_m1_X[1] * ρu_Y_0  +  w_i_0_X[1] * ρu_Y[1,j]  +  w_i_p1_X[1] * ρu_Y[2,j]
+            τ_ρu_Y         = SteepOrNot( ρu_Yc[1,j], ρu_Y_0, ρu_Y[1,j], ρu_Y[2,j] )
 
             # RECONSTRUCT ⟨E⟩ᵢ → E(rcᵢ) AT i = 1:
             Ec[1,j]      = w_i_m1_X[1] * E_0  +  w_i_0_X[1] * E[1,j]  +  w_i_p1_X[1] * E[2,j]
             τ_E          = SteepOrNot( Ec[1,j], E_0, E[1,j], E[2,j] )
 
+            ##########################################
+            #######                            #######
+            #######           D U S T          #######
+            #######                            #######
+            ##########################################
+
+            τ_dust = 1.0  # Initialize τ for dust
+
+            for bin in dN_dust
+                if BC_X_left == :Reflect
+                    ρd_0      =   ρd[bin,1,j]
+                    ρdud_X_0  = - ρdud_X[bin,1,j]
+                    ρdud_Y_0  =   ρdud_Y[bin,1,j]
+                elseif BC_X_left == :Outflow
+                    ρd_0      =   ρd[bin,1,j]
+                    ρdud_X_0  =   ρdud_X[bin,1,j]
+                    ρdud_Y_0  =   ρdud_Y[bin,1,j]
+                elseif BC_X_left == :Periodic
+                    ρd_0      =   ρd[bin,N_X,j]
+                    ρdud_X_0  =   ρdud_X[bin,N_X,j]
+                    ρdud_Y_0  =   ρdud_Y[bin,N_X,j]
+                end
+
+                ρdc[bin,1,j]     = w_i_m1_X[1] * ρd_0  +  w_i_0_X[1] * ρd[bin,1,j]  +  w_i_p1_X[1] * ρd[bin,2,j]
+                τ_ρd             = SteepOrNot( ρdc[bin,1,j], ρd_0, ρd[bin,1,j], ρd[bin,2,j] )
+
+                ρdud_Xc[bin,1,j] = w_i_m1_X[1] * ρdud_X_0  +  w_i_0_X[1] * ρdud_X[bin,1,j]  +  w_i_p1_X[1] * ρdud_X[bin,2,j]
+                τ_ρdud_X         = SteepOrNot( ρdud_Xc[bin,1,j], ρdud_X_0, ρdud_X[bin,1,j], ρdud_X[bin,2,j] )
+
+                ρdud_Yc[bin,1,j] = w_i_m1_X[1] * ρdud_Y_0  +  w_i_0_X[1] * ρdud_Y[bin,1,j]  +  w_i_p1_X[1] * ρdud_Y[bin,2,j]
+                τ_ρdud_Y         = SteepOrNot( ρdud_Yc[bin,1,j], ρdud_Y_0, ρdud_Y[bin,1,j], ρdud_Y[bin,2,j] )
+
+                # Update τ_dust to be the minimum found so far:
+                τ_dust = min( τ_dust, τ_ρd, τ_ρdud_X, τ_ρdud_Y )
+            end
+
             # SAFETY CORRECT FOR STEEPENESS:
-            τ            = min( τ_ρ, τ_ρd, τ_ρu_X, τ_ρdud_X, τ_ρu_Y, τ_ρdud_Y, τ_E )
-            OneMinusτ    = max( 1.0 - τ, 0.0 )
-            ρc[1,j]      = ρc[1,j]      * τ  +  OneMinusτ * ρ[1,j]
-            ρdc[1,j]     = ρdc[1,j]     * τ  +  OneMinusτ * ρd[1,j]
-            ρu_Xc[1,j]   = ρu_Xc[1,j]   * τ  +  OneMinusτ * ρu_X[1,j]
-            ρdud_Xc[1,j] = ρdud_Xc[1,j] * τ  +  OneMinusτ * ρdud_X[1,j]
-            ρu_Yc[1,j]   = ρu_Yc[1,j]   * τ  +  OneMinusτ * ρu_Y[1,j]
-            ρdud_Yc[1,j] = ρdud_Yc[1,j] * τ  +  OneMinusτ * ρdud_Y[1,j]
-            Ec[1,j]      = Ec[1,j]      * τ  +  OneMinusτ * E[1,j]
+
+            # Next, combine τ for gas and dust to find minimum τ:
+            τ         = min( τ_ρ, τ_ρu_X, τ_ρu_Y, τ_E, τ_dust )
+            OneMinusτ = max( 1.0 - τ, 0.0 )
+
+            # Gas:
+            ρc[1,j]    = ρc[1,j]    * τ  + OneMinusτ * ρ[1,j]
+            ρu_Xc[1,j] = ρu_Xc[1,j] * τ  + OneMinusτ * ρu_X[1,j]
+            ρu_Yc[1,j] = ρu_Yc[1,j] * τ  + OneMinusτ * ρu_Y[1,j]
+            Ec[1,j]    = Ec[1,j]    * τ  + OneMinusτ * E[1,j]
+
+            # Dust:
+            for bin in dN_dust
+                ρdc[bin,1,j]     = ρdc[bin,1,j]     * τ  +  OneMinusτ * ρd[bin,1,j]
+                ρdud_Xc[bin,1,j] = ρdud_Xc[bin,1,j] * τ  +  OneMinusτ * ρdud_X[bin,1,j]
+                ρdud_Yc[bin,1,j] = ρdud_Yc[bin,1,j] * τ  +  OneMinusτ * ρdud_Y[bin,1,j]
+            end
 
             # SECOND-ORDER SAFETY FALLBACK:
-            _, _, Pc_candidate = GetPrimitive( ρc[1,j], ρu_Xc[1,j], ρu_Yc[1,j], Ec[1,j], γad[1,j] )
-            if Shock[1,j] == Shock_HLL_and_PLM || ρc[1,j] ≤ ρ_floor || ρdc[1,j] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate) 
-                ρc[1,j]      = max( ρ[1,j], ρ_floor )
-                ρu_Xc[1,j]   = ρu_X[1,j]
-                ρu_Yc[1,j]   = ρu_Y[1,j]
-                Ec[1,j]      = E[1,j]
+            _, _, Pc_candidate = GetPrimitive( ρc[1,j], ρu_Xc[1,j], ρu_Yc[1,j], Ec[1,j], e_dual[1,j], γad[1,j] )
 
-                ρdc[1,j]     = max( ρd[1,j], ρd_floor )
-                ρdud_Xc[1,j] = ρdud_X[1,j]
-                ρdud_Yc[1,j] = ρdud_Y[1,j]
+            BadDustState = false 
+            for bin in dN_dust
+                if !BadDustState && ρdc[bin,1,j] ≤ ρd_floor
+                    BadDustState = true 
+                end
             end
-        end
-    end
-    
+
+            if Shock[1,j] == Shock_HLL_and_PLM || ρc[1,j] ≤ ρ_floor || BadDustState || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate)
+                ρc[1,j]    = max( ρ[1,j], ρ_floor )
+                ρu_Xc[1,j] = ρu_X[1,j]
+                ρu_Yc[1,j] = ρu_Y[1,j]
+                Ec[1,j]    = E[1,j]
+                
+                for bin in dN_dust
+                    ρdc[bin,1,j]     = max( ρd[bin,1,j], ρd_floor )
+                    ρdud_Xc[bin,1,j] = ρdud_X[bin,1,j]
+                    ρdud_Yc[bin,1,j] = ρdud_Y[bin,1,j]
+                end
+            end
+
+        end # End of inbounds 
+    end # End of j-loop 
+
     # Interior cells 2 ≤ i ≤ N_X - 1: 
     @threads for j in dN_Y
         @inbounds @simd for i in dN_Xint
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
+
             # RECONSTRUCT ⟨ρ⟩ᵢ → ρ(rcᵢ):
             ρc[i,j]      = w_i_m1_X[i] * ρ[i-1,j]  +  w_i_0_X[i] * ρ[i,j]  +  w_i_p1_X[i] * ρ[i+1,j]
             τ_ρ          = SteepOrNot( ρc[i,j], ρ[i-1,j], ρ[i,j], ρ[i+1,j] )
-
-            ρdc[i,j]     = w_i_m1_X[i] * ρd[i-1,j]  +  w_i_0_X[i] * ρd[i,j]  +  w_i_p1_X[i] * ρd[i+1,j]  # Dust 
-            τ_ρd         = SteepOrNot( ρdc[i,j], ρd[i-1,j], ρd[i,j], ρd[i+1,j] )
 
             # RECONSTRUCT ⟨ρu_X⟩ᵢ → ρu_X(rcᵢ):
             ρu_Xc[i,j]   = w_i_m1_X[i] * ρu_X[i-1,j]  +  w_i_0_X[i] * ρu_X[i,j]  +  w_i_p1_X[i] * ρu_X[i+1,j]
             τ_ρu_X       = SteepOrNot( ρu_Xc[i,j], ρu_X[i-1,j], ρu_X[i,j], ρu_X[i+1,j] )
 
-            ρdud_Xc[i,j] = w_i_m1_X[i] * ρdud_X[i-1,j]  +  w_i_0_X[i] * ρdud_X[i,j]  +  w_i_p1_X[i] * ρdud_X[i+1,j]  # Dust 
-            τ_ρdud_X     = SteepOrNot( ρdud_Xc[i,j], ρdud_X[i-1,j], ρdud_X[i,j], ρdud_X[i+1,j] )
-
             # RECONSTRUCT ⟨ρu_Y⟩ᵢ → ρu_Y(rcᵢ):
             ρu_Yc[i,j]   = w_i_m1_X[i] * ρu_Y[i-1,j]  +  w_i_0_X[i] * ρu_Y[i,j]  +  w_i_p1_X[i] * ρu_Y[i+1,j]
             τ_ρu_Y       = SteepOrNot( ρu_Yc[i,j], ρu_Y[i-1,j], ρu_Y[i,j], ρu_Y[i+1,j] )
-
-            ρdud_Yc[i,j] = w_i_m1_X[i] * ρdud_Y[i-1,j]  +  w_i_0_X[i] * ρdud_Y[i,j]  +  w_i_p1_X[i] * ρdud_Y[i+1,j]
-            τ_ρdud_Y     = SteepOrNot( ρdud_Yc[i,j], ρdud_Y[i-1,j], ρdud_Y[i,j], ρdud_Y[i+1,j] )
 
             # RECONSTRUCT ⟨E⟩ᵢ → E(rcᵢ):
             Ec[i,j]      = w_i_m1_X[i] * E[i-1,j]  +  w_i_0_X[i] * E[i,j]  +  w_i_p1_X[i] * E[i+1,j]
             τ_E          = SteepOrNot( Ec[i,j], E[i-1,j], E[i,j], E[i+1,j] )
 
-            # SAFETY CORRECT FOR STEEPENESS:
-            τ            = min( τ_ρ, τ_ρd, τ_ρu_X, τ_ρdud_X, τ_ρu_Y, τ_ρdud_Y, τ_E )
-            OneMinusτ    = max( 1.0 - τ, 0.0 )
-            ρc[i,j]      = ρc[i,j]      * τ  +  OneMinusτ * ρ[i,j]
-            ρdc[i,j]     = ρdc[i,j]     * τ  +  OneMinusτ * ρd[i,j]
-            ρu_Xc[i,j]   = ρu_Xc[i,j]   * τ  +  OneMinusτ * ρu_X[i,j]
-            ρdud_Xc[i,j] = ρdud_Xc[i,j] * τ  +  OneMinusτ * ρdud_X[i,j]
-            ρu_Yc[i,j]   = ρu_Yc[i,j]   * τ  +  OneMinusτ * ρu_Y[i,j]
-            ρdud_Yc[i,j] = ρdud_Yc[i,j] * τ  +  OneMinusτ * ρdud_Y[i,j]
-            Ec[i,j]      = Ec[i,j]      * τ  +  OneMinusτ * E[i,j]
+            ##########################################
+            #######                            #######
+            #######          D U S T           #######
+            #######                            #######
+            ##########################################
 
-            # SECOND-ORDER SAFETY FALLBACK:
-            _, _, Pc_candidate = GetPrimitive( ρc[i,j], ρu_Xc[i,j], ρu_Yc[i,j], Ec[i,j], γad[i,j] )
-            if Shock[i,j] == Shock_HLL_and_PLM || ρc[i,j] ≤ ρ_floor || ρdc[i,j] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate) 
-                ρc[i,j]      = max( ρ[i,j], ρ_floor )
-                ρu_Xc[i,j]   = ρu_X[i,j]
-                ρu_Yc[i,j]   = ρu_Y[i,j]
-                Ec[i,j]      = E[i,j]
+            τ_dust = 1.0  # Initialize τ for dust
 
-                ρdc[i,j]     = max( ρd[i,j], ρd_floor )
-                ρdud_Xc[i,j] = ρdud_X[i,j]
-                ρdud_Yc[i,j] = ρdud_Y[i,j]
+            for bin in dN_dust
+                ρdc[bin,i,j]     = w_i_m1_X[i] * ρd[bin,i-1,j]  +  w_i_0_X[i] * ρd[bin,i,j]  +  w_i_p1_X[i] * ρd[bin,i+1,j]
+                τ_ρd             = SteepOrNot( ρdc[bin,i,j], ρd[bin,i-1,j], ρd[bin,i,j], ρd[bin,i+1,j] )
+
+                ρdud_Xc[bin,i,j] = w_i_m1_X[i] * ρdud_X[bin,i-1,j]  +  w_i_0_X[i] * ρdud_X[bin,i,j]  +  w_i_p1_X[i] * ρdud_X[bin,i+1,j]
+                τ_ρdud_X         = SteepOrNot( ρdud_Xc[bin,i,j], ρdud_X[bin,i-1,j], ρdud_X[bin,i,j], ρdud_X[bin,i+1,j] )
+
+                ρdud_Yc[bin,i,j] = w_i_m1_X[i] * ρdud_Y[bin,i-1,j]  +  w_i_0_X[i] * ρdud_Y[bin,i,j]  +  w_i_p1_X[i] * ρdud_Y[bin,i+1,j]
+                τ_ρdud_Y         = SteepOrNot( ρdud_Yc[bin,i,j], ρdud_Y[bin,i-1,j], ρdud_Y[bin,i,j], ρdud_Y[bin,i+1,j] )
+
+                # Update τ_dust to be the minimum found so far:
+                τ_dust = min( τ_dust, τ_ρd, τ_ρdud_X, τ_ρdud_Y )
             end
 
-        end
-    end
+            # SAFETY CORRECT FOR STEEPENESS:
+
+            # Next, combine τ for gas and dust to find minimum τ:
+            τ         = min( τ_ρ, τ_ρu_X, τ_ρu_Y, τ_E, τ_dust )
+            OneMinusτ = max( 1.0 - τ, 0.0 )
+
+            # Gas:
+            ρc[i,j]    = ρc[i,j]    * τ  + OneMinusτ * ρ[i,j]
+            ρu_Xc[i,j] = ρu_Xc[i,j] * τ  + OneMinusτ * ρu_X[i,j]
+            ρu_Yc[i,j] = ρu_Yc[i,j] * τ  + OneMinusτ * ρu_Y[i,j]
+            Ec[i,j]    = Ec[i,j]    * τ  + OneMinusτ * E[i,j]
+
+            # Dust:
+            for bin in dN_dust
+                ρdc[bin,i,j]     = ρdc[bin,i,j]     * τ  +  OneMinusτ * ρd[bin,i,j]
+                ρdud_Xc[bin,i,j] = ρdud_Xc[bin,i,j] * τ  +  OneMinusτ * ρdud_X[bin,i,j]
+                ρdud_Yc[bin,i,j] = ρdud_Yc[bin,i,j] * τ  +  OneMinusτ * ρdud_Y[bin,i,j]
+            end
+
+            # SECOND-ORDER SAFETY FALLBACK:
+            _, _, Pc_candidate = GetPrimitive( ρc[i,j], ρu_Xc[i,j], ρu_Yc[i,j], Ec[i,j], e_dual[i,j], γad[i,j] )
+
+            BadDustState = false 
+            for bin in dN_dust
+                if !BadDustState && ρdc[bin,i,j] ≤ ρd_floor
+                    BadDustState = true 
+                end
+            end
+
+            if Shock[i,j] == Shock_HLL_and_PLM || ρc[i,j] ≤ ρ_floor || BadDustState || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate)
+                ρc[i,j]    = max( ρ[i,j], ρ_floor )
+                ρu_Xc[i,j] = ρu_X[i,j]
+                ρu_Yc[i,j] = ρu_Y[i,j]
+                Ec[i,j]    = E[i,j]
+                
+                for bin in dN_dust
+                    ρdc[bin,i,j]     = max( ρd[bin,i,j], ρd_floor )
+                    ρdud_Xc[bin,i,j] = ρdud_X[bin,i,j]
+                    ρdud_Yc[bin,i,j] = ρdud_Y[bin,i,j]
+                end
+            end
+
+        end # End of i-loop 
+    end # End of j-loop 
 
     # Outermost boundary i = N_X:
     @threads for j in dN_Y
         @inbounds begin
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
+
             if BC_X_right == :Outflow
                 ρ_Np1      =   ρ[N_X,j]
                 ρu_X_Np1   =   max( ρu_X[N_X,j], 0.0 )
                 ρu_Y_Np1   =   ρu_Y[N_X,j]
                 E_Np1      =   E[N_X,j]
-
-                ρd_Np1     =   ρd[N_X,j]
-                ρdud_X_Np1 =   max( ρdud_X[N_X,j], 0.0 )
-                ρdud_Y_Np1 =   ρdud_Y[N_X,j]
             elseif BC_X_right == :Reflect
                 # If not outflow, we have reflective boundary conditions: 
                 ρ_Np1      =   ρ[N_X,j]
                 ρu_X_Np1   = - ρu_X[N_X,j]
                 ρu_Y_Np1   =   ρu_Y[N_X,j]
                 E_Np1      =   E[N_X,j]
-
-                ρd_Np1     =   ρd[N_X,j]
-                ρdud_X_Np1 = - ρdud_X[N_X,j]
-                ρdud_Y_Np1 =   ρdud_Y[N_X,j]
             elseif BC_X_right == :Periodic 
                 ρ_Np1      =   ρ[1,j]
                 ρu_X_Np1   =   ρu_X[1,j]
                 ρu_Y_Np1   =   ρu_Y[1,j]
                 E_Np1      =   E[1,j]
-
-                ρd_Np1     =   ρd[1,j]
-                ρdud_X_Np1 =   ρdud_X[1,j]
-                ρdud_Y_Np1 =   ρdud_Y[1,j]
             else
                 error("No boundary conditions assigned in the X (or r) direction at i = N_X!") 
             end
@@ -725,52 +948,98 @@ end
             ρc[N_X,j]      =  w_i_m1_X[N_X] * ρ[N_X-1,j]  +  w_i_0_X[N_X] * ρ[N_X,j]  +  w_i_p1_X[N_X] * ρ_Np1
             τ_ρ            = SteepOrNot( ρc[N_X,j], ρ[N_X-1,j], ρ[N_X,j], ρ_Np1 )
 
-            ρdc[N_X,j]     =  w_i_m1_X[N_X] * ρd[N_X-1,j]  +  w_i_0_X[N_X] * ρd[N_X,j]  +  w_i_p1_X[N_X] * ρd_Np1  # Dust 
-            τ_ρd           = SteepOrNot( ρdc[N_X,j], ρd[N_X-1,j], ρd[N_X,j], ρd_Np1 )
-
             # RECONSTRUCT ⟨ρu_X⟩ᵢ → ρu_X(rcᵢ) AT i = N_X:
             ρu_Xc[N_X,j]   = w_i_m1_X[N_X] * ρu_X[N_X-1,j]  +  w_i_0_X[N_X] * ρu_X[N_X,j]  +  w_i_p1_X[N_X] * ρu_X_Np1
             τ_ρu_X         = SteepOrNot( ρu_Xc[N_X,j], ρu_X[N_X-1,j], ρu_X[N_X,j], ρu_X_Np1 )
-
-            ρdud_Xc[N_X,j] = w_i_m1_X[N_X] * ρdud_X[N_X-1,j]  +  w_i_0_X[N_X] * ρdud_X[N_X,j]  +  w_i_p1_X[N_X] * ρdud_X_Np1  # Dust 
-            τ_ρdud_X       = SteepOrNot( ρdud_Xc[N_X,j], ρdud_X[N_X-1,j], ρdud_X[N_X,j], ρdud_X_Np1 )
 
             # RECONSTRUCT ⟨ρu_Y⟩ᵢ → ρu_Y(rcᵢ) AT i = N_X:
             ρu_Yc[N_X,j]   = w_i_m1_X[N_X] * ρu_Y[N_X-1,j]  +  w_i_0_X[N_X] * ρu_Y[N_X,j]  +  w_i_p1_X[N_X] * ρu_Y_Np1
             τ_ρu_Y         = SteepOrNot( ρu_Yc[N_X,j], ρu_Y[N_X-1,j], ρu_Y[N_X,j], ρu_Y_Np1 )
 
-            ρdud_Yc[N_X,j] = w_i_m1_X[N_X] * ρdud_Y[N_X-1,j]  +  w_i_0_X[N_X] * ρdud_Y[N_X,j]  +  w_i_p1_X[N_X] * ρdud_Y_Np1
-            τ_ρdud_Y       = SteepOrNot( ρdud_Yc[N_X,j], ρdud_Y[N_X-1,j], ρdud_Y[N_X,j], ρdud_Y_Np1 )
-
             # RECONSTRUCT ⟨E⟩ᵢ → E(rcᵢ) AT i = N_X:
             Ec[N_X,j]      = w_i_m1_X[N_X] * E[N_X-1,j]  +  w_i_0_X[N_X] * E[N_X,j]  +  w_i_p1_X[N_X] * E_Np1
             τ_E            = SteepOrNot( Ec[N_X,j], E[N_X-1,j], E[N_X,j], E_Np1 )
 
+            ##########################################
+            #######                            #######
+            #######          D U S T           #######
+            #######                            #######
+            ##########################################
+
+            τ_dust = 1.0  # Initialize τ for dust
+
+            for bin in dN_dust
+                if BC_X_right == :Outflow
+                    ρd_Np1     =   ρd[bin,N_X,j]
+                    ρdud_X_Np1 =   max( ρdud_X[bin,N_X,j], 0.0 )
+                    ρdud_Y_Np1 =   ρdud_Y[bin,N_X,j]
+                elseif BC_X_right == :Reflect
+                    ρd_Np1     =   ρd[bin,N_X,j]
+                    ρdud_X_Np1 = - ρdud_X[bin,N_X,j]
+                    ρdud_Y_Np1 =   ρdud_Y[bin,N_X,j]
+                elseif BC_X_right == :Periodic 
+                    ρd_Np1     =   ρd[bin,1,j]
+                    ρdud_X_Np1 =   ρdud_X[bin,1,j]
+                    ρdud_Y_Np1 =   ρdud_Y[bin,1,j] 
+                end
+            
+                ρdc[bin,N_X,j]     = w_i_m1_X[N_X] * ρd[bin,N_X-1,j]  +  w_i_0_X[N_X] * ρd[bin,N_X,j]  +  w_i_p1_X[N_X] * ρd_Np1
+                τ_ρd               = SteepOrNot( ρdc[bin,N_X,j], ρd[bin,N_X-1,j], ρd[bin,N_X,j], ρd_Np1 )
+
+                ρdud_Xc[bin,N_X,j] = w_i_m1_X[N_X] * ρdud_X[bin,N_X-1,j]  +  w_i_0_X[N_X] * ρdud_X[bin,N_X,j]  +  w_i_p1_X[N_X] * ρdud_X_Np1
+                τ_ρdud_X           = SteepOrNot( ρdud_Xc[bin,N_X,j], ρdud_X[bin,N_X-1,j], ρdud_X[bin,N_X,j], ρdud_X_Np1 )
+
+                ρdud_Yc[bin,N_X,j] = w_i_m1_X[N_X] * ρdud_Y[bin,N_X-1,j]  +  w_i_0_X[N_X] * ρdud_Y[bin,N_X,j]  +  w_i_p1_X[N_X] * ρdud_Y_Np1
+                τ_ρdud_Y           = SteepOrNot( ρdud_Yc[bin,N_X,j], ρdud_Y[bin,N_X-1,j], ρdud_Y[bin,N_X,j], ρdud_Y_Np1 )
+
+                # Update τ_dust to be the minimum found so far:
+                τ_dust = min( τ_dust, τ_ρd, τ_ρdud_X, τ_ρdud_Y )
+            end
+
             # SAFETY CORRECT FOR STEEPENESS:
-            τ              = min( τ_ρ, τ_ρd, τ_ρu_X, τ_ρdud_X, τ_ρu_Y, τ_ρdud_Y, τ_E )
-            OneMinusτ      = max( 1.0 - τ, 0.0 )
-            ρc[N_X,j]      = ρc[N_X,j]      * τ  +  OneMinusτ * ρ[N_X,j]
-            ρdc[N_X,j]     = ρdc[N_X,j]     * τ  +  OneMinusτ * ρd[N_X,j]
-            ρu_Xc[N_X,j]   = ρu_Xc[N_X,j]   * τ  +  OneMinusτ * ρu_X[N_X,j]
-            ρdud_Xc[N_X,j] = ρdud_Xc[N_X,j] * τ  +  OneMinusτ * ρdud_X[N_X,j]
-            ρu_Yc[N_X,j]   = ρu_Yc[N_X,j]   * τ  +  OneMinusτ * ρu_Y[N_X,j]
-            ρdud_Yc[N_X,j] = ρdud_Yc[N_X,j] * τ  +  OneMinusτ * ρdud_Y[N_X,j]
-            Ec[N_X,j]      = Ec[N_X,j]      * τ  +  OneMinusτ * E[N_X,j]
+
+            # Next, combine τ for gas and dust to find minimum τ:
+            τ         = min( τ_ρ, τ_ρu_X, τ_ρu_Y, τ_E, τ_dust )
+            OneMinusτ = max( 1.0 - τ, 0.0 )
+
+            # Gas:
+            ρc[N_X,j]    = ρc[N_X,j]    * τ  + OneMinusτ * ρ[N_X,j]
+            ρu_Xc[N_X,j] = ρu_Xc[N_X,j] * τ  + OneMinusτ * ρu_X[N_X,j]
+            ρu_Yc[N_X,j] = ρu_Yc[N_X,j] * τ  + OneMinusτ * ρu_Y[N_X,j]
+            Ec[N_X,j]    = Ec[N_X,j]    * τ  + OneMinusτ * E[N_X,j]
+
+            # Dust:
+            for bin in dN_dust
+                ρdc[bin,N_X,j]     = ρdc[bin,N_X,j]     * τ  +  OneMinusτ * ρd[bin,N_X,j]
+                ρdud_Xc[bin,N_X,j] = ρdud_Xc[bin,N_X,j] * τ  +  OneMinusτ * ρdud_X[bin,N_X,j]
+                ρdud_Yc[bin,N_X,j] = ρdud_Yc[bin,N_X,j] * τ  +  OneMinusτ * ρdud_Y[bin,N_X,j]
+            end
 
             # SECOND-ORDER SAFETY FALLBACK:
-            _, _, Pc_candidate = GetPrimitive( ρc[N_X,j], ρu_Xc[N_X,j], ρu_Yc[N_X,j], Ec[N_X,j], γad[N_X,j] )
-            if Shock[N_X,j] == Shock_HLL_and_PLM || ρc[N_X,j] ≤ ρ_floor || ρdc[N_X,j] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate) 
-                ρc[N_X,j]      = max( ρ[N_X,j], ρ_floor )
-                ρu_Xc[N_X,j]   = ρu_X[N_X,j]
-                ρu_Yc[N_X,j]   = ρu_Y[N_X,j]
-                Ec[N_X,j]      = E[N_X,j]
+            _, _, Pc_candidate = GetPrimitive( ρc[N_X,j], ρu_Xc[N_X,j], ρu_Yc[N_X,j], Ec[N_X,j], e_dual[N_X,j], γad[N_X,j] )
 
-                ρdc[N_X,j]     = max( ρd[N_X,j], ρd_floor )
-                ρdud_Xc[N_X,j] = ρdud_X[N_X,j]
-                ρdud_Yc[N_X,j] = ρdud_Y[N_X,j]
+            BadDustState = false 
+            for bin in dN_dust
+                if !BadDustState && ρdc[bin,N_X,j] ≤ ρd_floor
+                    BadDustState = true 
+                end
             end
-        end
-    end
+
+            if Shock[N_X,j] == Shock_HLL_and_PLM || ρc[N_X,j] ≤ ρ_floor || BadDustState || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate)
+                ρc[N_X,j]    = max( ρ[N_X,j], ρ_floor )
+                ρu_Xc[N_X,j] = ρu_X[N_X,j]
+                ρu_Yc[N_X,j] = ρu_Y[N_X,j]
+                Ec[N_X,j]    = E[N_X,j]
+                
+                for bin in dN_dust
+                    ρdc[bin,N_X,j]     = max( ρd[bin,N_X,j], ρd_floor )
+                    ρdud_Xc[bin,N_X,j] = ρdud_X[bin,N_X,j]
+                    ρdud_Yc[bin,N_X,j] = ρdud_Y[bin,N_X,j]
+                end
+            end
+
+        end # End of inbounds 
+    end # End of j-loop 
 
     return nothing 
 end
@@ -784,18 +1053,20 @@ end
                                                ρu_Xc::AbstractMatrix{Float64},
                                                ρu_Yc::AbstractMatrix{Float64},
                                                   Ec::AbstractMatrix{Float64},
-                                                 ρdc::AbstractMatrix{Float64},
-                                             ρdud_Xc::AbstractMatrix{Float64},
-                                             ρdud_Yc::AbstractMatrix{Float64},
+                                                 ρdc::AbstractArray{Float64, 3},
+                                             ρdud_Xc::AbstractArray{Float64, 3},
+                                             ρdud_Yc::AbstractArray{Float64, 3},
                                                   
                                                    ρ::AbstractMatrix{Float64},
                                                 ρu_X::AbstractMatrix{Float64},
                                                 ρu_Y::AbstractMatrix{Float64},
                                                    E::AbstractMatrix{Float64},
                                                  γad::AbstractMatrix{Float64},
-                                                  ρd::AbstractMatrix{Float64},
-                                              ρdud_X::AbstractMatrix{Float64},
-                                              ρdud_Y::AbstractMatrix{Float64},
+                                                  ρd::AbstractArray{Float64, 3},
+                                              ρdud_X::AbstractArray{Float64, 3},
+                                              ρdud_Y::AbstractArray{Float64, 3},
+
+                                              e_dual::AbstractMatrix{Float64},
                                                    
                                             w_j_m1_Y::AbstractVector{Float64},
                                              w_j_0_Y::AbstractVector{Float64},
@@ -808,40 +1079,36 @@ end
                                                 )
 
     N_X, N_Y = size( ρ )
+    N_dust   = size( ρd, 1 )
     dN_Yint  = 2:(N_Y - 1)
     dN_X     = 1:N_X
+    dN_dust  = 1:N_dust
 
     # Innermost boundary j = 1:
     @threads for i in dN_X
         @inbounds begin
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
+
             if BC_Y_left == :Reflect 
                 ρ_0      =   ρ[i,1]
                 ρu_X_0   =   ρu_X[i,1]
                 ρu_Y_0   = - ρu_Y[i,1]
                 E_0      =   E[i,1]
-
-                ρd_0     =   ρd[i,1]
-                ρdud_X_0 =   ρdud_X[i,1]
-                ρdud_Y_0 = - ρdud_Y[i,1]
             elseif BC_Y_left == :Outflow
                 # If not reflective, we have outflow conditions: 
                 ρ_0      =   ρ[i,1]
                 ρu_X_0   =   ρu_X[i,1]
                 ρu_Y_0   =   ρu_Y[i,1]
                 E_0      =   E[i,1] 
-
-                ρd_0     =   ρd[i,1]
-                ρdud_X_0 =   ρdud_X[i,1]
-                ρdud_Y_0 =   ρdud_Y[i,1]
             elseif BC_Y_left == :Periodic
                 ρ_0      =   ρ[i,N_Y]
                 ρu_X_0   =   ρu_X[i,N_Y]
                 ρu_Y_0   =   ρu_Y[i,N_Y]
                 E_0      =   E[i,N_Y] 
-
-                ρd_0     =   ρd[i,N_Y]
-                ρdud_X_0 =   ρdud_X[i,N_Y]
-                ρdud_Y_0 =   ρdud_Y[i,N_Y]
             else 
                 error("No boundary conditions assigned in the Y (or Z) direction at j = 1!")
             end
@@ -850,138 +1117,216 @@ end
             ρc[i,1]      = w_j_m1_Y[1] * ρ_0  +  w_j_0_Y[1] * ρ[i,1]  +  w_j_p1_Y[1] * ρ[i,2]
             τ_ρ          = SteepOrNot( ρc[i,1], ρ_0, ρ[i,1], ρ[i,2] )
 
-            ρdc[i,1]     = w_j_m1_Y[1] * ρd_0  +  w_j_0_Y[1] * ρd[i,1]  +  w_j_p1_Y[1] * ρd[i,2]  # Dust 
-            τ_ρd         = SteepOrNot( ρdc[i,1], ρd_0, ρd[i,1], ρd[i,2] )
-
             # RECONSTRUCT ⟨ρu_X⟩ⱼ → ρu_X(Ycⱼ) AT j = 1:
             ρu_Xc[i,1]   = w_j_m1_Y[1] * ρu_X_0  +  w_j_0_Y[1] * ρu_X[i,1]  +  w_j_p1_Y[1] * ρu_X[i,2]
             τ_ρu_X       = SteepOrNot( ρu_Xc[i,1], ρu_X_0, ρu_X[i,1], ρu_X[i,2] )
-
-            ρdud_Xc[i,1] = w_j_m1_Y[1] * ρdud_X_0  +  w_j_0_Y[1] * ρdud_X[i,1]  +  w_j_p1_Y[1] * ρdud_X[i,2]  # Dust 
-            τ_ρdud_X     = SteepOrNot( ρdud_Xc[i,1], ρdud_X_0, ρdud_X[i,1], ρdud_X[i,2] )
 
             # RECONSTRUCT ⟨ρu_Y⟩ⱼ → ρu_Y(Ycⱼ) AT j = 1:
             ρu_Yc[i,1]   = w_j_m1_Y[1] * ρu_Y_0  +  w_j_0_Y[1] * ρu_Y[i,1]  +  w_j_p1_Y[1] * ρu_Y[i,2]
             τ_ρu_Y       = SteepOrNot( ρu_Yc[i,1], ρu_Y_0, ρu_Y[i,1], ρu_Y[i,2] )
 
-            ρdud_Yc[i,1] = w_j_m1_Y[1] * ρdud_Y_0  +  w_j_0_Y[1] * ρdud_Y[i,1]  +  w_j_p1_Y[1] * ρdud_Y[i,2]  # Dust 
-            τ_ρdud_Y     = SteepOrNot( ρdud_Yc[i,1], ρdud_Y_0, ρdud_Y[i,1], ρdud_Y[i,2] )
-
             # RECONSTRUCT ⟨E⟩ⱼ → E(Ycⱼ) AT j = 1:
             Ec[i,1]      = w_j_m1_Y[1] * E_0  +  w_j_0_Y[1] * E[i,1]  +  w_j_p1_Y[1] * E[i,2]
             τ_E          = SteepOrNot( Ec[i,1], E_0, E[i,1], E[i,2] )
 
+            ##########################################
+            #######                            #######
+            #######          D U S T           #######
+            #######                            #######
+            ##########################################
+
+            τ_dust = 1.0  # Initialize τ for dust
+
+            for bin in dN_dust
+                if BC_Y_left == :Reflect 
+                    ρd_0     =   ρd[bin,i,1]
+                    ρdud_X_0 =   ρdud_X[bin,i,1]
+                    ρdud_Y_0 = - ρdud_Y[bin,i,1]
+                elseif BC_Y_left == :Outflow
+                    ρd_0     =   ρd[bin,i,1]
+                    ρdud_X_0 =   ρdud_X[bin,i,1]
+                    ρdud_Y_0 =   ρdud_Y[bin,i,1]
+                elseif BC_Y_left == :Periodic
+                    ρd_0     =   ρd[bin,i,N_Y]
+                    ρdud_X_0 =   ρdud_X[bin,i,N_Y]
+                    ρdud_Y_0 =   ρdud_Y[bin,i,N_Y]
+                end
+
+                ρdc[bin,i,1]     = w_j_m1_Y[1] * ρd_0  +  w_j_0_Y[1] * ρd[bin,i,1]  +  w_j_p1_Y[1] * ρd[bin,i,2]
+                τ_ρd             = SteepOrNot( ρdc[bin,i,1], ρd_0, ρd[bin,i,1], ρd[bin,i,2] )
+
+                ρdud_Xc[bin,i,1] = w_j_m1_Y[1] * ρdud_X_0  +  w_j_0_Y[1] * ρdud_X[bin,i,1]  +  w_j_p1_Y[1] * ρdud_X[bin,i,2]
+                τ_ρdud_X         = SteepOrNot( ρdud_Xc[bin,i,1], ρdud_X_0, ρdud_X[bin,i,1], ρdud_X[bin,i,2] )
+
+                ρdud_Yc[bin,i,1] = w_j_m1_Y[1] * ρdud_Y_0  +  w_j_0_Y[1] * ρdud_Y[bin,i,1]  +  w_j_p1_Y[1] * ρdud_Y[bin,i,2]
+                τ_ρdud_Y         = SteepOrNot( ρdud_Yc[bin,i,1], ρdud_Y_0, ρdud_Y[bin,i,1], ρdud_Y[bin,i,2] )
+
+                # Update τ_dust to be the minimum found so far:
+                τ_dust = min( τ_dust, τ_ρd, τ_ρdud_X, τ_ρdud_Y )
+            end
+
             # SAFETY CORRECT FOR STEEPENESS:
-            τ            = min( τ_ρ, τ_ρd, τ_ρu_X, τ_ρdud_X, τ_ρu_Y, τ_ρdud_Y, τ_E )
-            OneMinusτ    = max( 1.0 - τ, 0.0 )
-            ρc[i,1]      = ρc[i,1]      * τ  +  OneMinusτ * ρ[i,1]
-            ρdc[i,1]     = ρdc[i,1]     * τ  +  OneMinusτ * ρd[i,1]
-            ρu_Xc[i,1]   = ρu_Xc[i,1]   * τ  +  OneMinusτ * ρu_X[i,1]
-            ρdud_Xc[i,1] = ρdud_Xc[i,1] * τ  +  OneMinusτ * ρdud_X[i,1]
-            ρu_Yc[i,1]   = ρu_Yc[i,1]   * τ  +  OneMinusτ * ρu_Y[i,1]
-            ρdud_Yc[i,1] = ρdud_Yc[i,1] * τ  +  OneMinusτ * ρdud_Y[i,1]
-            Ec[i,1]      = Ec[i,1]      * τ  +  OneMinusτ * E[i,1]
+
+            # Next, combine τ for gas and dust to find minimum τ:
+            τ         = min( τ_ρ, τ_ρu_X, τ_ρu_Y, τ_E, τ_dust )
+            OneMinusτ = max( 1.0 - τ, 0.0 )
+
+            # Gas:
+            ρc[i,1]    = ρc[i,1]    * τ  + OneMinusτ * ρ[i,1]
+            ρu_Xc[i,1] = ρu_Xc[i,1] * τ  + OneMinusτ * ρu_X[i,1]
+            ρu_Yc[i,1] = ρu_Yc[i,1] * τ  + OneMinusτ * ρu_Y[i,1]
+            Ec[i,1]    = Ec[i,1]    * τ  + OneMinusτ * E[i,1]
+
+            # Dust:
+            for bin in dN_dust
+                ρdc[bin,i,1]     = ρdc[bin,i,1]     * τ  +  OneMinusτ * ρd[bin,i,1]
+                ρdud_Xc[bin,i,1] = ρdud_Xc[bin,i,1] * τ  +  OneMinusτ * ρdud_X[bin,i,1]
+                ρdud_Yc[bin,i,1] = ρdud_Yc[bin,i,1] * τ  +  OneMinusτ * ρdud_Y[bin,i,1]
+            end
 
             # SECOND-ORDER SAFETY FALLBACK:
-            _, _, Pc_candidate = GetPrimitive( ρc[i,1], ρu_Xc[i,1], ρu_Yc[i,1], Ec[i,1], γad[i,1] )
-            if Shock[i,1] == Shock_HLL_and_PLM || ρc[i,1] ≤ ρ_floor || ρdc[i,1] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate) 
-                ρc[i,1]      = max( ρ[i,1], ρ_floor )
-                ρu_Xc[i,1]   = ρu_X[i,1]
-                ρu_Yc[i,1]   = ρu_Y[i,1]
-                Ec[i,1]      = E[i,1]
+            _, _, Pc_candidate = GetPrimitive( ρc[i,1], ρu_Xc[i,1], ρu_Yc[i,1], Ec[i,1], e_dual[i,1], γad[i,1] )
 
-                ρdc[i,1]     = max( ρd[i,1], ρd_floor )
-                ρdud_Xc[i,1] = ρdud_X[i,1]
-                ρdud_Yc[i,1] = ρdud_Y[i,1]
+            BadDustState = false 
+            for bin in dN_dust
+                if !BadDustState && ρdc[bin,i,1] ≤ ρd_floor
+                    BadDustState = true 
+                end
             end
-        end
-    end
-    
+
+            if Shock[i,1] == Shock_HLL_and_PLM || ρc[i,1] ≤ ρ_floor || BadDustState || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate)
+                ρc[i,1]    = max( ρ[i,1], ρ_floor )
+                ρu_Xc[i,1] = ρu_X[i,1]
+                ρu_Yc[i,1] = ρu_Y[i,1]
+                Ec[i,1]    = E[i,1]
+                
+                for bin in dN_dust
+                    ρdc[bin,i,1]     = max( ρd[bin,i,1], ρd_floor )
+                    ρdud_Xc[bin,i,1] = ρdud_X[bin,i,1]
+                    ρdud_Yc[bin,i,1] = ρdud_Y[bin,i,1]
+                end
+            end
+
+        end # End of inbounds 
+    end # End of i-loop 
+
     # Interior cells 2 ≤ j ≤ N_Y - 1: 
     @threads for j in dN_Yint
         @inbounds @simd for i in dN_X
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
+
             # RECONSTRUCT ⟨ρ⟩ⱼ → ρ(Ycⱼ):
             ρc[i,j]      = w_j_m1_Y[j] * ρ[i,j-1]  +  w_j_0_Y[j] * ρ[i,j]  +  w_j_p1_Y[j] * ρ[i,j+1]
             τ_ρ          = SteepOrNot( ρc[i,j], ρ[i,j-1], ρ[i,j], ρ[i,j+1] )
-
-            ρdc[i,j]     = w_j_m1_Y[j] * ρd[i,j-1]  +  w_j_0_Y[j] * ρd[i,j]  +  w_j_p1_Y[j] * ρd[i,j+1]  # Dust 
-            τ_ρd         = SteepOrNot( ρdc[i,j], ρd[i,j-1], ρd[i,j], ρd[i,j+1] )
 
             # RECONSTRUCT ⟨ρu_X⟩ⱼ → ρu_X(Ycⱼ):
             ρu_Xc[i,j]   = w_j_m1_Y[j] * ρu_X[i,j-1]  +  w_j_0_Y[j] * ρu_X[i,j]  +  w_j_p1_Y[j] * ρu_X[i,j+1]
             τ_ρu_X       = SteepOrNot( ρu_Xc[i,j], ρu_X[i,j-1], ρu_X[i,j], ρu_X[i,j+1] )
 
-            ρdud_Xc[i,j] = w_j_m1_Y[j] * ρdud_X[i,j-1]  +  w_j_0_Y[j] * ρdud_X[i,j]  +  w_j_p1_Y[j] * ρdud_X[i,j+1]  # Dust 
-            τ_ρdud_X     = SteepOrNot( ρdud_Xc[i,j], ρdud_X[i,j-1], ρdud_X[i,j], ρdud_X[i,j+1] )
-
             # RECONSTRUCT ⟨ρu_Y⟩ⱼ → ρu_Y(Ycⱼ):
             ρu_Yc[i,j]   = w_j_m1_Y[j] * ρu_Y[i,j-1]  +  w_j_0_Y[j] * ρu_Y[i,j]  +  w_j_p1_Y[j] * ρu_Y[i,j+1]
             τ_ρu_Y       = SteepOrNot( ρu_Yc[i,j], ρu_Y[i,j-1], ρu_Y[i,j], ρu_Y[i,j+1] )
-
-            ρdud_Yc[i,j] = w_j_m1_Y[j] * ρdud_Y[i,j-1]  +  w_j_0_Y[j] * ρdud_Y[i,j]  +  w_j_p1_Y[j] * ρdud_Y[i,j+1]  # Dust 
-            τ_ρdud_Y     = SteepOrNot( ρdud_Yc[i,j], ρdud_Y[i,j-1], ρdud_Y[i,j], ρdud_Y[i,j+1] )
 
             # RECONSTRUCT ⟨E⟩ⱼ → E(Ycⱼ):
             Ec[i,j]      = w_j_m1_Y[j] * E[i,j-1]  +  w_j_0_Y[j] * E[i,j]  +  w_j_p1_Y[j] * E[i,j+1]
             τ_E          = SteepOrNot( Ec[i,j], E[i,j-1], E[i,j], E[i,j+1] )
 
+            ##########################################
+            #######                            #######
+            #######          D U S T           #######
+            #######                            #######
+            ##########################################
+
+            τ_dust = 1.0  # Initialize τ for dust
+
+            for bin in dN_dust
+                ρdc[bin,i,j]     = w_j_m1_Y[j] * ρd[bin,i,j-1]  +  w_j_0_Y[j] * ρd[bin,i,j]  +  w_j_p1_Y[j] * ρd[bin,i,j+1]
+                τ_ρd             = SteepOrNot( ρdc[bin,i,j], ρd[bin,i,j-1], ρd[bin,i,j], ρd[bin,i,j+1] )
+
+                ρdud_Xc[bin,i,j] = w_j_m1_Y[j] * ρdud_X[bin,i,j-1]  +  w_j_0_Y[j] * ρdud_X[bin,i,j]  +  w_j_p1_Y[j] * ρdud_X[bin,i,j+1]
+                τ_ρdud_X         = SteepOrNot( ρdud_Xc[bin,i,j], ρdud_X[bin,i,j-1], ρdud_X[bin,i,j], ρdud_X[bin,i,j+1] )
+
+                ρdud_Yc[bin,i,j] = w_j_m1_Y[j] * ρdud_Y[bin,i,j-1]  +  w_j_0_Y[j] * ρdud_Y[bin,i,j]  +  w_j_p1_Y[j] * ρdud_Y[bin,i,j+1]
+                τ_ρdud_Y         = SteepOrNot( ρdud_Yc[bin,i,j], ρdud_Y[bin,i,j-1], ρdud_Y[bin,i,j], ρdud_Y[bin,i,j+1] )
+
+                # Update τ_dust to be the minimum found so far:
+                τ_dust = min( τ_dust, τ_ρd, τ_ρdud_X, τ_ρdud_Y )
+            end
+
             # SAFETY CORRECT FOR STEEPENESS:
-            τ            = min( τ_ρ, τ_ρd, τ_ρu_X, τ_ρdud_X, τ_ρu_Y, τ_ρdud_Y, τ_E )
-            OneMinusτ    = max( 1.0 - τ, 0.0 )
-            ρc[i,j]      = ρc[i,j]      * τ  +  OneMinusτ * ρ[i,j]
-            ρdc[i,j]     = ρdc[i,j]     * τ  +  OneMinusτ * ρd[i,j]
-            ρu_Xc[i,j]   = ρu_Xc[i,j]   * τ  +  OneMinusτ * ρu_X[i,j]
-            ρdud_Xc[i,j] = ρdud_Xc[i,j] * τ  +  OneMinusτ * ρdud_X[i,j]
-            ρu_Yc[i,j]   = ρu_Yc[i,j]   * τ  +  OneMinusτ * ρu_Y[i,j]
-            ρdud_Yc[i,j] = ρdud_Yc[i,j] * τ  +  OneMinusτ * ρdud_Y[i,j]
-            Ec[i,j]      = Ec[i,j]      * τ  +  OneMinusτ * E[i,j]
+
+            # Next, combine τ for gas and dust to find minimum τ:
+            τ         = min( τ_ρ, τ_ρu_X, τ_ρu_Y, τ_E, τ_dust )
+            OneMinusτ = max( 1.0 - τ, 0.0 )
+
+            # Gas:
+            ρc[i,j]    = ρc[i,j]    * τ  + OneMinusτ * ρ[i,j]
+            ρu_Xc[i,j] = ρu_Xc[i,j] * τ  + OneMinusτ * ρu_X[i,j]
+            ρu_Yc[i,j] = ρu_Yc[i,j] * τ  + OneMinusτ * ρu_Y[i,j]
+            Ec[i,j]    = Ec[i,j]    * τ  + OneMinusτ * E[i,j]
+
+            # Dust:
+            for bin in dN_dust
+                ρdc[bin,i,j]     = ρdc[bin,i,j]     * τ  +  OneMinusτ * ρd[bin,i,j]
+                ρdud_Xc[bin,i,j] = ρdud_Xc[bin,i,j] * τ  +  OneMinusτ * ρdud_X[bin,i,j]
+                ρdud_Yc[bin,i,j] = ρdud_Yc[bin,i,j] * τ  +  OneMinusτ * ρdud_Y[bin,i,j]
+            end
 
             # SECOND-ORDER SAFETY FALLBACK:
-            _, _, Pc_candidate = GetPrimitive( ρc[i,j], ρu_Xc[i,j], ρu_Yc[i,j], Ec[i,j], γad[i,j] )
-            if Shock[i,j] == Shock_HLL_and_PLM || ρc[i,j] ≤ ρ_floor || ρdc[i,j] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate) 
-                ρc[i,j]      = max( ρ[i,j], ρ_floor )
-                ρu_Xc[i,j]   = ρu_X[i,j]
-                ρu_Yc[i,j]   = ρu_Y[i,j]
-                Ec[i,j]      = E[i,j]
+            _, _, Pc_candidate = GetPrimitive( ρc[i,j], ρu_Xc[i,j], ρu_Yc[i,j], Ec[i,j], e_dual[i,j], γad[i,j] )
 
-                ρdc[i,j]     = max( ρd[i,j], ρd_floor )
-                ρdud_Xc[i,j] = ρdud_X[i,j]
-                ρdud_Yc[i,j] = ρdud_Y[i,j]
+            BadDustState = false 
+            for bin in dN_dust
+                if !BadDustState && ρdc[bin,i,j] ≤ ρd_floor
+                    BadDustState = true 
+                end
             end
-        end
-    end
+
+            if Shock[i,j] == Shock_HLL_and_PLM || ρc[i,j] ≤ ρ_floor || BadDustState || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate)
+                ρc[i,j]    = max( ρ[i,j], ρ_floor )
+                ρu_Xc[i,j] = ρu_X[i,j]
+                ρu_Yc[i,j] = ρu_Y[i,j]
+                Ec[i,j]    = E[i,j]
+                
+                for bin in dN_dust
+                    ρdc[bin,i,j]     = max( ρd[bin,i,j], ρd_floor )
+                    ρdud_Xc[bin,i,j] = ρdud_X[bin,i,j]
+                    ρdud_Yc[bin,i,j] = ρdud_Y[bin,i,j]
+                end
+            end
+
+        end # End of i-loop 
+    end # End of j-loop 
 
     # Outermost boundary j = N_Y:
     @threads for i in dN_X
         @inbounds begin
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
+
             if BC_Y_right == :Outflow
                 ρ_Np1      =   ρ[i,N_Y]
                 ρu_X_Np1   =   ρu_X[i,N_Y] 
                 ρu_Y_Np1   =   max( ρu_Y[i,N_Y], 0.0 )
                 E_Np1      =   E[i,N_Y]
-
-                ρd_Np1     =   ρd[i,N_Y]
-                ρdud_X_Np1 =   ρdud_X[i,N_Y] 
-                ρdud_Y_Np1 =   max( ρdud_Y[i,N_Y], 0.0 )
             elseif BC_Y_right == :Reflect 
                 # If not outflow, we have reflective boundary conditions: 
                 ρ_Np1      =   ρ[i,N_Y]
                 ρu_X_Np1   =   ρu_X[i,N_Y]
                 ρu_Y_Np1   = - ρu_Y[i,N_Y]
                 E_Np1      =   E[i,N_Y]
-
-                ρd_Np1     =   ρd[i,N_Y]
-                ρdud_X_Np1 =   ρdud_X[i,N_Y]
-                ρdud_Y_Np1 = - ρdud_Y[i,N_Y]
             elseif BC_Y_right == :Periodic 
                 ρ_Np1      =   ρ[i,1]
                 ρu_X_Np1   =   ρu_X[i,1]
                 ρu_Y_Np1   =   ρu_Y[i,1]
                 E_Np1      =   E[i,1]
-
-                ρd_Np1     =   ρd[i,1]
-                ρdud_X_Np1 =   ρdud_X[i,1]
-                ρdud_Y_Np1 =   ρdud_Y[i,1]
             else 
                 error("No boundary conditions assigned in the Y (or Z) direction at j = N_Y!")
             end
@@ -990,54 +1335,100 @@ end
             ρc[i,N_Y]      = w_j_m1_Y[N_Y] * ρ[i,N_Y-1]  +  w_j_0_Y[N_Y] * ρ[i,N_Y]  +  w_j_p1_Y[N_Y] * ρ_Np1
             τ_ρ            = SteepOrNot( ρc[i,N_Y], ρ[i,N_Y-1], ρ[i,N_Y], ρ_Np1 )
 
-            ρdc[i,N_Y]     = w_j_m1_Y[N_Y] * ρd[i,N_Y-1]  +  w_j_0_Y[N_Y] * ρd[i,N_Y]  +  w_j_p1_Y[N_Y] * ρd_Np1  # Dust 
-            τ_ρd           = SteepOrNot( ρdc[i,N_Y], ρd[i,N_Y-1], ρd[i,N_Y], ρd_Np1 )
-
             # RECONSTRUCT ⟨ρu_X⟩ⱼ → ρu_X(Ycⱼ) AT j = N_Y:
             ρu_Xc[i,N_Y]   = w_j_m1_Y[N_Y] * ρu_X[i,N_Y-1]  +  w_j_0_Y[N_Y] * ρu_X[i,N_Y]  +  w_j_p1_Y[N_Y] * ρu_X_Np1
             τ_ρu_X         = SteepOrNot( ρu_Xc[i,N_Y], ρu_X[i,N_Y-1], ρu_X[i,N_Y], ρu_X_Np1 )
-
-            ρdud_Xc[i,N_Y] = w_j_m1_Y[N_Y] * ρdud_X[i,N_Y-1]  +  w_j_0_Y[N_Y] * ρdud_X[i,N_Y]  +  w_j_p1_Y[N_Y] * ρdud_X_Np1  # Dust 
-            τ_ρdud_X       = SteepOrNot( ρdud_Xc[i,N_Y], ρdud_X[i,N_Y-1], ρdud_X[i,N_Y], ρdud_X_Np1 )
 
             # RECONSTRUCT ⟨ρu_Y⟩ⱼ → ρu_Y(Ycⱼ) AT j = N_Y:
             ρu_Yc[i,N_Y]   = w_j_m1_Y[N_Y] * ρu_Y[i,N_Y-1]  +  w_j_0_Y[N_Y] * ρu_Y[i,N_Y]  +  w_j_p1_Y[N_Y] * ρu_Y_Np1
             τ_ρu_Y         = SteepOrNot( ρu_Yc[i,N_Y], ρu_Y[i,N_Y-1], ρu_Y[i,N_Y], ρu_Y_Np1 )
 
-            ρdud_Yc[i,N_Y] = w_j_m1_Y[N_Y] * ρdud_Y[i,N_Y-1]  +  w_j_0_Y[N_Y] * ρdud_Y[i,N_Y]  +  w_j_p1_Y[N_Y] * ρdud_Y_Np1  # Dust 
-            τ_ρdud_Y       = SteepOrNot( ρdud_Yc[i,N_Y], ρdud_Y[i,N_Y-1], ρdud_Y[i,N_Y], ρdud_Y_Np1 )
-
             # RECONSTRUCT ⟨E⟩ⱼ → E(Ycⱼ) AT j = N_Y:
             Ec[i,N_Y]      = w_j_m1_Y[N_Y] * E[i,N_Y-1]  +  w_j_0_Y[N_Y] * E[i,N_Y]  +  w_j_p1_Y[N_Y] * E_Np1
             τ_E            = SteepOrNot( Ec[i,N_Y], E[i,N_Y-1], E[i,N_Y], E_Np1 )
 
+            ##########################################
+            #######                            #######
+            #######          D U S T           #######
+            #######                            #######
+            ##########################################
+
+            τ_dust = 1.0  # Initialize τ for dust
+
+            for bin in dN_dust
+                if BC_Y_right == :Outflow
+                    ρd_Np1     =   ρd[bin,i,N_Y]
+                    ρdud_X_Np1 =   ρdud_X[bin,i,N_Y]
+                    ρdud_Y_Np1 =   max(ρdud_Y[bin,i,N_Y], 0.0)
+                elseif BC_Y_right == :Reflect
+                    ρd_Np1     =   ρd[bin,i,N_Y]
+                    ρdud_X_Np1 =   ρdud_X[bin,i,N_Y]
+                    ρdud_Y_Np1 = - ρdud_Y[bin,i,N_Y]
+                elseif BC_Y_right == :Periodic
+                    ρd_Np1     =   ρd[bin,i,1]
+                    ρdud_X_Np1 =   ρdud_X[bin,i,1]
+                    ρdud_Y_Np1 =   ρdud_Y[bin,i,1]
+                end
+
+                ρdc[bin,i,N_Y]     = w_j_m1_Y[N_Y] * ρd[bin,i,N_Y-1]  +  w_j_0_Y[N_Y] * ρd[bin,i,N_Y]  +  w_j_p1_Y[N_Y] * ρd_Np1
+                τ_ρd               = SteepOrNot( ρdc[bin,i,N_Y], ρd[bin,i,N_Y-1], ρd[bin,i,N_Y], ρd_Np1 )
+
+                ρdud_Xc[bin,i,N_Y] = w_j_m1_Y[N_Y] * ρdud_X[bin,i,N_Y-1]  +  w_j_0_Y[N_Y] * ρdud_X[bin,i,N_Y]  +  w_j_p1_Y[N_Y] * ρdud_X_Np1
+                τ_ρdud_X           = SteepOrNot( ρdud_Xc[bin,i,N_Y], ρdud_X[bin,i,N_Y-1], ρdud_X[bin,i,N_Y], ρdud_X_Np1 )
+
+                ρdud_Yc[bin,i,N_Y] = w_j_m1_Y[N_Y] * ρdud_Y[bin,i,N_Y-1]  +  w_j_0_Y[N_Y] * ρdud_Y[bin,i,N_Y]  +  w_j_p1_Y[N_Y] * ρdud_Y_Np1
+                τ_ρdud_Y           = SteepOrNot( ρdud_Yc[bin,i,N_Y], ρdud_Y[bin,i,N_Y-1], ρdud_Y[bin,i,N_Y], ρdud_Y_Np1 )
+
+                # Update τ_dust to be the minimum found so far:
+                τ_dust = min( τ_dust, τ_ρd, τ_ρdud_X, τ_ρdud_Y )
+            end
+
             # SAFETY CORRECT FOR STEEPENESS:
-            τ              = min( τ_ρ, τ_ρd, τ_ρu_X, τ_ρdud_X, τ_ρu_Y, τ_ρdud_Y, τ_E )
-            OneMinusτ      = max( 1.0 - τ, 0.0 )
-            ρc[i,N_Y]      = ρc[i,N_Y]      * τ  +  OneMinusτ * ρ[i,N_Y]
-            ρdc[i,N_Y]     = ρdc[i,N_Y]     * τ  +  OneMinusτ * ρd[i,N_Y]
-            ρu_Xc[i,N_Y]   = ρu_Xc[i,N_Y]   * τ  +  OneMinusτ * ρu_X[i,N_Y]
-            ρdud_Xc[i,N_Y] = ρdud_Xc[i,N_Y] * τ  +  OneMinusτ * ρdud_X[i,N_Y]
-            ρu_Yc[i,N_Y]   = ρu_Yc[i,N_Y]   * τ  +  OneMinusτ * ρu_Y[i,N_Y]
-            ρdud_Yc[i,N_Y] = ρdud_Yc[i,N_Y] * τ  +  OneMinusτ * ρdud_Y[i,N_Y]
-            Ec[i,N_Y]      = Ec[i,N_Y]      * τ  +  OneMinusτ * E[i,N_Y]
+
+            # Next, combine τ for gas and dust to find minimum τ:
+            τ         = min( τ_ρ, τ_ρu_X, τ_ρu_Y, τ_E, τ_dust )
+            OneMinusτ = max( 1.0 - τ, 0.0 )
+
+            # Gas:
+            ρc[i,N_Y]    = ρc[i,N_Y]    * τ  + OneMinusτ * ρ[i,N_Y]
+            ρu_Xc[i,N_Y] = ρu_Xc[i,N_Y] * τ  + OneMinusτ * ρu_X[i,N_Y]
+            ρu_Yc[i,N_Y] = ρu_Yc[i,N_Y] * τ  + OneMinusτ * ρu_Y[i,N_Y]
+            Ec[i,N_Y]    = Ec[i,N_Y]    * τ  + OneMinusτ * E[i,N_Y]
+
+            # Dust:
+            for bin in dN_dust
+                ρdc[bin,i,N_Y]     = ρdc[bin,i,N_Y]     * τ  +  OneMinusτ * ρd[bin,i,N_Y]
+                ρdud_Xc[bin,i,N_Y] = ρdud_Xc[bin,i,N_Y] * τ  +  OneMinusτ * ρdud_X[bin,i,N_Y]
+                ρdud_Yc[bin,i,N_Y] = ρdud_Yc[bin,i,N_Y] * τ  +  OneMinusτ * ρdud_Y[bin,i,N_Y]
+            end
 
             # SECOND-ORDER SAFETY FALLBACK:
-            _, _, Pc_candidate = GetPrimitive( ρc[i,N_Y], ρu_Xc[i,N_Y], ρu_Yc[i,N_Y], Ec[i,N_Y], γad[i,N_Y] )
-            if Shock[i,N_Y] == Shock_HLL_and_PLM || ρc[i,N_Y] ≤ ρ_floor || ρdc[i,N_Y] ≤ ρd_floor || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate) 
-                ρc[i,N_Y]      = max( ρ[i,N_Y], ρ_floor )
-                ρu_Xc[i,N_Y]   = ρu_X[i,N_Y]
-                ρu_Yc[i,N_Y]   = ρu_Y[i,N_Y]
-                Ec[i,N_Y]      = E[i,N_Y]
+            _, _, Pc_candidate = GetPrimitive( ρc[i,N_Y], ρu_Xc[i,N_Y], ρu_Yc[i,N_Y], Ec[i,N_Y], e_dual[i,N_Y], γad[i,N_Y] )
 
-                ρdc[i,N_Y]     = max( ρd[i,N_Y], ρd_floor )
-                ρdud_Xc[i,N_Y] = ρdud_X[i,N_Y]
-                ρdud_Yc[i,N_Y] = ρdud_Y[i,N_Y]
+            BadDustState = false 
+            for bin in dN_dust
+                if !BadDustState && ρdc[bin,i,N_Y] ≤ ρd_floor
+                    BadDustState = true 
+                end
             end
-        end
-    end
 
-    return nothing 
+            if Shock[i,N_Y] == Shock_HLL_and_PLM || ρc[i,N_Y] ≤ ρ_floor || BadDustState || Pc_candidate ≤ P_floor || !isfinite(Pc_candidate)
+                ρc[i,N_Y]    = max( ρ[i,N_Y], ρ_floor )
+                ρu_Xc[i,N_Y] = ρu_X[i,N_Y]
+                ρu_Yc[i,N_Y] = ρu_Y[i,N_Y]
+                Ec[i,N_Y]    = E[i,N_Y]
+                
+                for bin in dN_dust
+                    ρdc[bin,i,N_Y]     = max( ρd[bin,i,N_Y], ρd_floor )
+                    ρdud_Xc[bin,i,N_Y] = ρdud_X[bin,i,N_Y]
+                    ρdud_Yc[bin,i,N_Y] = ρdud_Y[bin,i,N_Y]
+                end
+            end
+
+        end # End of inbounds
+    end # End of i-loop 
+
+    return nothing
 end
 
 
@@ -1048,28 +1439,35 @@ end
                                                             ρu_Xc::AbstractMatrix{Float64},
                                                             ρu_Yc::AbstractMatrix{Float64},
                                                                Ec::AbstractMatrix{Float64},
-                                                              ρdc::AbstractMatrix{Float64},
-                                                          ρdud_Xc::AbstractMatrix{Float64},
-                                                          ρdud_Yc::AbstractMatrix{Float64},
+                                                              ρdc::AbstractArray{Float64, 3},
+                                                          ρdud_Xc::AbstractArray{Float64, 3},
+                                                          ρdud_Yc::AbstractArray{Float64, 3},
                                                                
                                                              u_Xc::AbstractMatrix{Float64},
                                                              u_Yc::AbstractMatrix{Float64},
                                                                Pc::AbstractMatrix{Float64},
                                                               γad::AbstractMatrix{Float64},
-                                                            ud_Xc::AbstractMatrix{Float64},
-                                                            ud_Yc::AbstractMatrix{Float64}, )
+                                                            ud_Xc::AbstractArray{Float64, 3},
+                                                            ud_Yc::AbstractArray{Float64, 3},
+                                                            
+                                                           e_dual::AbstractMatrix{Float64} )
 
     N_X, N_Y = size( ρc )
+    N_dust   = size( ρdc, 1 )
     dN_X     = 1:N_X 
     dN_Y     = 1:N_Y 
+    dN_dust  = 1:N_dust
 
     @threads for j in dN_Y 
         @inbounds @simd for i in dN_X 
             # Recover primitives at geometric cell centers, from the 
             # conservative variables at the cell centers:
-            u_Xc[i,j], u_Yc[i,j], Pc[i,j] = GetPrimitive( ρc[i,j], ρu_Xc[i,j], ρu_Yc[i,j], Ec[i,j], γad[i,j] )
+            u_Xc[i,j], u_Yc[i,j], Pc[i,j] = GetPrimitive( ρc[i,j], ρu_Xc[i,j], ρu_Yc[i,j], Ec[i,j], e_dual[i,j], γad[i,j] )
 
-            ud_Xc[i,j], ud_Yc[i,j] = GetDustVelocities( ρdc[i,j], ρdud_Xc[i,j], ρdud_Yc[i,j] )
+            for bin in dN_dust
+                ud_Xc[bin,i,j], ud_Yc[bin,i,j] = GetDustVelocities( ρdc[bin,i,j], ρdud_Xc[bin,i,j], ρdud_Yc[bin,i,j], 
+                                                                    ρc[i,j], u_Xc[i,j], u_Yc[i,j] )
+            end
 
             # Ensure positive pressure:
             Pc[i,j] = max( Pc[i,j], P_floor )
@@ -1080,19 +1478,19 @@ end
 end
 
 
-""" This function recovers cell-averaraged primitives (u_X, u_Y, P), from 
+""" This function recovers cell-averaged primitives (u_X, u_Y, P), from 
     the cell-centered ones (u_Xc, u_Yc, Pc), along the X-direction. """
 @inline function RecoverCellAveragedPrimitives_X!( u_Xc::AbstractMatrix{Float64},
                                                    u_Yc::AbstractMatrix{Float64},
                                                      Pc::AbstractMatrix{Float64},
-                                                  ud_Xc::AbstractMatrix{Float64},
-                                                  ud_Yc::AbstractMatrix{Float64},
+                                                  ud_Xc::AbstractArray{Float64, 3},
+                                                  ud_Yc::AbstractArray{Float64, 3},
 
                                                     u_X::AbstractMatrix{Float64},
                                                     u_Y::AbstractMatrix{Float64},
                                                       P::AbstractMatrix{Float64},
-                                                   ud_X::AbstractMatrix{Float64},
-                                                   ud_Y::AbstractMatrix{Float64},
+                                                   ud_X::AbstractArray{Float64, 3},
+                                                   ud_Y::AbstractArray{Float64, 3},
                                                    
                                                q_i_m1_X::AbstractVector{Float64},
                                                 q_i_0_X::AbstractVector{Float64},
@@ -1105,34 +1503,32 @@ end
                                                   )
 
     N_X, N_Y = size( P )
+    N_dust   = size( ud_X, 1 )
     dN_Xint  = 2:(N_X - 1)
     dN_Y     = 1:N_Y
+    dN_dust  = 1:N_dust 
 
     # Innermost cell i = 1:
     @threads for j in dN_Y
         @inbounds begin
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
 
             if BC_X_left == :Reflect
                 u_Xc_0  = - u_Xc[1,j]
                 u_Yc_0  =   u_Yc[1,j] 
                 Pc_0    =   Pc[1,j]
-
-                ud_Xc_0 = - ud_Xc[1,j]
-                ud_Yc_0 =   ud_Yc[1,j] 
             elseif BC_X_left == :Outflow
                 u_Xc_0  =   u_Xc[1,j]
                 u_Yc_0  =   u_Yc[1,j] 
                 Pc_0    =   Pc[1,j]
-
-                ud_Xc_0 =   ud_Xc[1,j]
-                ud_Yc_0 =   ud_Yc[1,j] 
             elseif BC_X_left == :Periodic 
                 u_Xc_0  =   u_Xc[N_X,j]
                 u_Yc_0  =   u_Yc[N_X,j]
                 Pc_0    =   Pc[N_X,j]
-
-                ud_Xc_0 =   ud_Xc[N_X,j]
-                ud_Yc_0 =   ud_Yc[N_X,j]
             else 
                 error("No boundary conditions assigned in the X (or r) direction at i = 1!")
             end
@@ -1146,20 +1542,49 @@ end
             P[1,j]      = q_i_m1_X[1] * Pc_0  +  q_i_0_X[1] * Pc[1,j]  +  q_i_p1_X[1] * Pc[2,j]
             τ_P         = SteepOrNot( P[1,j], Pc_0, Pc[1,j], Pc[2,j] )
 
-            ud_X[1,j]   = q_i_m1_X[1] * ud_Xc_0  +  q_i_0_X[1] * ud_Xc[1,j]  +  q_i_p1_X[1] * ud_Xc[2,j]  # Dust 
-            τ_ud_X      = SteepOrNot( ud_X[1,j], ud_Xc_0, ud_Xc[1,j], ud_Xc[2,j] )
+            ##########################################
+            #######                            #######
+            #######          D U S T           #######
+            #######                            #######
+            ##########################################
 
-            ud_Y[1,j]   = q_i_m1_X[1] * ud_Yc_0  +  q_i_0_X[1] * ud_Yc[1,j]  +  q_i_p1_X[1] * ud_Yc[2,j]
-            τ_ud_Y      = SteepOrNot( ud_Y[1,j], ud_Yc_0, ud_Yc[1,j], ud_Yc[2,j] )
+            τ_dust = 1.0  # Initialize minimum τ for dust 
+
+            for bin in dN_dust
+                if BC_X_left == :Reflect
+                    ud_Xc_0  = - ud_Xc[bin,1,j]
+                    ud_Yc_0  =   ud_Yc[bin,1,j] 
+                elseif BC_X_left == :Outflow
+                    ud_Xc_0  =   ud_Xc[bin,1,j]
+                    ud_Yc_0  =   ud_Yc[bin,1,j] 
+                elseif BC_X_left == :Periodic 
+                    ud_Xc_0  =   ud_Xc[bin,N_X,j]
+                    ud_Yc_0  =   ud_Yc[bin,N_X,j]
+                end
+
+                ud_X[bin,1,j]   = q_i_m1_X[1] * ud_Xc_0  +  q_i_0_X[1] * ud_Xc[bin,1,j]  +  q_i_p1_X[1] * ud_Xc[bin,2,j]  
+                τ_ud_X          = SteepOrNot( ud_X[bin,1,j], ud_Xc_0, ud_Xc[bin,1,j], ud_Xc[bin,2,j] )
+                
+                ud_Y[bin,1,j]   = q_i_m1_X[1] * ud_Yc_0  +  q_i_0_X[1] * ud_Yc[bin,1,j]  +  q_i_p1_X[1] * ud_Yc[bin,2,j]
+                τ_ud_Y          = SteepOrNot( ud_Y[bin,1,j], ud_Yc_0, ud_Yc[bin,1,j], ud_Yc[bin,2,j] )
+
+                # Pick minimum τ:
+                τ_dust = min( τ_dust, τ_ud_X, τ_ud_Y )
+
+            end
 
             # SAFETY CORRECT FOR STEEPENESS:
-            τ           = min( τ_u_X, τ_ud_X, τ_u_Y, τ_ud_Y, τ_P )
+            τ           = min( τ_u_X, τ_u_Y, τ_P, τ_dust )
             OneMinusτ   = max( 1.0 - τ, 0.0 )
+
             u_X[1,j]    = u_X[1,j]  * τ  +  OneMinusτ * u_Xc[1,j]
-            ud_X[1,j]   = ud_X[1,j] * τ  +  OneMinusτ * ud_Xc[1,j]
             u_Y[1,j]    = u_Y[1,j]  * τ  +  OneMinusτ * u_Yc[1,j]
-            ud_Y[1,j]   = ud_Y[1,j] * τ  +  OneMinusτ * ud_Yc[1,j]
             P[1,j]      = P[1,j]    * τ  +  OneMinusτ * Pc[1,j]
+
+            for bin in dN_dust
+                ud_X[bin,1,j] = ud_X[bin,1,j] * τ  +  OneMinusτ * ud_Xc[bin,1,j]
+                ud_Y[bin,1,j] = ud_Y[bin,1,j] * τ  +  OneMinusτ * ud_Yc[bin,1,j]
+            end
 
             # SECOND-ORDER SAFETY FALLBACK:
             if Shock[1,j] == Shock_HLL_and_PLM || P[1,j] ≤ P_floor || !isfinite(P[1,j]) 
@@ -1167,15 +1592,23 @@ end
                 u_Y[1,j]  = u_Yc[1,j]
                 P[1,j]    = Pc[1,j] 
 
-                ud_X[1,j] = ud_Xc[1,j] 
-                ud_Y[1,j] = ud_Yc[1,j]
+                for bin in dN_dust
+                    ud_X[bin,1,j] = ud_Xc[bin,1,j]
+                    ud_Y[bin,1,j] = ud_Yc[bin,1,j]
+                end
             end    
-        end
-    end
+
+        end # End of inbounds 
+    end # End of j-loop 
 
     # Interior cells 2 ≤ i ≤ N_X - 1:
     @threads for j in dN_Y
         @inbounds @simd for i in dN_Xint
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
 
             u_X[i,j]    = q_i_m1_X[i] * u_Xc[i-1,j]  +  q_i_0_X[i] * u_Xc[i,j]  +  q_i_p1_X[i] * u_Xc[i+1,j]
             τ_u_X       = SteepOrNot( u_X[i,j], u_Xc[i-1,j], u_Xc[i,j], u_Xc[i+1,j] )
@@ -1186,20 +1619,37 @@ end
             P[i,j]      = q_i_m1_X[i] * Pc[i-1,j]  +  q_i_0_X[i] * Pc[i,j]  +  q_i_p1_X[i] * Pc[i+1,j]
             τ_P         = SteepOrNot( P[i,j], Pc[i-1,j], Pc[i,j], Pc[i+1,j] )
 
-            ud_X[i,j]   = q_i_m1_X[i] * ud_Xc[i-1,j]  +  q_i_0_X[i] * ud_Xc[i,j]  +  q_i_p1_X[i] * ud_Xc[i+1,j]  # Dust 
-            τ_ud_X      = SteepOrNot( ud_X[i,j], ud_Xc[i-1,j], ud_Xc[i,j], ud_Xc[i+1,j] )
+            ##########################################
+            #######                            #######
+            #######          D U S T           #######
+            #######                            #######
+            ##########################################
 
-            ud_Y[i,j]   = q_i_m1_X[i] * ud_Yc[i-1,j]  +  q_i_0_X[i] * ud_Yc[i,j]  +  q_i_p1_X[i] * ud_Yc[i+1,j]
-            τ_ud_Y      = SteepOrNot( ud_Y[i,j], ud_Yc[i-1,j], ud_Yc[i,j], ud_Yc[i+1,j] )
+            τ_dust = 1.0  # Initialize minimum τ for dust 
+
+            for bin in dN_dust
+                ud_X[bin,i,j]  = q_i_m1_X[i] * ud_Xc[bin,i-1,j]  +  q_i_0_X[i] * ud_Xc[bin,i,j]  +  q_i_p1_X[i] * ud_Xc[bin,i+1,j]  
+                τ_ud_X         = SteepOrNot( ud_X[bin,i,j], ud_Xc[bin,i-1,j], ud_Xc[bin,i,j], ud_Xc[bin,i+1,j] )
+
+                ud_Y[bin,i,j]  = q_i_m1_X[i] * ud_Yc[bin,i-1,j]  +  q_i_0_X[i] * ud_Yc[bin,i,j]  +  q_i_p1_X[i] * ud_Yc[bin,i+1,j]
+                τ_ud_Y         = SteepOrNot( ud_Y[bin,i,j], ud_Yc[bin,i-1,j], ud_Yc[bin,i,j], ud_Yc[bin,i+1,j] )
+
+                # Pick minimum τ:
+                τ_dust = min( τ_dust, τ_ud_X, τ_ud_Y )
+            end
 
             # SAFETY CORRECT FOR STEEPENESS:
-            τ           = min( τ_u_X, τ_ud_X, τ_u_Y, τ_ud_Y, τ_P )
+            τ           = min( τ_u_X, τ_u_Y, τ_P, τ_dust )
             OneMinusτ   = max( 1.0 - τ, 0.0 )
+
             u_X[i,j]    = u_X[i,j]  * τ  +  OneMinusτ * u_Xc[i,j]
-            ud_X[i,j]   = ud_X[i,j] * τ  +  OneMinusτ * ud_Xc[i,j]
             u_Y[i,j]    = u_Y[i,j]  * τ  +  OneMinusτ * u_Yc[i,j]
-            ud_Y[i,j]   = ud_Y[i,j] * τ  +  OneMinusτ * ud_Yc[i,j]
             P[i,j]      = P[i,j]    * τ  +  OneMinusτ * Pc[i,j]
+
+            for bin in dN_dust
+                ud_X[bin,i,j] = ud_X[bin,i,j] * τ  +  OneMinusτ * ud_Xc[bin,i,j]
+                ud_Y[bin,i,j] = ud_Y[bin,i,j] * τ  +  OneMinusτ * ud_Yc[bin,i,j]
+            end
 
             # SECOND-ORDER SAFETY FALLBACK:
             if Shock[i,j] == Shock_HLL_and_PLM || P[i,j] ≤ P_floor || !isfinite(P[i,j]) 
@@ -1207,37 +1657,36 @@ end
                 u_Y[i,j]  = u_Yc[i,j]
                 P[i,j]    = Pc[i,j] 
 
-                ud_X[i,j] = ud_Xc[i,j] 
-                ud_Y[i,j] = ud_Yc[i,j]
-            end    
-        end
-    end
+                for bin in dN_dust
+                    ud_X[bin,i,j] = ud_Xc[bin,i,j]
+                    ud_Y[bin,i,j] = ud_Yc[bin,i,j]
+                end
+            end   
+
+        end # End of i-loop 
+    end # End of j-loop 
 
     # Outermost cell i = N_X:
     @threads for j in dN_Y
         @inbounds begin
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
 
             if BC_X_right == :Reflect
                 u_Xc_Np1  = - u_Xc[N_X,j] 
                 u_Yc_Np1  =   u_Yc[N_X,j]
                 Pc_Np1    =   Pc[N_X,j]
-
-                ud_Xc_Np1 = - ud_Xc[N_X,j] 
-                ud_Yc_Np1 =   ud_Yc[N_X,j]
             elseif BC_X_right == :Outflow
                 u_Xc_Np1  =   max( u_Xc[N_X,j], 0.0 )
                 u_Yc_Np1  =   u_Yc[N_X,j]
                 Pc_Np1    =   Pc[N_X,j]
-
-                ud_Xc_Np1 =   max( ud_Xc[N_X,j], 0.0 )
-                ud_Yc_Np1 =   ud_Yc[N_X,j]
             elseif BC_X_right == :Periodic 
                 u_Xc_Np1  =   u_Xc[1,j]
                 u_Yc_Np1  =   u_Yc[1,j]
                 Pc_Np1    =   Pc[1,j]
-
-                ud_Xc_Np1 =   ud_Xc[1,j]
-                ud_Yc_Np1 =   ud_Yc[1,j]
             else 
                 error("No boundary conditions assigned in the X (or r) direction at i = N_X!")
             end
@@ -1251,20 +1700,48 @@ end
             P[N_X,j]     = q_i_m1_X[N_X] * Pc[N_X-1,j]  +  q_i_0_X[N_X] * Pc[N_X,j]  +  q_i_p1_X[N_X] * Pc_Np1
             τ_P          = SteepOrNot( P[N_X,j], Pc[N_X-1,j], Pc[N_X,j], Pc_Np1 )
 
-            ud_X[N_X,j]  = q_i_m1_X[N_X] * ud_Xc[N_X-1,j]  +  q_i_0_X[N_X] * ud_Xc[N_X,j]  +  q_i_p1_X[N_X] * ud_Xc_Np1  # Dust 
-            τ_ud_X       = SteepOrNot( ud_X[N_X,j], ud_Xc[N_X-1,j], ud_Xc[N_X,j], ud_Xc_Np1 )
+            ##########################################
+            #######                            #######
+            #######          D U S T           #######
+            #######                            #######
+            ##########################################
 
-            ud_Y[N_X,j]  = q_i_m1_X[N_X] * ud_Yc[N_X-1,j]  +  q_i_0_X[N_X] * ud_Yc[N_X,j]  +  q_i_p1_X[N_X] * ud_Yc_Np1
-            τ_ud_Y       = SteepOrNot( ud_Y[N_X,j], ud_Yc[N_X-1,j], ud_Yc[N_X,j], ud_Yc_Np1 )
+            τ_dust = 1.0  # Initialize minimum τ for dust 
+
+            for bin in dN_dust
+                if BC_X_right == :Reflect
+                    ud_Xc_Np1  = - ud_Xc[bin,N_X,j] 
+                    ud_Yc_Np1  =   ud_Yc[bin,N_X,j]  
+                elseif BC_X_right == :Outflow
+                    ud_Xc_Np1  =   max( ud_Xc[bin,N_X,j], 0.0 )
+                    ud_Yc_Np1  =   ud_Yc[bin,N_X,j]
+                elseif BC_X_right == :Periodic 
+                    ud_Xc_Np1  =   ud_Xc[bin,1,j]
+                    ud_Yc_Np1  =   ud_Yc[bin,1,j]
+                end
+
+                ud_X[bin,N_X,j]  = q_i_m1_X[N_X] * ud_Xc[bin,N_X-1,j]  +  q_i_0_X[N_X] * ud_Xc[bin,N_X,j]  +  q_i_p1_X[N_X] * ud_Xc_Np1  
+                τ_ud_X           = SteepOrNot( ud_X[bin,N_X,j], ud_Xc[bin,N_X-1,j], ud_Xc[bin,N_X,j], ud_Xc_Np1 )
+
+                ud_Y[bin,N_X,j]  = q_i_m1_X[N_X] * ud_Yc[bin,N_X-1,j]  +  q_i_0_X[N_X] * ud_Yc[bin,N_X,j]  +  q_i_p1_X[N_X] * ud_Yc_Np1
+                τ_ud_Y           = SteepOrNot( ud_Y[bin,N_X,j], ud_Yc[bin,N_X-1,j], ud_Yc[bin,N_X,j], ud_Yc_Np1 )
+
+                # Pick minimum τ:
+                τ_dust = min( τ_dust, τ_ud_X, τ_ud_Y )
+            end
 
             # SAFETY CORRECT FOR STEEPENESS:
-            τ            = min( τ_u_X, τ_ud_X, τ_u_Y, τ_ud_Y, τ_P )
+            τ            = min( τ_u_X, τ_u_Y, τ_P, τ_dust )
             OneMinusτ    = max( 1.0 - τ, 0.0 )
+
             u_X[N_X,j]   = u_X[N_X,j]  * τ  +  OneMinusτ * u_Xc[N_X,j]
-            ud_X[N_X,j]  = ud_X[N_X,j] * τ  +  OneMinusτ * ud_Xc[N_X,j]
             u_Y[N_X,j]   = u_Y[N_X,j]  * τ  +  OneMinusτ * u_Yc[N_X,j]
-            ud_Y[N_X,j]  = ud_Y[N_X,j] * τ  +  OneMinusτ * ud_Yc[N_X,j]
             P[N_X,j]     = P[N_X,j]    * τ  +  OneMinusτ * Pc[N_X,j]
+
+            for bin in dN_dust
+                ud_X[bin,N_X,j] = ud_X[bin,N_X,j] * τ  +  OneMinusτ * ud_Xc[bin,N_X,j]
+                ud_Y[bin,N_X,j] = ud_Y[bin,N_X,j] * τ  +  OneMinusτ * ud_Yc[bin,N_X,j]
+            end
 
             # SECOND-ORDER SAFETY FALLBACK:
             if Shock[N_X,j] == Shock_HLL_and_PLM || P[N_X,j] ≤ P_floor || !isfinite(P[N_X,j]) 
@@ -1272,29 +1749,32 @@ end
                 u_Y[N_X,j]  = u_Yc[N_X,j]
                 P[N_X,j]    = Pc[N_X,j] 
 
-                ud_X[N_X,j] = ud_Xc[N_X,j] 
-                ud_Y[N_X,j] = ud_Yc[N_X,j]
-            end    
-        end
-    end
+                for bin in dN_dust
+                    ud_X[bin,N_X,j] = ud_Xc[bin,N_X,j] 
+                    ud_Y[bin,N_X,j] = ud_Yc[bin,N_X,j]
+                end
+            end 
+
+        end # End of inbounds
+    end # End of j-loop 
 
     return nothing 
 end
 
 
-""" This function recovers cell-averaraged primitives (u_X, u_Y, P), from 
+""" This function recovers cell-averaged primitives (u_X, u_Y, P), from 
     the cell-centered ones (u_Xc, u_Yc, Pc), along the Y-direction. """
 @inline function RecoverCellAveragedPrimitives_Y!( u_Xc::AbstractMatrix{Float64},
                                                    u_Yc::AbstractMatrix{Float64},
                                                      Pc::AbstractMatrix{Float64},
-                                                  ud_Xc::AbstractMatrix{Float64},
-                                                  ud_Yc::AbstractMatrix{Float64},
+                                                  ud_Xc::AbstractArray{Float64, 3},
+                                                  ud_Yc::AbstractArray{Float64, 3},
 
                                                     u_X::AbstractMatrix{Float64},
                                                     u_Y::AbstractMatrix{Float64},
                                                       P::AbstractMatrix{Float64},
-                                                   ud_X::AbstractMatrix{Float64},
-                                                   ud_Y::AbstractMatrix{Float64},
+                                                   ud_X::AbstractArray{Float64, 3},
+                                                   ud_Y::AbstractArray{Float64, 3},
                                                    
                                                q_j_m1_Y::AbstractVector{Float64},
                                                 q_j_0_Y::AbstractVector{Float64},
@@ -1307,38 +1787,36 @@ end
                                                   )
 
     N_X, N_Y = size( P )
+    N_dust   = size( ud_X, 1 )
     dN_X     = 1:N_X 
     dN_Yint  = 2:(N_Y - 1)
+    dN_dust  = 1:N_dust
 
     # Innermost cell j = 1:
     @threads for i in dN_X
         @inbounds begin
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
 
             if BC_Y_left == :Reflect
                 u_Xc_0  =   u_Xc[i,1]
                 u_Yc_0  = - u_Yc[i,1] 
                 Pc_0    =   Pc[i,1]
-
-                ud_Xc_0 =   ud_Xc[i,1]
-                ud_Yc_0 = - ud_Yc[i,1] 
             elseif BC_Y_left == :Outflow
                 u_Xc_0  =   u_Xc[i,1]
                 u_Yc_0  =   min( u_Yc[i,1], 0.0 ) 
                 Pc_0    =   Pc[i,1]
-
-                ud_Xc_0 =   ud_Xc[i,1]
-                ud_Yc_0 =   min( ud_Yc[i,1], 0.0 ) 
             elseif BC_Y_left == :Periodic 
                 u_Xc_0  =   u_Xc[i,N_Y]
                 u_Yc_0  =   u_Yc[i,N_Y] 
                 Pc_0    =   Pc[i,N_Y]
-
-                ud_Xc_0 =   ud_Xc[i,N_Y]
-                ud_Yc_0 =   ud_Yc[i,N_Y] 
             else 
                 error("No boundary conditions assigned in the Y (or Z) direction at j = 1!")
             end
-            
+
             u_X[i,1]    = q_j_m1_Y[1] * u_Xc_0  +  q_j_0_Y[1] * u_Xc[i,1]  +  q_j_p1_Y[1] * u_Xc[i,2]
             τ_u_X       = SteepOrNot( u_X[i,1], u_Xc_0, u_Xc[i,1], u_Xc[i,2] )
 
@@ -1348,20 +1826,48 @@ end
             P[i,1]      = q_j_m1_Y[1] * Pc_0  +  q_j_0_Y[1] * Pc[i,1]  +  q_j_p1_Y[1] * Pc[i,2]
             τ_P         = SteepOrNot( P[i,1], Pc_0, Pc[i,1], Pc[i,2] )
 
-            ud_X[i,1]   = q_j_m1_Y[1] * ud_Xc_0  +  q_j_0_Y[1] * ud_Xc[i,1]  +  q_j_p1_Y[1] * ud_Xc[i,2]  # Dust 
-            τ_ud_X      = SteepOrNot( ud_X[i,1], ud_Xc_0, ud_Xc[i,1], ud_Xc[i,2] )
+            ##########################################
+            #######                            #######
+            #######           D U S T          #######
+            #######                            #######
+            ########################################## 
 
-            ud_Y[i,1]   = q_j_m1_Y[1] * ud_Yc_0  +  q_j_0_Y[1] * ud_Yc[i,1]  +  q_j_p1_Y[1] * ud_Yc[i,2]
-            τ_ud_Y      = SteepOrNot( ud_Y[i,1], ud_Yc_0, ud_Yc[i,1], ud_Yc[i,2] )
+            τ_dust = 1.0  # Initialize minimum τ for dust 
+
+            for bin in dN_dust
+                if BC_Y_left == :Reflect
+                    ud_Xc_0 =   ud_Xc[bin,i,1]
+                    ud_Yc_0 = - ud_Yc[bin,i,1] 
+                elseif BC_Y_left == :Outflow
+                    ud_Xc_0 =   ud_Xc[bin,i,1]
+                    ud_Yc_0 =   min( ud_Yc[bin,i,1], 0.0 ) 
+                elseif BC_Y_left == :Periodic 
+                    ud_Xc_0 =   ud_Xc[bin,i,N_Y]
+                    ud_Yc_0 =   ud_Yc[bin,i,N_Y] 
+                end
+
+                ud_X[bin,i,1]  = q_j_m1_Y[1] * ud_Xc_0  +  q_j_0_Y[1] * ud_Xc[bin,i,1]  +  q_j_p1_Y[1] * ud_Xc[bin,i,2]   
+                τ_ud_X         = SteepOrNot( ud_X[bin,i,1], ud_Xc_0, ud_Xc[bin,i,1], ud_Xc[bin,i,2] )
+
+                ud_Y[bin,i,1]  = q_j_m1_Y[1] * ud_Yc_0  +  q_j_0_Y[1] * ud_Yc[bin,i,1]  +  q_j_p1_Y[1] * ud_Yc[bin,i,2]
+                τ_ud_Y         = SteepOrNot( ud_Y[bin,i,1], ud_Yc_0, ud_Yc[bin,i,1], ud_Yc[bin,i,2] )
+
+                # Pick minimum τ:
+                τ_dust = min( τ_dust, τ_ud_X, τ_ud_Y )
+            end
 
             # SAFETY CORRECT FOR STEEPENESS:
-            τ           = min( τ_u_X, τ_ud_X, τ_u_Y, τ_ud_Y, τ_P )
+            τ           = min( τ_u_X, τ_u_Y, τ_P, τ_dust )
             OneMinusτ   = max( 1.0 - τ, 0.0 )
+
             u_X[i,1]    = u_X[i,1]  * τ  +  OneMinusτ * u_Xc[i,1]
-            ud_X[i,1]   = ud_X[i,1] * τ  +  OneMinusτ * ud_Xc[i,1]
             u_Y[i,1]    = u_Y[i,1]  * τ  +  OneMinusτ * u_Yc[i,1]
-            ud_Y[i,1]   = ud_Y[i,1] * τ  +  OneMinusτ * ud_Yc[i,1]
             P[i,1]      = P[i,1]    * τ  +  OneMinusτ * Pc[i,1]
+
+            for bin in dN_dust
+                ud_X[bin,i,1] = ud_X[bin,i,1] * τ  +  OneMinusτ * ud_Xc[bin,i,1]
+                ud_Y[bin,i,1] = ud_Y[bin,i,1] * τ  +  OneMinusτ * ud_Yc[bin,i,1]
+            end
 
             # SECOND-ORDER SAFETY FALLBACK:
             if Shock[i,1] == Shock_HLL_and_PLM || P[i,1] ≤ P_floor || !isfinite(P[i,1]) 
@@ -1369,15 +1875,23 @@ end
                 u_Y[i,1]  = u_Yc[i,1]
                 P[i,1]    = Pc[i,1] 
 
-                ud_X[i,1] = ud_Xc[i,1] 
-                ud_Y[i,1] = ud_Yc[i,1]
+                for bin in dN_dust
+                    ud_X[bin,i,1] = ud_Xc[bin,i,1] 
+                    ud_Y[bin,i,1] = ud_Yc[bin,i,1]
+                end
             end    
-        end
-    end
+
+        end # End of inbounds 
+    end # End of i-loop 
 
     # Interior cells 2 ≤ j ≤ N_Y - 1:
     @threads for j in dN_Yint
         @inbounds @simd for i in dN_X
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
 
             u_X[i,j]    = q_j_m1_Y[j] * u_Xc[i,j-1]  +  q_j_0_Y[j] * u_Xc[i,j]  +  q_j_p1_Y[j] * u_Xc[i,j+1]
             τ_u_X       = SteepOrNot( u_X[i,j], u_Xc[i,j-1], u_Xc[i,j], u_Xc[i,j+1] )
@@ -1388,62 +1902,79 @@ end
             P[i,j]      = q_j_m1_Y[j] * Pc[i,j-1]  +  q_j_0_Y[j] * Pc[i,j]  +  q_j_p1_Y[j] * Pc[i,j+1]
             τ_P         = SteepOrNot( P[i,j], Pc[i,j-1], Pc[i,j], Pc[i,j+1] )
 
-            ud_X[i,j]   = q_j_m1_Y[j] * ud_Xc[i,j-1]  +  q_j_0_Y[j] * ud_Xc[i,j]  +  q_j_p1_Y[j] * ud_Xc[i,j+1]  # Dust 
-            τ_ud_X      = SteepOrNot( ud_X[i,j], ud_Xc[i,j-1], ud_Xc[i,j], ud_Xc[i,j+1] )
+            ##########################################
+            #######                            #######
+            #######           D U S T          #######
+            #######                            #######
+            ########################################## 
 
-            ud_Y[i,j]   = q_j_m1_Y[j] * ud_Yc[i,j-1]  +  q_j_0_Y[j] * ud_Yc[i,j]  +  q_j_p1_Y[j] * ud_Yc[i,j+1]
-            τ_ud_Y      = SteepOrNot( ud_Y[i,j], ud_Yc[i,j-1], ud_Yc[i,j], ud_Yc[i,j+1] )
+            τ_dust = 1.0  # Initialize minimum τ for dust 
+
+            for bin in dN_dust
+                ud_X[bin,i,j] = q_j_m1_Y[j] * ud_Xc[bin,i,j-1]  +  q_j_0_Y[j] * ud_Xc[bin,i,j]  +  q_j_p1_Y[j] * ud_Xc[bin,i,j+1]  
+                τ_ud_X        = SteepOrNot( ud_X[bin,i,j], ud_Xc[bin,i,j-1], ud_Xc[bin,i,j], ud_Xc[bin,i,j+1] )
+ 
+                ud_Y[bin,i,j] = q_j_m1_Y[j] * ud_Yc[bin,i,j-1]  +  q_j_0_Y[j] * ud_Yc[bin,i,j]  +  q_j_p1_Y[j] * ud_Yc[bin,i,j+1]
+                τ_ud_Y        = SteepOrNot( ud_Y[bin,i,j], ud_Yc[bin,i,j-1], ud_Yc[bin,i,j], ud_Yc[bin,i,j+1] )
+
+                # Pick minimum τ:
+                τ_dust = min( τ_dust, τ_ud_X, τ_ud_Y )
+            end
 
             # SAFETY CORRECT FOR STEEPENESS:
-            τ           = min( τ_u_X, τ_ud_X, τ_u_Y, τ_ud_Y, τ_P )
-            OneMinusτ   = max( 1.0 - τ, 0.0 )
-            u_X[i,j]    = u_X[i,j]  * τ  +  OneMinusτ * u_Xc[i,j]
-            ud_X[i,j]   = ud_X[i,j] * τ  +  OneMinusτ * ud_Xc[i,j]
-            u_Y[i,j]    = u_Y[i,j]  * τ  +  OneMinusτ * u_Yc[i,j]
-            ud_Y[i,j]   = ud_Y[i,j] * τ  +  OneMinusτ * ud_Yc[i,j]
-            P[i,j]      = P[i,j]    * τ  +  OneMinusτ * Pc[i,j]
+            τ          = min( τ_u_X, τ_u_Y, τ_P, τ_dust )
+            OneMinusτ  = max( 1.0 - τ, 0.0 )
+
+            u_X[i,j]   = u_X[i,j]  * τ  +  OneMinusτ * u_Xc[i,j]
+            u_Y[i,j]   = u_Y[i,j]  * τ  +  OneMinusτ * u_Yc[i,j]
+            P[i,j]     = P[i,j]    * τ  +  OneMinusτ * Pc[i,j]
+
+            for bin in dN_dust
+                ud_X[bin,i,j] = ud_X[bin,i,j] * τ  +  OneMinusτ * ud_Xc[bin,i,j]
+                ud_Y[bin,i,j] = ud_Y[bin,i,j] * τ  +  OneMinusτ * ud_Yc[bin,i,j]
+            end
 
             # SECOND-ORDER SAFETY FALLBACK:
             if Shock[i,j] == Shock_HLL_and_PLM || P[i,j] ≤ P_floor || !isfinite(P[i,j]) 
-                u_X[i,j]  = u_Xc[i,j] 
-                u_Y[i,j]  = u_Yc[i,j]
-                P[i,j]    = Pc[i,j] 
+                u_X[i,j] = u_Xc[i,j] 
+                u_Y[i,j] = u_Yc[i,j]
+                P[i,j]   = Pc[i,j] 
 
-                ud_X[i,j] = ud_Xc[i,j] 
-                ud_Y[i,j] = ud_Yc[i,j]
+                for bin in dN_dust
+                    ud_X[bin,i,j] = ud_Xc[bin,i,j] 
+                    ud_Y[bin,i,j] = ud_Yc[bin,i,j]
+                end
             end    
-        end
-    end
+
+        end # End of i-loop 
+    end # End of j-loop 
+
 
     # Outermost cell j = N_Y:
     @threads for i in dN_X
         @inbounds begin
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
 
             if BC_Y_right == :Reflect
                 u_Xc_Np1  =   u_Xc[i,N_Y] 
                 u_Yc_Np1  = - u_Yc[i,N_Y]
                 Pc_Np1    =   Pc[i,N_Y]
-
-                ud_Xc_Np1 =   ud_Xc[i,N_Y] 
-                ud_Yc_Np1 = - ud_Yc[i,N_Y]
             elseif BC_Y_right == :Outflow
                 u_Xc_Np1  =   u_Xc[i,N_Y]
                 u_Yc_Np1  =   max( u_Yc[i,N_Y], 0.0 )
                 Pc_Np1    =   Pc[i,N_Y]
-
-                ud_Xc_Np1 =   ud_Xc[i,N_Y]
-                ud_Yc_Np1 =   max( ud_Yc[i,N_Y], 0.0 )
             elseif BC_Y_right == :Periodic 
                 u_Xc_Np1  =   u_Xc[i,1] 
                 u_Yc_Np1  =   u_Yc[i,1]
                 Pc_Np1    =   Pc[i,1]
-
-                ud_Xc_Np1 =   ud_Xc[i,1] 
-                ud_Yc_Np1 =   ud_Yc[i,1]
             else 
                 error("No boundary conditions assigned in the Y (or Z) direction at j = N_Y!")
             end
-            
+
             u_X[i,N_Y]  = q_j_m1_Y[N_Y] * u_Xc[i,N_Y-1]  +  q_j_0_Y[N_Y] * u_Xc[i,N_Y]  +  q_j_p1_Y[N_Y] * u_Xc_Np1
             τ_u_X       = SteepOrNot( u_X[i,N_Y], u_Xc[i,N_Y-1], u_Xc[i,N_Y], u_Xc_Np1 )
 
@@ -1453,20 +1984,48 @@ end
             P[i,N_Y]    = q_j_m1_Y[N_Y] * Pc[i,N_Y-1]  +  q_j_0_Y[N_Y] * Pc[i,N_Y]  +  q_j_p1_Y[N_Y] * Pc_Np1
             τ_P         = SteepOrNot( P[i,N_Y], Pc[i,N_Y-1], Pc[i,N_Y], Pc_Np1 )
 
-            ud_X[i,N_Y] = q_j_m1_Y[N_Y] * ud_Xc[i,N_Y-1]  +  q_j_0_Y[N_Y] * ud_Xc[i,N_Y]  +  q_j_p1_Y[N_Y] * ud_Xc_Np1  # Dust
-            τ_ud_X      = SteepOrNot( ud_X[i,N_Y], ud_Xc[i,N_Y-1], ud_Xc[i,N_Y], ud_Xc_Np1 )
+            ##########################################
+            #######                            #######
+            #######           D U S T          #######
+            #######                            #######
+            ########################################## 
 
-            ud_Y[i,N_Y] = q_j_m1_Y[N_Y] * ud_Yc[i,N_Y-1]  +  q_j_0_Y[N_Y] * ud_Yc[i,N_Y]  +  q_j_p1_Y[N_Y] * ud_Yc_Np1
-            τ_ud_Y      = SteepOrNot( ud_Y[i,N_Y], ud_Yc[i,N_Y-1], ud_Yc[i,N_Y], ud_Yc_Np1 )
+            τ_dust = 1.0  # Initialize minimum τ for dust 
+
+            for bin in dN_dust
+                if BC_Y_right == :Reflect
+                    ud_Xc_Np1 =   ud_Xc[bin,i,N_Y] 
+                    ud_Yc_Np1 = - ud_Yc[bin,i,N_Y]
+                elseif BC_Y_right == :Outflow
+                    ud_Xc_Np1 =   ud_Xc[bin,i,N_Y]
+                    ud_Yc_Np1 =   max( ud_Yc[bin,i,N_Y], 0.0 )
+                elseif BC_Y_right == :Periodic 
+                    ud_Xc_Np1 =   ud_Xc[bin,i,1] 
+                    ud_Yc_Np1 =   ud_Yc[bin,i,1]
+                end
+
+                ud_X[bin,i,N_Y] = q_j_m1_Y[N_Y] * ud_Xc[bin,i,N_Y-1]  +  q_j_0_Y[N_Y] * ud_Xc[bin,i,N_Y]  +  q_j_p1_Y[N_Y] * ud_Xc_Np1 
+                τ_ud_X          = SteepOrNot( ud_X[bin,i,N_Y], ud_Xc[bin,i,N_Y-1], ud_Xc[bin,i,N_Y], ud_Xc_Np1 )
+
+                ud_Y[bin,i,N_Y] = q_j_m1_Y[N_Y] * ud_Yc[bin,i,N_Y-1]  +  q_j_0_Y[N_Y] * ud_Yc[bin,i,N_Y]  +  q_j_p1_Y[N_Y] * ud_Yc_Np1
+                τ_ud_Y          = SteepOrNot( ud_Y[bin,i,N_Y], ud_Yc[bin,i,N_Y-1], ud_Yc[bin,i,N_Y], ud_Yc_Np1 )
+
+                # Pick minimum τ:
+                τ_dust = min( τ_dust, τ_ud_X, τ_ud_Y )
+            end
 
             # SAFETY CORRECT FOR STEEPENESS:
-            τ           = min( τ_u_X, τ_ud_X, τ_u_Y, τ_ud_Y, τ_P )
+            τ           = min( τ_u_X, τ_u_Y, τ_P, τ_dust )
             OneMinusτ   = max( 1.0 - τ, 0.0 )
-            u_X[i,N_Y]  = u_X[i,N_Y]  * τ  +  OneMinusτ * u_Xc[i,N_Y]
-            ud_X[i,N_Y] = ud_X[i,N_Y] * τ  +  OneMinusτ * ud_Xc[i,N_Y]
-            u_Y[i,N_Y]  = u_Y[i,N_Y]  * τ  +  OneMinusτ * u_Yc[i,N_Y]
-            ud_Y[i,N_Y] = ud_Y[i,N_Y] * τ  +  OneMinusτ * ud_Yc[i,N_Y]
-            P[i,N_Y]    = P[i,N_Y]    * τ  +  OneMinusτ * Pc[i,N_Y]
+
+            u_X[i,N_Y]  = u_X[i,N_Y] * τ  +  OneMinusτ * u_Xc[i,N_Y]
+            u_Y[i,N_Y]  = u_Y[i,N_Y] * τ  +  OneMinusτ * u_Yc[i,N_Y]
+            P[i,N_Y]    = P[i,N_Y]   * τ  +  OneMinusτ * Pc[i,N_Y]
+
+            for bin in dN_dust
+                ud_X[bin,i,N_Y] = ud_X[bin,i,N_Y] * τ  +  OneMinusτ * ud_Xc[bin,i,N_Y]
+                ud_Y[bin,i,N_Y] = ud_Y[bin,i,N_Y] * τ  +  OneMinusτ * ud_Yc[bin,i,N_Y]
+            end
 
             # SECOND-ORDER SAFETY FALLBACK:
             if Shock[i,N_Y] == Shock_HLL_and_PLM || P[i,N_Y] ≤ P_floor || !isfinite(P[i,N_Y]) 
@@ -1474,13 +2033,16 @@ end
                 u_Y[i,N_Y]  = u_Yc[i,N_Y]
                 P[i,N_Y]    = Pc[i,N_Y] 
 
-                ud_X[i,N_Y] = ud_Xc[i,N_Y] 
-                ud_Y[i,N_Y] = ud_Yc[i,N_Y]
+                for bin in dN_dust
+                    ud_X[bin,i,N_Y] = ud_Xc[bin,i,N_Y] 
+                    ud_Y[bin,i,N_Y] = ud_Yc[bin,i,N_Y]
+                end
             end    
-        end
-    end
 
-    return nothing 
+        end # End of inbounds 
+    end # End of i-loop 
+
+    return nothing
 end
 
 
@@ -1491,21 +2053,23 @@ end
                            u_Xg::AbstractMatrix{Float64},
                            u_Yg::AbstractMatrix{Float64},
                              Pg::AbstractMatrix{Float64},
-                            ρdg::AbstractMatrix{Float64},
-                          ud_Xg::AbstractMatrix{Float64},
-                          ud_Yg::AbstractMatrix{Float64},
+                        e_dualg::AbstractMatrix{Float64},
+                            ρdg::AbstractArray{Float64, 3},
+                          ud_Xg::AbstractArray{Float64, 3},
+                          ud_Yg::AbstractArray{Float64, 3},
                       BC_X_left::Symbol = :Reflect,
                      BC_X_right::Symbol = :Outflow,
                       BC_Y_left::Symbol = :Reflect, 
                      BC_Y_right::Symbol = :Outflow )
 
-    N_Xg, N_Yg = size( ρg )     # Size of ghost-padded arrays  
-    N_X        = N_Xg - 2 * ng  # Number of physical cells in X-direction 
-    N_Y        = N_Yg - 2 * ng  # Number of physical cells in Y-direction
-    i_int_min  = ng + 1         # First interior index in X-direction 
-    i_int_max  = ng + N_X       # Last interior index in X-direction
-    j_int_min  = ng + 1         # First interior index in Y-direction 
-    j_int_max  = ng + N_Y       # Last interior index in Y-direction
+    N_dust, N_Xg, N_Yg = size( ρdg )    # Size of ghost-padded arrays  
+    N_X                = N_Xg - 2 * ng  # Number of physical cells in X-direction 
+    N_Y                = N_Yg - 2 * ng  # Number of physical cells in Y-direction
+    i_int_min          = ng + 1         # First interior index in X-direction 
+    i_int_max          = ng + N_X       # Last interior index in X-direction
+    j_int_min          = ng + 1         # First interior index in Y-direction 
+    j_int_max          = ng + N_Y       # Last interior index in Y-direction
+    dN_dust            = 1:N_dust 
 
     @inbounds begin
         ##########################################                       
@@ -1515,43 +2079,51 @@ end
         if BC_X_left == :Reflect 
             for k in dng
                 # Extrapolate density, pressure, Y-velocity:
-                ρg[ng+1-k, :]    .=    ρg[ng+k, :]
-                Pg[ng+1-k, :]    .=    Pg[ng+k, :]
-                u_Yg[ng+1-k, :]  .=    u_Yg[ng+k, :]
+                ρg[ng+1-k, :]      .=    ρg[ng+k, :]
+                Pg[ng+1-k, :]      .=    Pg[ng+k, :]
+                e_dualg[ng+1-k, :] .=    e_dualg[ng+k, :]
+                u_Xg[ng+1-k, :]    .= .- u_Xg[ng+k, :] 
+                u_Yg[ng+1-k, :]    .=    u_Yg[ng+k, :]
 
-                ρdg[ng+1-k, :]   .=    ρdg[ng+k, :]
-                ud_Yg[ng+1-k, :] .=    ud_Yg[ng+k, :]
-                # Reflect X-velocity:
-                u_Xg[ng+1-k, :]  .= .- u_Xg[ng+k, :] 
-                ud_Xg[ng+1-k, :] .= .- ud_Xg[ng+k, :] 
+                for bin in dN_dust
+                    ρdg[bin, ng+1-k, :]    .=    ρdg[bin, ng+k, :]
+                    ud_Yg[bin, ng+1-k, :]  .=    ud_Yg[bin, ng+k, :]
+                    ud_Xg[bin, ng+1-k, :]  .= .- ud_Xg[bin, ng+k, :]
+                end 
             end
         elseif BC_X_left == :Outflow 
             for k in dng
                 # Extrapolate density, pressure, Y-velocity:
-                ρg[ng+1-k, :]    .=  ρg[ng+k, :]
-                Pg[ng+1-k, :]    .=  Pg[ng+k, :]
-                u_Yg[ng+1-k, :]  .=  u_Yg[ng+k, :]
+                ρg[ng+1-k, :]      .=  ρg[ng+k, :]
+                Pg[ng+1-k, :]      .=  Pg[ng+k, :]
+                e_dualg[ng+1-k, :] .=  e_dualg[ng+k, :]
+                u_Xg[ng+1-k, :]    .=  min.( u_Xg[ng+k, :], 0.0 )
+                u_Yg[ng+1-k, :]    .=  u_Yg[ng+k, :]
 
-                ρdg[ng+1-k, :]   .=  ρdg[ng+k, :]
-                ud_Yg[ng+1-k, :] .=  ud_Yg[ng+k, :]
-                # Only allow outflow (i.e. u_X ≤ 0.0):
-                u_Xg[ng+1-k, :]  .=  min.( u_Xg[ng+k, :], 0.0 )
-                ud_Xg[ng+1-k, :] .=  min.( ud_Xg[ng+k, :], 0.0 )
+                for bin in dN_dust
+                    ρdg[bin, ng+1-k, :]    .=  ρdg[bin, ng+k, :]
+                    ud_Yg[bin, ng+1-k, :]  .=  ud_Yg[bin, ng+k, :]
+                    ud_Xg[bin, ng+1-k, :]  .=  min.( ud_Xg[bin, ng+k, :], 0.0 )
+                end
             end
         elseif BC_X_left == :Periodic
             # Left ghost cells:
             left_ghost  = 1:ng 
             # Left ghost cells should look like the last interior cells:
             left_source = (i_int_max - ng + 1):i_int_max
-            # Periodic BCs:
-            ρg[left_ghost, :]    .= ρg[left_source, :]
-            Pg[left_ghost, :]    .= Pg[left_source, :]
-            u_Xg[left_ghost, :]  .= u_Xg[left_source, :]
-            u_Yg[left_ghost, :]  .= u_Yg[left_source, :]
 
-            ρdg[left_ghost, :]   .= ρdg[left_source, :]
-            ud_Xg[left_ghost, :] .= ud_Xg[left_source, :]
-            ud_Yg[left_ghost, :] .= ud_Yg[left_source, :]
+            # Periodic BCs:
+            ρg[left_ghost, :]      .= ρg[left_source, :]
+            Pg[left_ghost, :]      .= Pg[left_source, :]
+            e_dualg[left_ghost, :] .= e_dualg[left_source, :]
+            u_Xg[left_ghost, :]    .= u_Xg[left_source, :]
+            u_Yg[left_ghost, :]    .= u_Yg[left_source, :]
+
+            for bin in dN_dust
+                ρdg[bin, left_ghost, :]   .= ρdg[bin, left_source, :]
+                ud_Xg[bin, left_ghost, :] .= ud_Xg[bin, left_source, :]
+                ud_Yg[bin, left_ghost, :] .= ud_Yg[bin, left_source, :]
+            end
         end
 
         ##############################################                      
@@ -1561,41 +2133,49 @@ end
         if BC_X_right == :Reflect 
             for k in dng
                 # Extrapolate density, pressure, Y-velocity:
-                ρg[i_int_max + k, :]    .=    ρg[i_int_max + 1 - k, :]
-                Pg[i_int_max + k, :]    .=    Pg[i_int_max + 1 - k, :]
-                u_Yg[i_int_max + k, :]  .=    u_Yg[i_int_max + 1 - k, :]
+                ρg[i_int_max + k, :]      .=    ρg[i_int_max + 1 - k, :]
+                Pg[i_int_max + k, :]      .=    Pg[i_int_max + 1 - k, :]
+                e_dualg[i_int_max + k, :] .=    e_dualg[i_int_max + 1 - k, :]
+                u_Xg[i_int_max + k, :]    .= .- u_Xg[i_int_max + 1 - k, :]
+                u_Yg[i_int_max + k, :]    .=    u_Yg[i_int_max + 1 - k, :]
 
-                ρdg[i_int_max + k, :]   .=    ρdg[i_int_max + 1 - k, :]
-                ud_Yg[i_int_max + k, :] .=    ud_Yg[i_int_max + 1 - k, :]
-                # Reflect X-velocity: 
-                u_Xg[i_int_max + k, :]  .= .- u_Xg[i_int_max + 1 - k, :]
-                ud_Xg[i_int_max + k, :] .= .- ud_Xg[i_int_max + 1 - k, :]
+                for bin in dN_dust
+                    ρdg[bin, i_int_max + k, :]     .=    ρdg[bin, i_int_max + 1 - k, :]
+                    ud_Yg[bin, i_int_max + k, :]   .=    ud_Yg[bin, i_int_max + 1 - k, :]
+                    ud_Xg[bin, i_int_max + k, :]   .= .- ud_Xg[bin, i_int_max + 1 - k, :]
+                end
             end
         elseif BC_X_right == :Outflow 
             # Extrapolate density, pressure, Y-velocity:
-            ρg[i_int_max+1:i_int_max+ng, :]    .= ρg[i_int_max:i_int_max, :]
-            Pg[i_int_max+1:i_int_max+ng, :]    .= Pg[i_int_max:i_int_max, :]
-            u_Yg[i_int_max+1:i_int_max+ng, :]  .= u_Yg[i_int_max:i_int_max, :]
+            ρg[i_int_max+1:i_int_max+ng, :]      .= ρg[i_int_max:i_int_max, :]
+            Pg[i_int_max+1:i_int_max+ng, :]      .= Pg[i_int_max:i_int_max, :]
+            e_dualg[i_int_max+1:i_int_max+ng, :] .= e_dualg[i_int_max:i_int_max, :]
+            u_Xg[i_int_max+1:i_int_max+ng, :]    .= max.( u_Xg[i_int_max:i_int_max, :], 0.0 )
+            u_Yg[i_int_max+1:i_int_max+ng, :]    .= u_Yg[i_int_max:i_int_max, :]
 
-            ρdg[i_int_max+1:i_int_max+ng, :]   .= ρdg[i_int_max:i_int_max, :]
-            ud_Yg[i_int_max+1:i_int_max+ng, :] .= ud_Yg[i_int_max:i_int_max, :]
-            # Only allow outflow (i.e u_X ≥ 0.0):
-            u_Xg[i_int_max+1:i_int_max+ng, :]  .= max.( u_Xg[i_int_max:i_int_max, :], 0.0 )
-            ud_Xg[i_int_max+1:i_int_max+ng, :] .= max.( ud_Xg[i_int_max:i_int_max, :], 0.0 )
+            for bin in dN_dust
+                ρdg[bin, i_int_max+1:i_int_max+ng, :]     .= ρdg[bin, i_int_max:i_int_max, :]
+                ud_Yg[bin, i_int_max+1:i_int_max+ng, :]   .= ud_Yg[bin, i_int_max:i_int_max, :]
+                ud_Xg[bin, i_int_max+1:i_int_max+ng, :]   .= max.( ud_Xg[bin, i_int_max:i_int_max, :], 0.0 )
+            end
         elseif BC_X_right == :Periodic 
             # Right ghost cells:
             right_ghost  = (i_int_max + 1):(i_int_max + ng)
             # Right ghost cells should look like the first interior cells:
             right_source = i_int_min:(i_int_min + ng - 1)
-            # Periodic BCs:
-            ρg[right_ghost, :]    .= ρg[right_source, :]
-            Pg[right_ghost, :]    .= Pg[right_source, :]
-            u_Xg[right_ghost, :]  .= u_Xg[right_source, :]
-            u_Yg[right_ghost, :]  .= u_Yg[right_source, :]
 
-            ρdg[right_ghost, :]   .= ρdg[right_source, :]
-            ud_Xg[right_ghost, :] .= ud_Xg[right_source, :]
-            ud_Yg[right_ghost, :] .= ud_Yg[right_source, :]
+            # Periodic BCs:
+            ρg[right_ghost, :]      .= ρg[right_source, :]
+            Pg[right_ghost, :]      .= Pg[right_source, :]
+            e_dualg[right_ghost, :] .= e_dualg[right_source, :]
+            u_Xg[right_ghost, :]    .= u_Xg[right_source, :]
+            u_Yg[right_ghost, :]    .= u_Yg[right_source, :]
+
+            for bin in dN_dust
+                ρdg[bin, right_ghost, :]   .= ρdg[bin, right_source, :]
+                ud_Xg[bin, right_ghost, :] .= ud_Xg[bin, right_source, :]
+                ud_Yg[bin, right_ghost, :] .= ud_Yg[bin, right_source, :]
+            end
         end  
 
         ##########################################
@@ -1605,42 +2185,50 @@ end
         if BC_Y_left == :Reflect
             for k in dng
                 # Extrapolate density, pressure, X-velocity:
-                ρg[:, ng+1-k]    .=    ρg[:, ng+k]
-                Pg[:, ng+1-k]    .=    Pg[:, ng+k]
-                u_Xg[:, ng+1-k]  .=    u_Xg[:, ng+k]
+                ρg[:, ng+1-k]      .=    ρg[:, ng+k]
+                Pg[:, ng+1-k]      .=    Pg[:, ng+k]
+                e_dualg[:, ng+1-k] .=    e_dualg[:, ng+k]
+                u_Xg[:, ng+1-k]    .=    u_Xg[:, ng+k]
+                u_Yg[:, ng+1-k]    .= .- u_Yg[:, ng+k]
 
-                ρdg[:, ng+1-k]   .=    ρdg[:, ng+k]
-                ud_Xg[:, ng+1-k] .=    ud_Xg[:, ng+k]
-                # Reflect Y-velocity:
-                u_Yg[:, ng+1-k]  .= .- u_Yg[:, ng+k]
-                ud_Yg[:, ng+1-k] .= .- ud_Yg[:, ng+k]
+                for bin in dN_dust
+                    ρdg[bin, :, ng+1-k]   .=    ρdg[bin, :, ng+k]
+                    ud_Xg[bin, :, ng+1-k] .=    ud_Xg[bin, :, ng+k]
+                    ud_Yg[bin, :, ng+1-k] .= .- ud_Yg[bin, :, ng+k]
+                end
             end
         elseif BC_Y_left == :Outflow
             for k in dng
-                ρg[:, ng+1-k]    .=  ρg[:, ng+k]
-                Pg[:, ng+1-k]    .=  Pg[:, ng+k]
-                u_Xg[:, ng+1-k]  .=  u_Xg[:, ng+k]
+                ρg[:, ng+1-k]      .=  ρg[:, ng+k]
+                Pg[:, ng+1-k]      .=  Pg[:, ng+k]
+                e_dualg[:, ng+1-k] .=  e_dualg[:, ng+k]
+                u_Xg[:, ng+1-k]    .=  u_Xg[:, ng+k]
+                u_Yg[:, ng+1-k]    .=  min.( u_Yg[:, ng+k], 0.0 )
 
-                ρdg[:, ng+1-k]   .=  ρdg[:, ng+k]
-                ud_Xg[:, ng+1-k] .=  ud_Xg[:, ng+k]
-                # Forbid inflow (i.e. u_Y ≤ 0):
-                u_Yg[:, ng+1-k]  .=  min.( u_Yg[:, ng+k], 0.0 )
-                ud_Yg[:, ng+1-k] .=  min.( ud_Yg[:, ng+k], 0.0 )
+                for bin in dN_dust
+                    ρdg[bin, :, ng+1-k]   .=  ρdg[bin, :, ng+k]
+                    ud_Xg[bin, :, ng+1-k] .=  ud_Xg[bin, :, ng+k]
+                    ud_Yg[bin, :, ng+1-k] .=  min.( ud_Yg[bin, :, ng+k], 0.0 )
+                end
             end
         elseif BC_Y_left == :Periodic
             # Left ghost cells:
             left_ghost  = 1:ng
             # Left ghost cells should look like the last interior cells:
-            left_source = (j_int_max - ng + 1):j_int_max  
-            # Periodic BCs:
-            ρg[:, left_ghost]    .= ρg[:, left_source]
-            Pg[:, left_ghost]    .= Pg[:, left_source]
-            u_Xg[:, left_ghost]  .= u_Xg[:, left_source]
-            u_Yg[:, left_ghost]  .= u_Yg[:, left_source]
+            left_source = (j_int_max - ng + 1):j_int_max 
 
-            ρdg[:, left_ghost]   .= ρdg[:, left_source]
-            ud_Xg[:, left_ghost] .= ud_Xg[:, left_source]
-            ud_Yg[:, left_ghost] .= ud_Yg[:, left_source]
+            # Periodic BCs:
+            ρg[:, left_ghost]      .= ρg[:, left_source]
+            Pg[:, left_ghost]      .= Pg[:, left_source]
+            e_dualg[:, left_ghost] .= e_dualg[:, left_source]
+            u_Xg[:, left_ghost]    .= u_Xg[:, left_source]
+            u_Yg[:, left_ghost]    .= u_Yg[:, left_source]
+
+            for bin in dN_dust 
+                ρdg[bin, :, left_ghost]   .= ρdg[bin, :, left_source]
+                ud_Xg[bin, :, left_ghost] .= ud_Xg[bin, :, left_source]
+                ud_Yg[bin, :, left_ghost] .= ud_Yg[bin, :, left_source]
+            end
         end
 
         ##############################################
@@ -1650,46 +2238,54 @@ end
         if BC_Y_right == :Reflect
             for k in dng
                 # # Extrapolate density, pressure, X-velocity:
-                ρg[:, j_int_max + k]    .=    ρg[:, j_int_max + 1 - k]
-                Pg[:, j_int_max + k]    .=    Pg[:, j_int_max + 1 - k]
-                u_Xg[:, j_int_max + k]  .=    u_Xg[:, j_int_max + 1 - k]
+                ρg[:, j_int_max + k]      .=    ρg[:, j_int_max + 1 - k]
+                Pg[:, j_int_max + k]      .=    Pg[:, j_int_max + 1 - k]
+                e_dualg[:, j_int_max + k] .=    e_dualg[:, j_int_max + 1 - k]
+                u_Xg[:, j_int_max + k]    .=    u_Xg[:, j_int_max + 1 - k]
+                u_Yg[:, j_int_max + k]    .= .- u_Yg[:, j_int_max + 1 - k]
 
-                ρdg[:, j_int_max + k]   .=    ρdg[:, j_int_max + 1 - k]
-                ud_Xg[:, j_int_max + k] .=    ud_Xg[:, j_int_max + 1 - k]
-                # Reflect Y-velocity:
-                u_Yg[:, j_int_max + k]  .= .- u_Yg[:, j_int_max + 1 - k]
-                ud_Yg[:, j_int_max + k] .= .- ud_Yg[:, j_int_max + 1 - k]
+                for bin in dN_dust
+                    ρdg[bin, :, j_int_max + k]   .=    ρdg[bin, :, j_int_max + 1 - k]
+                    ud_Xg[bin, :, j_int_max + k] .=    ud_Xg[bin, :, j_int_max + 1 - k]
+                    ud_Yg[bin, :, j_int_max + k] .= .- ud_Yg[bin, :, j_int_max + 1 - k]
+                end
             end
         elseif BC_Y_right == :Outflow
             # Extrapolate density, pressure, X-velocity:
-            ρg[:, j_int_max+1:j_int_max+ng]    .= ρg[:, j_int_max:j_int_max]
-            Pg[:, j_int_max+1:j_int_max+ng]    .= Pg[:, j_int_max:j_int_max]
-            u_Xg[:, j_int_max+1:j_int_max+ng]  .= u_Xg[:, j_int_max:j_int_max]
+            ρg[:, j_int_max+1:j_int_max+ng]      .= ρg[:, j_int_max:j_int_max]
+            Pg[:, j_int_max+1:j_int_max+ng]      .= Pg[:, j_int_max:j_int_max]
+            e_dualg[:, j_int_max+1:j_int_max+ng] .= e_dualg[:, j_int_max:j_int_max]
+            u_Xg[:, j_int_max+1:j_int_max+ng]    .= u_Xg[:, j_int_max:j_int_max]
+            u_Yg[:, j_int_max+1:j_int_max+ng]    .= max.( u_Yg[:, j_int_max:j_int_max], 0.0 )
 
-            ρdg[:, j_int_max+1:j_int_max+ng]   .= ρdg[:, j_int_max:j_int_max]
-            ud_Xg[:, j_int_max+1:j_int_max+ng] .= ud_Xg[:, j_int_max:j_int_max]
-            # Only allow outflow (u_Y ≥ 0.0):
-            u_Yg[:, j_int_max+1:j_int_max+ng]  .= max.( u_Yg[:, j_int_max:j_int_max], 0.0 )
-            ud_Yg[:, j_int_max+1:j_int_max+ng] .= max.( ud_Yg[:, j_int_max:j_int_max], 0.0 )
+            for bin in dN_dust 
+                ρdg[bin, :, j_int_max+1:j_int_max+ng]     .= ρdg[bin, :, j_int_max:j_int_max]
+                ud_Xg[bin, :, j_int_max+1:j_int_max+ng]   .= ud_Xg[bin, :, j_int_max:j_int_max]
+                ud_Yg[bin, :, j_int_max+1:j_int_max+ng]   .= max.( ud_Yg[bin, :, j_int_max:j_int_max], 0.0 )
+            end
         elseif BC_Y_right == :Periodic
             # Right ghost cells:
             right_ghost  = (j_int_max + 1):(j_int_max + ng)
             # Right ghost cells should look like the first interior cells:
             right_source = j_int_min:(j_int_min + ng - 1)
-            # Periodic BCs:
-            ρg[:, right_ghost]    .= ρg[:, right_source]
-            Pg[:, right_ghost]    .= Pg[:, right_source]
-            u_Xg[:, right_ghost]  .= u_Xg[:, right_source]
-            u_Yg[:, right_ghost]  .= u_Yg[:, right_source]
 
-            ρdg[:, right_ghost]   .= ρdg[:, right_source]
-            ud_Xg[:, right_ghost] .= ud_Xg[:, right_source]
-            ud_Yg[:, right_ghost] .= ud_Yg[:, right_source]
+            # Periodic BCs:
+            ρg[:, right_ghost]      .= ρg[:, right_source]
+            Pg[:, right_ghost]      .= Pg[:, right_source]
+            e_dualg[:, right_ghost] .= e_dualg[:, right_source]
+            u_Xg[:, right_ghost]    .= u_Xg[:, right_source]
+            u_Yg[:, right_ghost]    .= u_Yg[:, right_source]
+
+            for bin in dN_dust 
+                ρdg[bin, :, right_ghost]   .= ρdg[bin, :, right_source]
+                ud_Xg[bin, :, right_ghost] .= ud_Xg[bin, :, right_source]
+                ud_Yg[bin, :, right_ghost] .= ud_Yg[bin, :, right_source]
+            end
         end
-        
+
     end # End of inbounds 
 
-    return nothing
+    return nothing 
 end
 
 
@@ -1697,37 +2293,42 @@ end
     of primitive variables W ∈ (ρ, u, P), using
     a third-order accurate WENO3 approximation,
     or lower-order fall back methods. """
-function UpdateInterfaceValues_X!( ρ_L_X::AbstractMatrix{Float64},  # Left interface value of ρ
-                                   ρ_R_X::AbstractMatrix{Float64},  # Right interface value of ρ 
-                                   P_L_X::AbstractMatrix{Float64},  # Left interface value of P
-                                   P_R_X::AbstractMatrix{Float64},  # Right interface value of P 
-                                 u_X_L_X::AbstractMatrix{Float64},  # Left interface value of u_X
-                                 u_X_R_X::AbstractMatrix{Float64},  # Right interface value of u_X 
-                                 u_Y_L_X::AbstractMatrix{Float64},  # Left interface value of u_Y
-                                 u_Y_R_X::AbstractMatrix{Float64},  # Right interface value of u_Y 
-                                  ρd_L_X::AbstractMatrix{Float64},  # Left interface value of ρd
-                                  ρd_R_X::AbstractMatrix{Float64},  # Right interface value of ρd
-                                ud_X_L_X::AbstractMatrix{Float64},  # Left interface value of ud_X
-                                ud_X_R_X::AbstractMatrix{Float64},  # Right interface value of ud_X 
-                                ud_Y_L_X::AbstractMatrix{Float64},  # Left interface value of ud_Y
-                                ud_Y_R_X::AbstractMatrix{Float64},  # Right interface value of ud_Y 
-                                      ρg::AbstractMatrix{Float64},  # Ghost-padded ρ    (size N_X + 4 × N_Y + 4)
-                                      Pg::AbstractMatrix{Float64},  # Ghost-padded P    (size N_X + 4 × N_Y + 4)
-                                    u_Xg::AbstractMatrix{Float64},  # Ghost-padded u_X  (size N_X + 4 × N_Y + 4)
-                                    u_Yg::AbstractMatrix{Float64},  # Ghost-padded u_Y  (size N_X + 4 × N_Y + 4)
-                                     ρdg::AbstractMatrix{Float64},  # Ghost-padded ρd   (size N_X + 4 × N_Y + 4)
-                                   ud_Xg::AbstractMatrix{Float64},  # Ghost-padded ud_X (size N_X + 4 × N_Y + 4)
-                                   ud_Yg::AbstractMatrix{Float64},  # Ghost-padded ud_Y (size N_X + 4 × N_Y + 4)
-                                      Xg::AbstractVector{Float64},  # Ghost-padded X-interfaces                     (length N_X + 5)
-                                   XCoMg::AbstractVector{Float64},  # Ghost-padded X center-of-mass                 (length N_X + 4)
-                                   Shock::AbstractMatrix{Int},      # Shock indicator
-                             w_plus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{i,1}
-                            w_minus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{i,1}
+function UpdateInterfaceValues_X!( ρ_L_X::AbstractMatrix{Float64},    # Left interface value of ρ
+                                   ρ_R_X::AbstractMatrix{Float64},    # Right interface value of ρ 
+                                   P_L_X::AbstractMatrix{Float64},    # Left interface value of P
+                                   P_R_X::AbstractMatrix{Float64},    # Right interface value of P 
+                              e_dual_L_X::AbstractMatrix{Float64},    # Left interface value of e_dual
+                              e_dual_R_X::AbstractMatrix{Float64},    # Right interface value of e_dual
+                                 u_X_L_X::AbstractMatrix{Float64},    # Left interface value of u_X
+                                 u_X_R_X::AbstractMatrix{Float64},    # Right interface value of u_X 
+                                 u_Y_L_X::AbstractMatrix{Float64},    # Left interface value of u_Y
+                                 u_Y_R_X::AbstractMatrix{Float64},    # Right interface value of u_Y 
+                                  ρd_L_X::AbstractArray{Float64, 3},  # Left interface value of ρd
+                                  ρd_R_X::AbstractArray{Float64, 3},  # Right interface value of ρd
+                                ud_X_L_X::AbstractArray{Float64, 3},  # Left interface value of ud_X
+                                ud_X_R_X::AbstractArray{Float64, 3},  # Right interface value of ud_X 
+                                ud_Y_L_X::AbstractArray{Float64, 3},  # Left interface value of ud_Y
+                                ud_Y_R_X::AbstractArray{Float64, 3},  # Right interface value of ud_Y 
+                                      ρg::AbstractMatrix{Float64},    # Ghost-padded ρ      (size N_X + 4 × N_Y + 4)
+                                      Pg::AbstractMatrix{Float64},    # Ghost-padded P      (size N_X + 4 × N_Y + 4)
+                                 e_dualg::AbstractMatrix{Float64},    # Ghost-padded e_dual (size N_X + 4 × N_Y + 4)
+                                    u_Xg::AbstractMatrix{Float64},    # Ghost-padded u_X    (size N_X + 4 × N_Y + 4)
+                                    u_Yg::AbstractMatrix{Float64},    # Ghost-padded u_Y    (size N_X + 4 × N_Y + 4)
+                                     ρdg::AbstractArray{Float64, 3},  # Ghost-padded ρd     (size N_X + 4 × N_Y + 4)
+                                   ud_Xg::AbstractArray{Float64, 3},  # Ghost-padded ud_X   (size N_X + 4 × N_Y + 4)
+                                   ud_Yg::AbstractArray{Float64, 3},  # Ghost-padded ud_Y   (size N_X + 4 × N_Y + 4)
+                                      Xg::AbstractVector{Float64},    # Ghost-padded X-interfaces                     (length N_X + 5)
+                                   XCoMg::AbstractVector{Float64},    # Ghost-padded X center-of-mass                 (length N_X + 4)
+                                   Shock::AbstractMatrix{Int},        # Shock indicator
+                             w_plus_i_p1::AbstractVector{Float64},    # WENO3 weights w⁺_{i,1}
+                            w_minus_i_p1::AbstractVector{Float64}     # WENO3 weights w⁻_{i,1}
                                       )
 
-    # Grid size:
-    N_X = size( ρg, 1 )  -  2 * ng
-    N_Y = size( ρg, 2 )  -  2 * ng
+    # Grid size & intervals:
+    N_X     = size( ρg, 1 )  -  2 * ng
+    N_Y     = size( ρg, 2 )  -  2 * ng
+    N_dust  = size( ρdg, 1 )
+    dN_dust = 1:N_dust 
 
     @threads for j in 1:N_Y
         j0 = j + ng  # Ghost-padded j-index 
@@ -1752,16 +2353,17 @@ function UpdateInterfaceValues_X!( ρ_L_X::AbstractMatrix{Float64},  # Left inte
             Shock_i   = Shock[icl,j]
             Shock_im1 = Shock[im1,j]
 
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
+
             ###### DENSITY ######################
             ρ_im2   = ρg[k-1, j0]
             ρ_im1   = ρg[k,   j0]
             ρ_i     = ρg[k+1, j0]
             ρ_ip1   = ρg[k+2, j0]
-
-            ρd_im2   = ρdg[k-1, j0]
-            ρd_im1   = ρdg[k,   j0]
-            ρd_i     = ρdg[k+1, j0]
-            ρd_ip1   = ρdg[k+2, j0]
 
             # Get candidate left & right ρ at interface i-1/2,
             # along with maximum reconstruction order:
@@ -1769,18 +2371,11 @@ function UpdateInterfaceValues_X!( ρ_L_X::AbstractMatrix{Float64},  # Left inte
                                                                X_im1, X_i,   X_ip1,
                                                                XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
                                                                Shock_i, Shock_im1,
-                                                               N_X, w_plus_i_p1[im1], w_minus_i_p1[icl], 
+                                                               N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
                                                                true, Int8(3) ) 
 
-            ρdL_X, ρdR_X, ReconstructionOrder_ρd = Get_QL_and_QR( ρd_im2, ρd_im1, ρd_i, ρd_ip1,
-                                                                  X_im1, X_i,   X_ip1,
-                                                                  XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
-                                                                  Shock_i, Shock_im1,
-                                                                  N_X, w_plus_i_p1[im1], w_minus_i_p1[icl], 
-                                                                  true, Int8(3) ) 
-
             # Set maximum allowed reconstruction order for the interface:
-            MaxReconstructionOrder = min( ReconstructionOrder_ρ, ReconstructionOrder_ρd )
+            MaxReconstructionOrder = ReconstructionOrder_ρ
 
             ###### PRESSURE #####################
             P_im2   = Pg[k-1, j0]
@@ -1800,16 +2395,29 @@ function UpdateInterfaceValues_X!( ρ_L_X::AbstractMatrix{Float64},  # Left inte
             # Update maximum allowed reconstruction order for the interface:
             MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_P )
 
+            ###### DUAL INTERNAL ENERGY DENSITY #####################
+            e_im2   = e_dualg[k-1, j0]
+            e_im1   = e_dualg[k,   j0]
+            e_i     = e_dualg[k+1, j0]
+            e_ip1   = e_dualg[k+2, j0]
+
+            # Get candidate left & right e_dual at interface i-1/2,
+            # along with maximum reconstruction order:
+            eL_X, eR_X, ReconstructionOrder_e = Get_QL_and_QR( e_im2, e_im1, e_i, e_ip1,
+                                                               X_im1, X_i,   X_ip1,
+                                                               XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
+                                                               Shock_i, Shock_im1,
+                                                               N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
+                                                               true, Int8(3) ) 
+
+            # Update maximum allowed reconstruction order for the interface:
+            MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_e )
+
             ###### X VELOCITY ###################
             u_X_im2  = u_Xg[k-1, j0]
             u_X_im1  = u_Xg[k,   j0]
             u_X_i    = u_Xg[k+1, j0]
             u_X_ip1  = u_Xg[k+2, j0]
-
-            ud_X_im2 = ud_Xg[k-1, j0]
-            ud_X_im1 = ud_Xg[k,   j0]
-            ud_X_i   = ud_Xg[k+1, j0]
-            ud_X_ip1 = ud_Xg[k+2, j0]
 
             # Get candidate left & right u_X at interface i-1/2,
             # along with maximum reconstruction order:
@@ -1820,26 +2428,14 @@ function UpdateInterfaceValues_X!( ρ_L_X::AbstractMatrix{Float64},  # Left inte
                                                                     N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
                                                                     false, Int8(3) ) 
 
-            udX_L_X, udX_R_X, ReconstructionOrder_udX = Get_QL_and_QR( ud_X_im2, ud_X_im1, ud_X_i, ud_X_ip1,
-                                                                       X_im1, X_i,   X_ip1,
-                                                                       XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
-                                                                       Shock_i, Shock_im1,
-                                                                       N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
-                                                                       false, Int8(3) ) 
-
             # Update maximum allowed reconstruction order for the interface:
-            MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_uX, ReconstructionOrder_udX )
+            MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_uX )
 
             ###### Y VELOCITY ###################
             u_Y_im2  = u_Yg[k-1, j0]
             u_Y_im1  = u_Yg[k,   j0]
             u_Y_i    = u_Yg[k+1, j0]
             u_Y_ip1  = u_Yg[k+2, j0]
-
-            ud_Y_im2 = ud_Yg[k-1, j0]
-            ud_Y_im1 = ud_Yg[k,   j0]
-            ud_Y_i   = ud_Yg[k+1, j0]
-            ud_Y_ip1 = ud_Yg[k+2, j0]
 
             # Get candidate left & right u_Y at interface i-1/2,
             # along with maximum reconstruction order:
@@ -1850,94 +2446,175 @@ function UpdateInterfaceValues_X!( ρ_L_X::AbstractMatrix{Float64},  # Left inte
                                                                     N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
                                                                     false, Int8(3) ) 
 
-            udY_L_X, udY_R_X, ReconstructionOrder_udY = Get_QL_and_QR( ud_Y_im2, ud_Y_im1, ud_Y_i, ud_Y_ip1,
-                                                                       X_im1, X_i,   X_ip1,
-                                                                       XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
-                                                                       Shock_i, Shock_im1,
-                                                                       N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
-                                                                       false, Int8(3) ) 
-
             # Update maximum allowed reconstruction order for the interface:
-            MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_uY, ReconstructionOrder_udY )
+            MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_uY )
 
-            # Next check if the reconstructon order for all primitives are consistent. If not,
-            # re-do the ones that have too high reconstruction order:
-            
+            ##########################################
+            #######                            #######
+            #######           D U S T          #######
+            #######                            #######
+            ########################################## 
+
+            for bin in dN_dust 
+                ###### DUST DENSITY ######################
+                ρd_im2   = ρdg[bin, k-1, j0]
+                ρd_im1   = ρdg[bin, k,   j0]
+                ρd_i     = ρdg[bin, k+1, j0]
+                ρd_ip1   = ρdg[bin, k+2, j0]
+
+                # Get maximum allowed reconstruction order for this bin:
+                _, _, ReconstructionOrder_ρd = Get_QL_and_QR( ρd_im2, ρd_im1, ρd_i, ρd_ip1,
+                                                              X_im1, X_i,   X_ip1,
+                                                              XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
+                                                              Shock_i, Shock_im1,
+                                                              N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
+                                                              true, Int8(3) ) 
+
+                # Set maximum allowed reconstruction order for the interface:
+                MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_ρd )
+
+                ###### X VELOCITY ###################
+                ud_X_im2 = ud_Xg[bin, k-1, j0]
+                ud_X_im1 = ud_Xg[bin, k,   j0]
+                ud_X_i   = ud_Xg[bin, k+1, j0]
+                ud_X_ip1 = ud_Xg[bin, k+2, j0]
+
+                # Get maximum allowed reconstruction order for this bin:
+                _, _, ReconstructionOrder_udX = Get_QL_and_QR( ud_X_im2, ud_X_im1, ud_X_i, ud_X_ip1,
+                                                               X_im1, X_i,   X_ip1,
+                                                               XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
+                                                               Shock_i, Shock_im1,
+                                                               N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
+                                                               false, Int8(3) ) 
+
+                ###### Y VELOCITY ###################
+                ud_Y_im2 = ud_Yg[bin, k-1, j0]
+                ud_Y_im1 = ud_Yg[bin, k,   j0]
+                ud_Y_i   = ud_Yg[bin, k+1, j0]
+                ud_Y_ip1 = ud_Yg[bin, k+2, j0]
+
+                # Get maximum allowed reconstruction order for this bin:
+                _, _, ReconstructionOrder_udY = Get_QL_and_QR( ud_Y_im2, ud_Y_im1, ud_Y_i, ud_Y_ip1,
+                                                               X_im1, X_i,   X_ip1,
+                                                               XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
+                                                               Shock_i, Shock_im1,
+                                                               N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
+                                                               false, Int8(3) ) 
+
+                # Update maximum allowed reconstruction order:
+                MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_udY )
+            end
+
+            ##########################################
+            #######                            #######
+            #######         C O M M I T        #######
+            #######                            #######
+            ########################################## 
+
+            # Re-do gas reconstructions if they exceed the allowed order:
             if ReconstructionOrder_ρ > MaxReconstructionOrder
                 ρL_X, ρR_X, _ = Get_QL_and_QR( ρ_im2, ρ_im1, ρ_i, ρ_ip1,
                                                X_im1, X_i,   X_ip1,
                                                XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
                                                Shock_i, Shock_im1,
-                                               N_X, w_plus_i_p1[im1], w_minus_i_p1[icl], 
-                                               true, MaxReconstructionOrder ) 
+                                               N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
+                                               true, MaxReconstructionOrder )
             end
             ρ_L_X[i,j], ρ_R_X[i,j] = max(ρL_X, ρ_floor), max(ρR_X, ρ_floor) # Commit  
-
-            if ReconstructionOrder_ρd > MaxReconstructionOrder
-                ρdL_X, ρdR_X, _ = Get_QL_and_QR( ρd_im2, ρd_im1, ρd_i, ρd_ip1,
-                                                 X_im1, X_i,   X_ip1,
-                                                 XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
-                                                 Shock_i, Shock_im1,
-                                                 N_X, w_plus_i_p1[im1], w_minus_i_p1[icl], 
-                                                 true, MaxReconstructionOrder ) 
-            end
-            ρd_L_X[i,j], ρd_R_X[i,j] = max(ρdL_X, ρd_floor), max(ρdR_X, ρd_floor) # Commit  
 
             if ReconstructionOrder_P > MaxReconstructionOrder
                 PL_X, PR_X, _ = Get_QL_and_QR( P_im2, P_im1, P_i, P_ip1,
                                                X_im1, X_i,   X_ip1,
                                                XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
                                                Shock_i, Shock_im1,
-                                               N_X, w_plus_i_p1[im1], w_minus_i_p1[icl], 
+                                               N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
                                                true, MaxReconstructionOrder ) 
             end
-            P_L_X[i,j], P_R_X[i,j] = max(PL_X, P_floor), max(PR_X, P_floor) # Commit 
+            P_L_X[i,j], P_R_X[i,j] = max(PL_X, P_floor), max(PR_X, P_floor) # Commit  
+
+            if ReconstructionOrder_e > MaxReconstructionOrder
+                eL_X, eR_X, _ = Get_QL_and_QR( e_im2, e_im1, e_i, e_ip1,
+                                               X_im1, X_i,   X_ip1,
+                                               XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
+                                               Shock_i, Shock_im1,
+                                               N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
+                                               true, MaxReconstructionOrder )
+            end
+            e_dual_L_X[i,j], e_dual_R_X[i,j] = max(eL_X, e_dual_floor), max(eR_X, e_dual_floor) # Commit  
 
             if ReconstructionOrder_uX > MaxReconstructionOrder
                 uX_L_X, uX_R_X, _ = Get_QL_and_QR( u_X_im2, u_X_im1, u_X_i, u_X_ip1,
                                                    X_im1, X_i,   X_ip1,
                                                    XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
                                                    Shock_i, Shock_im1,
-                                                   N_X, w_plus_i_p1[im1], w_minus_i_p1[icl], 
-                                                   false, MaxReconstructionOrder ) 
+                                                   N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
+                                                   false, MaxReconstructionOrder )
             end
-            u_X_L_X[i,j], u_X_R_X[i,j] = uX_L_X, uX_R_X # Commit
-            
-            if ReconstructionOrder_udX > MaxReconstructionOrder
-                udX_L_X, udX_R_X, _ = Get_QL_and_QR( ud_X_im2, ud_X_im1, ud_X_i, ud_X_ip1,
-                                                     X_im1, X_i,   X_ip1,
-                                                     XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
-                                                     Shock_i, Shock_im1,
-                                                     N_X, w_plus_i_p1[im1], w_minus_i_p1[icl], 
-                                                     false, MaxReconstructionOrder ) 
-            end
-            ud_X_L_X[i,j], ud_X_R_X[i,j] = udX_L_X, udX_R_X # Commit
+            u_X_L_X[i,j], u_X_R_X[i,j] = uX_L_X, uX_R_X # Commit  
 
             if ReconstructionOrder_uY > MaxReconstructionOrder
                 uY_L_X, uY_R_X, _ = Get_QL_and_QR( u_Y_im2, u_Y_im1, u_Y_i, u_Y_ip1,
                                                    X_im1, X_i,   X_ip1,
                                                    XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
                                                    Shock_i, Shock_im1,
-                                                   N_X, w_plus_i_p1[im1], w_minus_i_p1[icl], 
+                                                   N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
                                                    false, MaxReconstructionOrder )
             end
-            u_Y_L_X[i,j], u_Y_R_X[i,j] = uY_L_X, uY_R_X # Commit 
+            u_Y_L_X[i,j], u_Y_R_X[i,j] = uY_L_X, uY_R_X # Commit  
 
-            if ReconstructionOrder_udY > MaxReconstructionOrder
+            # Second dust pass: Re-do and commit for each dust bin, 
+            # using the now known maximum allowed reconstruction order.
+            for bin in dN_dust
+                ###### DUST DENSITY ######################
+                ρd_im2   = ρdg[bin, k-1, j0]
+                ρd_im1   = ρdg[bin, k,   j0]
+                ρd_i     = ρdg[bin, k+1, j0]
+                ρd_ip1   = ρdg[bin, k+2, j0]
+
+                ρdL_X, ρdR_X, _ = Get_QL_and_QR( ρd_im2, ρd_im1, ρd_i, ρd_ip1,
+                                                 X_im1, X_i,   X_ip1,
+                                                 XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
+                                                 Shock_i, Shock_im1,
+                                                 N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
+                                                 true, MaxReconstructionOrder )
+
+                ρd_L_X[bin,i,j], ρd_R_X[bin,i,j] = max(ρdL_X, ρd_floor), max(ρdR_X, ρd_floor) # Commit 
+
+                ###### DUST X VELOCITY ###################
+                ud_X_im2  = ud_Xg[bin, k-1, j0]
+                ud_X_im1  = ud_Xg[bin, k,   j0]
+                ud_X_i    = ud_Xg[bin, k+1, j0]
+                ud_X_ip1  = ud_Xg[bin, k+2, j0]
+
+                udX_L_X, udX_R_X, _ = Get_QL_and_QR( ud_X_im2, ud_X_im1, ud_X_i, ud_X_ip1,
+                                                     X_im1, X_i,   X_ip1,
+                                                     XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
+                                                     Shock_i, Shock_im1,
+                                                     N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
+                                                     false, MaxReconstructionOrder )
+
+                ud_X_L_X[bin,i,j], ud_X_R_X[bin,i,j] = udX_L_X, udX_R_X # Commit 
+
+                ###### DUST Y VELOCITY ###################
+                ud_Y_im2  = ud_Yg[bin, k-1, j0]
+                ud_Y_im1  = ud_Yg[bin, k,   j0]
+                ud_Y_i    = ud_Yg[bin, k+1, j0]
+                ud_Y_ip1  = ud_Yg[bin, k+2, j0]
+
                 udY_L_X, udY_R_X, _ = Get_QL_and_QR( ud_Y_im2, ud_Y_im1, ud_Y_i, ud_Y_ip1,
                                                      X_im1, X_i,   X_ip1,
                                                      XCoM_im2, XCoM_im1, XCoM_i, XCoM_ip1,
                                                      Shock_i, Shock_im1,
-                                                     N_X, w_plus_i_p1[im1], w_minus_i_p1[icl], 
+                                                     N_X, w_plus_i_p1[im1], w_minus_i_p1[icl],
                                                      false, MaxReconstructionOrder )
+
+                ud_Y_L_X[bin,i,j], ud_Y_R_X[bin,i,j] = udY_L_X, udY_R_X # Commit
             end
-            ud_Y_L_X[i,j], ud_Y_R_X[i,j] = udY_L_X, udY_R_X # Commit 
 
-        end
-
+        end # End of i-loop 
     end # End of j-loop 
-    
-    return nothing
+
+    return nothing 
 end
 
 
@@ -1945,37 +2622,43 @@ end
     of primitive variables W ∈ (ρ, u, P), using
     a third-order accurate WENO3 approximation,
     or lower-order fall back methods. """
-function UpdateInterfaceValues_Y!( ρ_L_Y::AbstractMatrix{Float64},  # Left interface value of ρ  
-                                   ρ_R_Y::AbstractMatrix{Float64},  # Right interface value of ρ 
-                                   P_L_Y::AbstractMatrix{Float64},  # Left interface value of P  
-                                   P_R_Y::AbstractMatrix{Float64},  # Right interface value of P
-                                 u_X_L_Y::AbstractMatrix{Float64},  # Left interface value of u_X 
-                                 u_X_R_Y::AbstractMatrix{Float64},  # Right interface value of u_X 
-                                 u_Y_L_Y::AbstractMatrix{Float64},  # Left interface value of u_Y 
-                                 u_Y_R_Y::AbstractMatrix{Float64},  # Right interface value of u_Y  
-                                  ρd_L_Y::AbstractMatrix{Float64},  # Left interface value of ρd  
-                                  ρd_R_Y::AbstractMatrix{Float64},  # Right interface value of ρd
-                                ud_X_L_Y::AbstractMatrix{Float64},  # Left interface value of ud_X 
-                                ud_X_R_Y::AbstractMatrix{Float64},  # Right interface value of ud_X 
-                                ud_Y_L_Y::AbstractMatrix{Float64},  # Left interface value of ud_Y 
-                                ud_Y_R_Y::AbstractMatrix{Float64},  # Right interface value of ud_Y
-                                      ρg::AbstractMatrix{Float64},  # Ghost-padded ρ    (size N_X + 4 × N_Y + 4)
-                                      Pg::AbstractMatrix{Float64},  # Ghost-padded P    (size N_X + 4 × N_Y + 4)
-                                    u_Xg::AbstractMatrix{Float64},  # Ghost-padded u_X  (size N_X + 4 × N_Y + 4)
-                                    u_Yg::AbstractMatrix{Float64},  # Ghost-padded u_Y  (size N_X + 4 × N_Y + 4)
-                                     ρdg::AbstractMatrix{Float64},  # Ghost-padded ρd   (size N_X + 4 × N_Y + 4)
-                                   ud_Xg::AbstractMatrix{Float64},  # Ghost-padded ud_X (size N_X + 4 × N_Y + 4)
-                                   ud_Yg::AbstractMatrix{Float64},  # Ghost-padded ud_Y (size N_X + 4 × N_Y + 4)
-                                      Yg::AbstractVector{Float64},  # Ghost-padded Y-interfaces                     (length N_Y + 5)
-                                   YCoMg::AbstractVector{Float64},  # Ghost-padded Y center-of-mass                 (length N_Y + 4)
-                                   Shock::AbstractMatrix{Int},      # Shock indicator 
-                             w_plus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{j,1}
-                            w_minus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{j,1}
+function UpdateInterfaceValues_Y!( ρ_L_Y::AbstractMatrix{Float64},    # Left interface value of ρ  
+                                   ρ_R_Y::AbstractMatrix{Float64},    # Right interface value of ρ 
+                                   P_L_Y::AbstractMatrix{Float64},    # Left interface value of P  
+                                   P_R_Y::AbstractMatrix{Float64},    # Right interface value of P
+                              e_dual_L_Y::AbstractMatrix{Float64},    # Left interface value of e_dual
+                              e_dual_R_Y::AbstractMatrix{Float64},    # Right interface value of e_dual
+                                 u_X_L_Y::AbstractMatrix{Float64},    # Left interface value of u_X 
+                                 u_X_R_Y::AbstractMatrix{Float64},    # Right interface value of u_X 
+                                 u_Y_L_Y::AbstractMatrix{Float64},    # Left interface value of u_Y 
+                                 u_Y_R_Y::AbstractMatrix{Float64},    # Right interface value of u_Y  
+                                  ρd_L_Y::AbstractArray{Float64, 3},  # Left interface value of ρd  
+                                  ρd_R_Y::AbstractArray{Float64, 3},  # Right interface value of ρd
+                                ud_X_L_Y::AbstractArray{Float64, 3},  # Left interface value of ud_X 
+                                ud_X_R_Y::AbstractArray{Float64, 3},  # Right interface value of ud_X 
+                                ud_Y_L_Y::AbstractArray{Float64, 3},  # Left interface value of ud_Y 
+                                ud_Y_R_Y::AbstractArray{Float64, 3},  # Right interface value of ud_Y
+                                      ρg::AbstractMatrix{Float64},    # Ghost-padded ρ      (size N_X + 4 × N_Y + 4)
+                                      Pg::AbstractMatrix{Float64},    # Ghost-padded P      (size N_X + 4 × N_Y + 4)
+                                 e_dualg::AbstractMatrix{Float64},    # Ghost-padded e_dual (size N_X + 4 × N_Y + 4)
+                                    u_Xg::AbstractMatrix{Float64},    # Ghost-padded u_X    (size N_X + 4 × N_Y + 4)
+                                    u_Yg::AbstractMatrix{Float64},    # Ghost-padded u_Y    (size N_X + 4 × N_Y + 4)
+                                     ρdg::AbstractArray{Float64, 3},  # Ghost-padded ρd     (size N_X + 4 × N_Y + 4)
+                                   ud_Xg::AbstractArray{Float64, 3},  # Ghost-padded ud_X   (size N_X + 4 × N_Y + 4)
+                                   ud_Yg::AbstractArray{Float64, 3},  # Ghost-padded ud_Y   (size N_X + 4 × N_Y + 4)
+                                      Yg::AbstractVector{Float64},    # Ghost-padded Y-interfaces                     (length N_Y + 5)
+                                   YCoMg::AbstractVector{Float64},    # Ghost-padded Y center-of-mass                 (length N_Y + 4)
+                                   Shock::AbstractMatrix{Int},        # Shock indicator 
+                             w_plus_j_p1::AbstractVector{Float64},    # WENO3 weights w⁺_{j,1}
+                            w_minus_j_p1::AbstractVector{Float64}     # WENO3 weights w⁻_{j,1}
                                   )
 
     # Grid size:
-    N_X = size( ρg, 1 )  -  2 * ng
-    N_Y = size( ρg, 2 )  -  2 * ng
+    N_X     = size( ρg, 1 )  -  2 * ng
+    N_Y     = size( ρg, 2 )  -  2 * ng
+    dN_X    = 1:N_X
+    N_dust  = size( ρdg, 1 )
+    dN_dust = 1:N_dust 
 
     @threads for j in 1:(N_Y+1)                  
         j0  = j + ng                        # Ghost-padded interface index
@@ -1998,23 +2681,24 @@ function UpdateInterfaceValues_Y!( ρ_L_Y::AbstractMatrix{Float64},  # Left inte
         YCoM_i   = YCoMg[c_0]
         YCoM_ip1 = YCoMg[c_p1]
 
-        @inbounds @simd for i in 1:N_X     
+        @inbounds @simd for i in dN_X    
             i0 = i + ng     # Ghost-padded i-index for cell centers
 
             # Get shock indicators for cells j and j - 1:
             Shock_i   = Shock[i,jcl]
             Shock_im1 = Shock[i,jm1]
 
+            ##########################################
+            #######                            #######
+            #######           G A S            #######
+            #######                            #######
+            ##########################################
+
             ###### DENSITY ######################
             ρ_im2    = ρg[i0, c_m2]
             ρ_im1    = ρg[i0, c_m1]
             ρ_i      = ρg[i0, c_0]
             ρ_ip1    = ρg[i0, c_p1]
-
-            ρd_im2   = ρdg[i0, c_m2]
-            ρd_im1   = ρdg[i0, c_m1]
-            ρd_i     = ρdg[i0, c_0]
-            ρd_ip1   = ρdg[i0, c_p1]
 
             # Get candidate left & right ρ at interface j-1/2,
             # along with maximum reconstruction order:
@@ -2025,15 +2709,8 @@ function UpdateInterfaceValues_Y!( ρ_L_Y::AbstractMatrix{Float64},  # Left inte
                                                                N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl], 
                                                                true, Int8(3) ) 
 
-            ρdL_Y, ρdR_Y, ReconstructionOrder_ρd = Get_QL_and_QR( ρd_im2, ρd_im1, ρd_i, ρd_ip1,
-                                                                  Y_im1, Y_i, Y_ip1,
-                                                                  YCoM_im2, YCoM_im1, YCoM_i, YCoM_ip1,
-                                                                  Shock_i, Shock_im1,
-                                                                  N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl], 
-                                                                  true, Int8(3) ) 
-
             # Set maximum allowed reconstruction order for the interface:
-            MaxReconstructionOrder = min( ReconstructionOrder_ρ, ReconstructionOrder_ρd )
+            MaxReconstructionOrder = ReconstructionOrder_ρ
 
             ###### PRESSURE #####################
             P_im2   = Pg[i0, c_m2]
@@ -2053,16 +2730,29 @@ function UpdateInterfaceValues_Y!( ρ_L_Y::AbstractMatrix{Float64},  # Left inte
             # Update maximum allowed reconstruction order for the interface:
             MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_P )
 
+            ###### DUAL INTERNAL ENERGY DENSITY #####################
+            e_im2   = e_dualg[i0, c_m2]
+            e_im1   = e_dualg[i0, c_m1]
+            e_i     = e_dualg[i0, c_0]
+            e_ip1   = e_dualg[i0, c_p1]
+
+            # Get candidate left & right e_dual at interface j-1/2,
+            # along with maximum reconstruction order:
+            eL_Y, eR_Y, ReconstructionOrder_e = Get_QL_and_QR( e_im2, e_im1, e_i, e_ip1,
+                                                               Y_im1, Y_i, Y_ip1,
+                                                               YCoM_im2, YCoM_im1, YCoM_i, YCoM_ip1,
+                                                               Shock_i, Shock_im1,
+                                                               N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl],
+                                                               true, Int8(3) ) 
+
+            # Update maximum allowed reconstruction order for the interface:
+            MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_e )
+
             ###### X VELOCITY ###################
             u_X_im2  = u_Xg[i0, c_m2]
             u_X_im1  = u_Xg[i0, c_m1]
             u_X_i    = u_Xg[i0, c_0]
             u_X_ip1  = u_Xg[i0, c_p1]
-
-            ud_X_im2 = ud_Xg[i0, c_m2]
-            ud_X_im1 = ud_Xg[i0, c_m1]
-            ud_X_i   = ud_Xg[i0, c_0]
-            ud_X_ip1 = ud_Xg[i0, c_p1]
 
             # Get candidate left & right u_X at interface j-1/2,
             # along with maximum reconstruction order:
@@ -2072,27 +2762,15 @@ function UpdateInterfaceValues_Y!( ρ_L_Y::AbstractMatrix{Float64},  # Left inte
                                                                     Shock_i, Shock_im1,
                                                                     N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl],
                                                                     false, Int8(3) )
-                                                                    
-            udX_L_Y, udX_R_Y, ReconstructionOrder_udX = Get_QL_and_QR( ud_X_im2, ud_X_im1, ud_X_i, ud_X_ip1,
-                                                                       Y_im1, Y_i, Y_ip1,
-                                                                       YCoM_im2, YCoM_im1, YCoM_i, YCoM_ip1,
-                                                                       Shock_i, Shock_im1,
-                                                                       N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl],
-                                                                       false, Int8(3) )
 
             # Update maximum allowed reconstruction order for the interface:
-            MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_uX, ReconstructionOrder_udX )
+            MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_uX )
 
             ###### Y VELOCITY ###################
             u_Y_im2  = u_Yg[i0, c_m2]
             u_Y_im1  = u_Yg[i0, c_m1]
             u_Y_i    = u_Yg[i0, c_0]
             u_Y_ip1  = u_Yg[i0, c_p1]
-
-            ud_Y_im2 = ud_Yg[i0, c_m2]
-            ud_Y_im1 = ud_Yg[i0, c_m1]
-            ud_Y_i   = ud_Yg[i0, c_0]
-            ud_Y_ip1 = ud_Yg[i0, c_p1]
 
             # Get candidate left & right u_Y at interface j-1/2,
             # along with maximum reconstruction order:
@@ -2102,20 +2780,76 @@ function UpdateInterfaceValues_Y!( ρ_L_Y::AbstractMatrix{Float64},  # Left inte
                                                                     Shock_i, Shock_im1,
                                                                     N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl], 
                                                                     false, Int8(3) )
-                                                                    
-            udY_L_Y, udY_R_Y, ReconstructionOrder_udY = Get_QL_and_QR( ud_Y_im2, ud_Y_im1, ud_Y_i, ud_Y_ip1,
-                                                                       Y_im1, Y_i, Y_ip1,
-                                                                       YCoM_im2, YCoM_im1, YCoM_i, YCoM_ip1,
-                                                                       Shock_i, Shock_im1,
-                                                                       N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl], 
-                                                                       false, Int8(3) )
 
             # Update maximum allowed reconstruction order for the interface:
-            MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_uY, ReconstructionOrder_udY )
+            MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_uY )
 
-            # Next check if the reconstructon order for all primitives are consistent. If not,
-            # re-do the ones that have too high reconstruction order:
-            
+            ##########################################
+            #######                            #######
+            #######           D U S T          #######
+            #######                            #######
+            ########################################## 
+
+            for bin in dN_dust 
+                ###### DUST DENSITY ######################
+                ρd_im2   = ρdg[bin, i0, c_m2]
+                ρd_im1   = ρdg[bin, i0, c_m1]
+                ρd_i     = ρdg[bin, i0, c_0]
+                ρd_ip1   = ρdg[bin, i0, c_p1]
+
+                # Get maximum allowed reconstruction order for this bin:
+                _, _, ReconstructionOrder_ρd = Get_QL_and_QR( ρd_im2, ρd_im1, ρd_i, ρd_ip1,
+                                                                  Y_im1, Y_i, Y_ip1,
+                                                                  YCoM_im2, YCoM_im1, YCoM_i, YCoM_ip1,
+                                                                  Shock_i, Shock_im1,
+                                                                  N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl],
+                                                                  true, Int8(3) ) 
+
+                # Set maximum allowed reconstruction order for the interface:
+                MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_ρd )
+
+                ###### DUST X VELOCITY ###################
+                ud_X_im2 = ud_Xg[bin, i0, c_m2]
+                ud_X_im1 = ud_Xg[bin, i0, c_m1]
+                ud_X_i   = ud_Xg[bin, i0, c_0]
+                ud_X_ip1 = ud_Xg[bin, i0, c_p1]
+
+                # Get maximum allowed reconstruction order for this bin:
+                _, _, ReconstructionOrder_udX = Get_QL_and_QR( ud_X_im2, ud_X_im1, ud_X_i, ud_X_ip1,
+                                                               Y_im1, Y_i, Y_ip1,
+                                                               YCoM_im2, YCoM_im1, YCoM_i, YCoM_ip1,
+                                                               Shock_i, Shock_im1,
+                                                               N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl],
+                                                               false, Int8(3) )
+
+                # Update maximum allowed reconstruction order for the interface:
+                MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_udX )
+
+                ###### DUST Y VELOCITY ###################
+                ud_Y_im2 = ud_Yg[bin, i0, c_m2]
+                ud_Y_im1 = ud_Yg[bin, i0, c_m1]
+                ud_Y_i   = ud_Yg[bin, i0, c_0]
+                ud_Y_ip1 = ud_Yg[bin, i0, c_p1]
+
+                # Get maximum allowed reconstruction order for this bin:
+                _, _, ReconstructionOrder_udY = Get_QL_and_QR( ud_Y_im2, ud_Y_im1, ud_Y_i, ud_Y_ip1,
+                                                               Y_im1, Y_i, Y_ip1,
+                                                               YCoM_im2, YCoM_im1, YCoM_i, YCoM_ip1,
+                                                               Shock_i, Shock_im1,
+                                                               N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl], 
+                                                               false, Int8(3) )
+
+                # Update maximum allowed reconstruction order for the interface:
+                MaxReconstructionOrder = min( MaxReconstructionOrder, ReconstructionOrder_udY )
+            end
+
+            ##########################################
+            #######                            #######
+            #######         C O M M I T        #######
+            #######                            #######
+            ########################################## 
+
+            # Re-do gas reconstructions if they exceed the allowed order:
             if ReconstructionOrder_ρ > MaxReconstructionOrder
                 ρL_Y, ρR_Y, _ = Get_QL_and_QR( ρ_im2, ρ_im1, ρ_i, ρ_ip1,
                                                Y_im1, Y_i, Y_ip1,
@@ -2125,16 +2859,6 @@ function UpdateInterfaceValues_Y!( ρ_L_Y::AbstractMatrix{Float64},  # Left inte
                                                true, MaxReconstructionOrder ) 
             end
             ρ_L_Y[i,j], ρ_R_Y[i,j] = max(ρL_Y, ρ_floor), max(ρR_Y, ρ_floor) # Commit  
-
-            if ReconstructionOrder_ρd > MaxReconstructionOrder
-                ρdL_Y, ρdR_Y, _ = Get_QL_and_QR( ρd_im2, ρd_im1, ρd_i, ρd_ip1,
-                                                 Y_im1, Y_i, Y_ip1,
-                                                 YCoM_im2, YCoM_im1, YCoM_i, YCoM_ip1,
-                                                 Shock_i, Shock_im1,
-                                                 N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl],
-                                                 true, MaxReconstructionOrder ) 
-            end
-            ρd_L_Y[i,j], ρd_R_Y[i,j] = max(ρdL_Y, ρd_floor), max(ρdR_Y, ρd_floor) # Commit  
 
             if ReconstructionOrder_P > MaxReconstructionOrder
                 PL_Y, PR_Y, _ = Get_QL_and_QR( P_im2, P_im1, P_i, P_ip1,
@@ -2146,6 +2870,16 @@ function UpdateInterfaceValues_Y!( ρ_L_Y::AbstractMatrix{Float64},  # Left inte
             end
             P_L_Y[i,j], P_R_Y[i,j] = max(PL_Y, P_floor), max(PR_Y, P_floor) # Commit  
 
+            if ReconstructionOrder_e > MaxReconstructionOrder
+                eL_Y, eR_Y, _ = Get_QL_and_QR( e_im2, e_im1, e_i, e_ip1,
+                                               Y_im1, Y_i, Y_ip1,
+                                               YCoM_im2, YCoM_im1, YCoM_i, YCoM_ip1,
+                                               Shock_i, Shock_im1,
+                                               N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl],
+                                               true, MaxReconstructionOrder ) 
+            end
+            e_dual_L_Y[i,j], e_dual_R_Y[i,j] = max(eL_Y, e_dual_floor), max(eR_Y, e_dual_floor) # Commit  
+
             if ReconstructionOrder_uX > MaxReconstructionOrder
                 uX_L_Y, uX_R_Y, _ = Get_QL_and_QR( u_X_im2, u_X_im1, u_X_i, u_X_ip1,
                                                    Y_im1, Y_i, Y_ip1,
@@ -2155,16 +2889,6 @@ function UpdateInterfaceValues_Y!( ρ_L_Y::AbstractMatrix{Float64},  # Left inte
                                                    false, MaxReconstructionOrder ) 
             end
             u_X_L_Y[i,j], u_X_R_Y[i,j] = uX_L_Y, uX_R_Y # Commit  
-
-            if ReconstructionOrder_udX > MaxReconstructionOrder
-                udX_L_Y, udX_R_Y, _ = Get_QL_and_QR( ud_X_im2, ud_X_im1, ud_X_i, ud_X_ip1,
-                                                     Y_im1, Y_i, Y_ip1,
-                                                     YCoM_im2, YCoM_im1, YCoM_i, YCoM_ip1,
-                                                     Shock_i, Shock_im1,
-                                                     N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl],
-                                                     false, MaxReconstructionOrder ) 
-            end
-            ud_X_L_Y[i,j], ud_X_R_Y[i,j] = udX_L_Y, udX_R_Y # Commit  
 
             if ReconstructionOrder_uY > MaxReconstructionOrder
                 uY_L_Y, uY_R_Y, _ = Get_QL_and_QR( u_Y_im2, u_Y_im1, u_Y_i, u_Y_ip1,
@@ -2176,15 +2900,54 @@ function UpdateInterfaceValues_Y!( ρ_L_Y::AbstractMatrix{Float64},  # Left inte
             end
             u_Y_L_Y[i,j], u_Y_R_Y[i,j] = uY_L_Y, uY_R_Y # Commit  
 
-            if ReconstructionOrder_udY > MaxReconstructionOrder
+            # Second dust pass: Re-do and commit for each dust bin, 
+            # using the now known maximum allowed reconstruction order.
+            for bin in dN_dust
+                ###### DUST DENSITY ######################
+                ρd_im2   = ρdg[bin, i0, c_m2]
+                ρd_im1   = ρdg[bin, i0, c_m1]
+                ρd_i     = ρdg[bin, i0, c_0]
+                ρd_ip1   = ρdg[bin, i0, c_p1]
+
+                ρdL_Y, ρdR_Y, _ = Get_QL_and_QR( ρd_im2, ρd_im1, ρd_i, ρd_ip1,
+                                                 Y_im1, Y_i, Y_ip1,
+                                                 YCoM_im2, YCoM_im1, YCoM_i, YCoM_ip1,
+                                                 Shock_i, Shock_im1,
+                                                 N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl],
+                                                 true, MaxReconstructionOrder ) 
+
+                ρd_L_Y[bin,i,j], ρd_R_Y[bin,i,j] = max(ρdL_Y, ρd_floor), max(ρdR_Y, ρd_floor) # Commit 
+                
+                ###### DUST X VELOCITY ###################
+                ud_X_im2 = ud_Xg[bin, i0, c_m2]
+                ud_X_im1 = ud_Xg[bin, i0, c_m1]
+                ud_X_i   = ud_Xg[bin, i0, c_0]
+                ud_X_ip1 = ud_Xg[bin, i0, c_p1]
+
+                udX_L_Y, udX_R_Y, _ = Get_QL_and_QR( ud_X_im2, ud_X_im1, ud_X_i, ud_X_ip1,
+                                                     Y_im1, Y_i, Y_ip1,
+                                                     YCoM_im2, YCoM_im1, YCoM_i, YCoM_ip1,
+                                                     Shock_i, Shock_im1,
+                                                     N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl],
+                                                     false, MaxReconstructionOrder )  
+
+                ud_X_L_Y[bin,i,j], ud_X_R_Y[bin,i,j] = udX_L_Y, udX_R_Y # Commit  
+                
+                ###### DUST Y VELOCITY ###################
+                ud_Y_im2 = ud_Yg[bin, i0, c_m2]
+                ud_Y_im1 = ud_Yg[bin, i0, c_m1]
+                ud_Y_i   = ud_Yg[bin, i0, c_0]
+                ud_Y_ip1 = ud_Yg[bin, i0, c_p1]
+
                 udY_L_Y, udY_R_Y, _ = Get_QL_and_QR( ud_Y_im2, ud_Y_im1, ud_Y_i, ud_Y_ip1,
                                                      Y_im1, Y_i, Y_ip1,
                                                      YCoM_im2, YCoM_im1, YCoM_i, YCoM_ip1,
                                                      Shock_i, Shock_im1,
                                                      N_Y, w_plus_j_p1[jm1], w_minus_j_p1[jcl],
-                                                     false, MaxReconstructionOrder ) 
+                                                     false, MaxReconstructionOrder )
+
+                ud_Y_L_Y[bin,i,j], ud_Y_R_Y[bin,i,j] = udY_L_Y, udY_R_Y # Commit
             end
-            ud_Y_L_Y[i,j], ud_Y_R_Y[i,j] = udY_L_Y, udY_R_Y # Commit  
 
         end # End of i-loop 
     end # End of j-loop
@@ -2211,7 +2974,7 @@ end
     c_L  = sqrt( γad_L * P_L / ρ_L )
     c_R  = sqrt( γad_R * P_R / ρ_R )
 
-    # Wave speeds:
+    # Wave speeds: 
     S_L  = min( u_L - c_L, u_R - c_R )
     S_R  = max( u_L + c_L, u_R + c_R )
 
@@ -2252,8 +3015,8 @@ function GetFlux_HLL( ρ_L::Float64,
     end
     
     # Left & right energies:
-    E_L    = P_L / (γad_L - 1)  +  0.5 * ρ_L * (u_L^2 + v_L^2)
-    E_R    = P_R / (γad_R - 1)  +  0.5 * ρ_R * (u_R^2 + v_R^2)
+    E_L    = P_L / (γad_L - 1)  +  0.5 * ρ_L * (u_L * u_L  +  v_L * v_L)
+    E_R    = P_R / (γad_R - 1)  +  0.5 * ρ_R * (u_R * u_R  +  v_R * v_R)
 
     # Estimate wave speeds S_L and S_R:
     S_L, S_R = GetGasWaveSpeeds( ρ_L, ρ_R,
@@ -2269,13 +3032,13 @@ function GetFlux_HLL( ρ_L::Float64,
 
     # Compute fluxes for left state:
     F_ρ_L  = ρu_L 
-    F_ρu_L = ρ_L * u_L^2  +  P_L  
+    F_ρu_L = ρ_L * u_L * u_L  +  P_L  
     F_ρv_L = ρv_L * u_L 
     F_E_L  = u_L * (E_L + P_L)
 
     # Compute fluxes for right state:
     F_ρ_R  = ρu_R 
-    F_ρu_R = ρ_R * u_R^2  +  P_R 
+    F_ρu_R = ρ_R * u_R * u_R  +  P_R 
     F_ρv_R = ρv_R * u_R
     F_E_R  = u_R * (E_R + P_R)
 
@@ -2298,7 +3061,6 @@ function GetFlux_HLL( ρ_L::Float64,
         F_ρu      = ( S_R * F_ρu_L - S_L * F_ρu_R + S_L * S_R * (ρu_R - ρu_L) ) * inv_denom
         F_ρv      = ( S_R * F_ρv_L - S_L * F_ρv_R + S_L * S_R * (ρv_R - ρv_L) ) * inv_denom
         F_E       = ( S_R * F_E_L  - S_L * F_E_R  + S_L * S_R * (E_R - E_L)   ) * inv_denom
-
     end
 
     # Estimate wave speed in star region (contact speed). This is not needed in 
@@ -2354,8 +3116,8 @@ function GetFlux_HLLC( ρ_L::Float64,
     end
 
     # Left & right energies:
-    E_L    = P_L / (γad_L - 1)  +  0.5 * ρ_L * (u_L^2 + v_L^2)
-    E_R    = P_R / (γad_R - 1)  +  0.5 * ρ_R * (u_R^2 + v_R^2)
+    E_L    = P_L / (γad_L - 1)  +  0.5 * ρ_L * (u_L * u_L  +  v_L * v_L)
+    E_R    = P_R / (γad_R - 1)  +  0.5 * ρ_R * (u_R * u_R  +  v_R * v_R)
 
     # Estimate wave speeds S_L and S_R:
     S_L, S_R = GetGasWaveSpeeds( ρ_L, ρ_R,
@@ -2382,9 +3144,7 @@ function GetFlux_HLLC( ρ_L::Float64,
         S_star = ( ρ_L * u_L  +  ρ_R * u_R ) / ( ρ_L + ρ_R )
     end
 
-    S_star = clamp( S_star, S_L, S_R ) 
-
-    # Exit early and use HLL, if the wave speeds would produce undefined HLLC flux:
+    # Exit early and use HLL, if the wave speeds would produce ~ undefined HLLC flux:
     ϵS = 1e-12 * max( 1.0, abs(S_L), abs(S_R), abs(S_star), abs(u_L), abs(u_R) )
     if !(S_L < S_star < S_R) || abs(S_L - S_star) ≤ ϵS || abs(S_R - S_star) ≤ ϵS
         return GetFlux_HLL( ρ_L, ρ_R, u_L, u_R, v_L, v_R, P_L, P_R, γad_L, γad_R )
@@ -2392,13 +3152,13 @@ function GetFlux_HLLC( ρ_L::Float64,
 
     # Compute fluxes for left state:
     F_ρ_L  = ρu_L 
-    F_ρu_L = ρ_L * u_L^2  +  P_L  
+    F_ρu_L = ρ_L * u_L * u_L  +  P_L  
     F_ρv_L = ρv_L * u_L 
     F_E_L  = u_L * (E_L + P_L)
 
     # Compute fluxes for right state:
     F_ρ_R  = ρu_R 
-    F_ρu_R = ρ_R * u_R^2  +  P_R 
+    F_ρu_R = ρ_R * u_R * u_R  +  P_R 
     F_ρv_R = ρv_R * u_R
     F_E_R  = u_R * (E_R + P_R)
 
@@ -2542,6 +3302,13 @@ end
     F_ρvd_L = ρdvd_L * ud_L
     F_ρvd_R = ρdvd_R * ud_R
 
+    S_L = min( Sg_L, ud_L, ud_R )
+    S_R = max( Sg_R, ud_L, ud_R )
+    if S_R - S_L < 1e-12 * max( 1.0, abs(S_L), abs(S_R) ) 
+        # Fall back to LLF for dust
+        return GetLLFFlux_Dust(ρd_L, ρd_R, ud_L, ud_R, vd_L, vd_R)
+    end
+
     # Eq. (12) in Verrier et al. (2025):
     if Sg_L > 0.0
         if ud_L > 0.0 && ud_R > 0.0
@@ -2569,37 +3336,48 @@ end
 end
 
 
-""" This function computes fluxes for
-    the conserved variables (for gas and dust): 
+""" This function gives the upwind flux for the dual internal energy density e_dual.
+    Uses the star velocity S_star from the hydro HLLC/HLL flux. """
+function GetUpwindFlux_e_dual( e_dual_L::Float64, e_dual_R::Float64, S_star::Float64 )
 
-    - F_ρ  (density), 
-    - F_ρu (momentum), 
-    - F_ρv (transverse momentum)
-    - F_E  (energy) 
+    if S_star ≥ 0.0
+        # In this case, use left state fluxes:
+        F_e_dual  = e_dual_L * S_star
+    else
+        F_e_dual  = e_dual_R * S_star
+    end
+
+    return F_e_dual 
+end
+
+
+""" This function computes fluxes for
+    the conserved variables for gas: 
+
+    - F_ρ      (density), 
+    - F_ρu     (momentum), 
+    - F_ρv     (transverse momentum)
+    - F_E      (energy) 
+    - F_e_dual (gas dual internal energy density)
 
     The function also returns the contact speed. 
 
     It uses HLLC flux function in regions away from shocks, 
     and the more robust HLL flux function near shocks. """
-@inline function GetFlux( ρ_L::Float64, 
-                          ρ_R::Float64, 
-                          u_L::Float64, 
-                          u_R::Float64,
-                          v_L::Float64,     
-                          v_R::Float64, 
-                          P_L::Float64,  
-                          P_R::Float64, 
-                        γad_L::Float64,
-                        γad_R::Float64,
-                         ρd_L::Float64, 
-                         ρd_R::Float64, 
-                         ud_L::Float64, 
-                         ud_R::Float64,
-                         vd_L::Float64,     
-                         vd_R::Float64, 
-                      Shock_L::Int     = 0,
-                      Shock_R::Int     = 0
-                          )
+@inline function GetFlux_Gas( ρ_L::Float64, 
+                              ρ_R::Float64, 
+                              u_L::Float64, 
+                              u_R::Float64,
+                              v_L::Float64,     
+                              v_R::Float64, 
+                              P_L::Float64,  
+                              P_R::Float64, 
+                            γad_L::Float64,
+                            γad_R::Float64,
+                         e_dual_L::Float64,
+                         e_dual_R::Float64,
+                          Shock_L::Int = 0,
+                          Shock_R::Int = 0 )
 
     if max( Shock_L, Shock_R ) ≥ Shock_HLL 
         # In this case we have a significant shock, and revert to the HLL 
@@ -2610,10 +3388,50 @@ end
         F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R = GetFlux_HLLC( ρ_L, ρ_R, u_L, u_R, v_L, v_R, P_L, P_R, γad_L, γad_R )
     end
 
+    # Flux for dual energy:
+    F_e_dual = GetUpwindFlux_e_dual(e_dual_L, e_dual_R, S_star)
+
+    return F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R, F_e_dual
+end
+
+
+""" This function computes fluxes for
+    the conserved variables for dust: 
+
+    - F_ρd     (density), 
+    - F_ρdud   (momentum), 
+    - F_ρdvd   (transverse momentum) """
+@inline function GetFlux_Dust( ρd_L::Float64, 
+                               ρd_R::Float64, 
+                               ud_L::Float64, 
+                               ud_R::Float64,
+                               vd_L::Float64,     
+                               vd_R::Float64,
+                                ρ_L::Float64,
+                                ρ_R::Float64,
+                                u_L::Float64,
+                                u_R::Float64,
+                                v_L::Float64,
+                                v_R::Float64,
+                                S_L::Float64,
+                                S_R::Float64 )
+
+    if ρd_L ≤ ρd_IGNORE || ρd_L ≤ DG_th * ρ_L
+        # If left dust is ~ absent, set velocities to gas velocity:
+        ud_L = u_L
+        vd_L = v_L
+    end
+
+    if ρd_R ≤ ρd_IGNORE || ρd_R ≤ DG_th * ρ_R
+        # If right dust is ~ absent, set velocities to gas velocity:
+        ud_R = u_R 
+        vd_R = v_R
+    end
+
     # Get dust flux:
     F_ρd, F_ρdud, F_ρdvd = GetHLLgdFlux_Dust( ρd_L, ρd_R, ud_L, ud_R, vd_L, vd_R, S_L, S_R )
 
-    return F_ρ, F_ρu, F_ρv, F_E, S_star, F_ρd, F_ρdud, F_ρdvd
+    return F_ρd, F_ρdud, F_ρdvd
 end
 
 
@@ -2630,6 +3448,7 @@ function ComputeFlux_X!( F_ρ_X::AbstractMatrix{Float64},
                       F_ρu_X_X::AbstractMatrix{Float64}, 
                       F_ρu_Y_X::AbstractMatrix{Float64}, 
                          F_E_X::AbstractMatrix{Float64}, 
+                    F_e_dual_X::AbstractMatrix{Float64}, 
                          ρ_L_X::AbstractMatrix{Float64}, 
                          ρ_R_X::AbstractMatrix{Float64},
                        u_X_L_X::AbstractMatrix{Float64}, 
@@ -2638,16 +3457,18 @@ function ComputeFlux_X!( F_ρ_X::AbstractMatrix{Float64},
                        u_Y_R_X::AbstractMatrix{Float64},
                          P_L_X::AbstractMatrix{Float64}, 
                          P_R_X::AbstractMatrix{Float64},
+                    e_dual_L_X::AbstractMatrix{Float64}, 
+                    e_dual_R_X::AbstractMatrix{Float64},
 
-                        F_ρd_X::AbstractMatrix{Float64}, 
-                    F_ρdud_X_X::AbstractMatrix{Float64}, 
-                    F_ρdud_Y_X::AbstractMatrix{Float64}, 
-                        ρd_L_X::AbstractMatrix{Float64}, 
-                        ρd_R_X::AbstractMatrix{Float64},
-                      ud_X_L_X::AbstractMatrix{Float64}, 
-                      ud_X_R_X::AbstractMatrix{Float64},
-                      ud_Y_L_X::AbstractMatrix{Float64}, 
-                      ud_Y_R_X::AbstractMatrix{Float64},
+                        F_ρd_X::AbstractArray{Float64, 3}, 
+                    F_ρdud_X_X::AbstractArray{Float64, 3}, 
+                    F_ρdud_Y_X::AbstractArray{Float64, 3}, 
+                        ρd_L_X::AbstractArray{Float64, 3}, 
+                        ρd_R_X::AbstractArray{Float64, 3},
+                      ud_X_L_X::AbstractArray{Float64, 3}, 
+                      ud_X_R_X::AbstractArray{Float64, 3},
+                      ud_Y_L_X::AbstractArray{Float64, 3}, 
+                      ud_Y_R_X::AbstractArray{Float64, 3},
                              ρ::AbstractMatrix{Float64},
                     u_X_star_X::AbstractMatrix{Float64},
                            γad::AbstractMatrix{Float64},
@@ -2655,41 +3476,59 @@ function ComputeFlux_X!( F_ρ_X::AbstractMatrix{Float64},
                          )
 
     N_X, N_Y = size( ρ ) # Grid size
+    N_dust   = size( ρd_L_X, 1 )
     dN_Xp1   = 1:N_X+1
     dN_Y     = 1:N_Y
+    dN_dust  = 1:N_dust
 
     @threads for j in dN_Y
         @simd for i in dN_Xp1
             @inbounds begin 
-                # Unpack primitive variables for gas & dust:
-                ρL   = ρ_L_X[i,j];   ρR  = ρ_R_X[i,j]
-                uXL  = u_X_L_X[i,j]; uXR = u_X_R_X[i,j]
-                vL   = u_Y_L_X[i,j]; vR  = u_Y_R_X[i,j]   # Transverse velocities
-                PL   = P_L_X[i,j];   PR  = P_R_X[i,j]
+                ##########################################
+                #######                            #######
+                #######           G A S            #######
+                #######                            #######
+                ##########################################
 
-                ρdL  = ρd_L_X[i,j];   ρdR  = ρd_R_X[i,j]
-                udXL = ud_X_L_X[i,j]; udXR = ud_X_R_X[i,j]
-                vdL  = ud_Y_L_X[i,j]; vdR  = ud_Y_R_X[i,j]   # Transverse velocities
+                ρL   = ρ_L_X[i,j];       ρR  = ρ_R_X[i,j]
+                uXL  = u_X_L_X[i,j];     uXR = u_X_R_X[i,j]
+                vL   = u_Y_L_X[i,j];     vR  = u_Y_R_X[i,j]   # Transverse velocities
+                PL   = P_L_X[i,j];       PR  = P_R_X[i,j]
+                eL   = e_dual_L_X[i,j];  eR  = e_dual_R_X[i,j]
 
                 # Adiabatic indices:
-                γL = γad[clamp(i-1, 1, N_X), j]; γR = γad[clamp(i, 1, N_X), j]
+                γL = γad[clamp(i-1, 1, N_X), j]; γR = γad[clamp(i, 1, N_X), j] 
 
                 # Shock indicators for cells i-1 and i:
                 Shock_L = Shock[clamp(i-1, 1, N_X), j]
                 Shock_R = Shock[clamp(i, 1, N_X), j]
 
-                # Get the 1D flux:
-                F_ρ_X[i,j], F_ρu_X_X[i,j], F_ρu_Y_X[i,j], F_E_X[i,j], 
-                u_X_star_X[i,j], 
-                F_ρd_X[i,j], F_ρdud_X_X[i,j], F_ρdud_Y_X[i,j] = GetFlux( ρL, ρR, uXL, uXR, vL, vR, PL, PR, γL, γR,
-                                                                         ρdL, ρdR, udXL, udXR, vdL, vdR,
-                                                                         Shock_L, Shock_R )
+                # Get gas interface fluxes & wave speeds:
+                F_ρ_X[i,j], F_ρu_X_X[i,j], F_ρu_Y_X[i,j], F_E_X[i,j],
+                u_X_star_X[i,j], S_L, S_R, F_e_dual_X[i,j] = GetFlux_Gas( ρL, ρR, uXL, uXR, vL, vR, PL, PR, γL, γR,
+                                                                          eL, eR, Shock_L, Shock_R )
 
-            end
-        end # End of i-loop
-    end # End of j-loop
+                ##########################################
+                #######                            #######
+                #######           D U S T          #######
+                #######                            #######
+                ########################################## 
+                
+                for bin in dN_dust 
+                    ρdL  = ρd_L_X[bin,i,j];      ρdR  = ρd_R_X[bin,i,j]
+                    udXL = ud_X_L_X[bin,i,j];    udXR = ud_X_R_X[bin,i,j]
+                    vdL  = ud_Y_L_X[bin,i,j];    vdR  = ud_Y_R_X[bin,i,j]   # Transverse velocities
 
-    return nothing
+                    F_ρd_X[bin,i,j], F_ρdud_X_X[bin,i,j], 
+                    F_ρdud_Y_X[bin,i,j] =  GetFlux_Dust( ρdL, ρdR, udXL, udXR, vdL, vdR,
+                                                         ρL, ρR, uXL, uXR, vL, vR, S_L, S_R )
+                end
+
+            end # End of inbounds 
+        end # End of i-loop 
+    end # End of j-loop 
+
+    return nothing 
 end
 
 
@@ -2699,6 +3538,7 @@ function ComputeFlux_Y!( F_ρ_Y::AbstractMatrix{Float64},
                       F_ρu_X_Y::AbstractMatrix{Float64}, 
                       F_ρu_Y_Y::AbstractMatrix{Float64}, 
                          F_E_Y::AbstractMatrix{Float64}, 
+                    F_e_dual_Y::AbstractMatrix{Float64}, 
                          ρ_L_Y::AbstractMatrix{Float64}, 
                          ρ_R_Y::AbstractMatrix{Float64},
                        u_Y_L_Y::AbstractMatrix{Float64}, 
@@ -2707,16 +3547,18 @@ function ComputeFlux_Y!( F_ρ_Y::AbstractMatrix{Float64},
                        u_X_R_Y::AbstractMatrix{Float64},
                          P_L_Y::AbstractMatrix{Float64}, 
                          P_R_Y::AbstractMatrix{Float64},
+                    e_dual_L_Y::AbstractMatrix{Float64}, 
+                    e_dual_R_Y::AbstractMatrix{Float64},
 
-                       F_ρd_Y::AbstractMatrix{Float64}, 
-                    F_ρdud_X_Y::AbstractMatrix{Float64}, 
-                    F_ρdud_Y_Y::AbstractMatrix{Float64}, 
-                        ρd_L_Y::AbstractMatrix{Float64}, 
-                        ρd_R_Y::AbstractMatrix{Float64},
-                      ud_Y_L_Y::AbstractMatrix{Float64}, 
-                      ud_Y_R_Y::AbstractMatrix{Float64},
-                      ud_X_L_Y::AbstractMatrix{Float64}, 
-                      ud_X_R_Y::AbstractMatrix{Float64},
+                        F_ρd_Y::AbstractArray{Float64, 3}, 
+                    F_ρdud_X_Y::AbstractArray{Float64, 3}, 
+                    F_ρdud_Y_Y::AbstractArray{Float64, 3}, 
+                        ρd_L_Y::AbstractArray{Float64, 3}, 
+                        ρd_R_Y::AbstractArray{Float64, 3},
+                      ud_Y_L_Y::AbstractArray{Float64, 3}, 
+                      ud_Y_R_Y::AbstractArray{Float64, 3},
+                      ud_X_L_Y::AbstractArray{Float64, 3}, 
+                      ud_X_R_Y::AbstractArray{Float64, 3},
                              ρ::AbstractMatrix{Float64},
                     u_Y_star_Y::AbstractMatrix{Float64},
                            γad::AbstractMatrix{Float64},
@@ -2724,21 +3566,25 @@ function ComputeFlux_Y!( F_ρ_Y::AbstractMatrix{Float64},
                          )
 
     N_X, N_Y = size( ρ ) # Grid size
+    N_dust   = size( ρd_L_Y, 1 )
     dN_X     = 1:N_X 
     dN_Yp1   = 1:N_Y+1
+    dN_dust  = 1:N_dust 
 
     @threads for j in dN_Yp1
         @simd for i in dN_X
             @inbounds begin 
-                # Unpack primitive variables for gas & dust:
-                ρL   = ρ_L_Y[i,j];   ρR  = ρ_R_Y[i,j]
-                uL   = u_Y_L_Y[i,j]; uR  = u_Y_R_Y[i,j]
-                vL   = u_X_L_Y[i,j]; vR  = u_X_R_Y[i,j] # Transverse velocities 
-                PL   = P_L_Y[i,j];   PR  = P_R_Y[i,j]
+                ##########################################
+                #######                            #######
+                #######           G A S            #######
+                #######                            #######
+                ##########################################
 
-                ρdL  = ρd_L_Y[i,j];   ρdR  = ρd_R_Y[i,j]
-                udL  = ud_Y_L_Y[i,j]; udR  = ud_Y_R_Y[i,j]
-                vdL  = ud_X_L_Y[i,j]; vdR  = ud_X_R_Y[i,j] # Transverse velocities 
+                ρL   = ρ_L_Y[i,j];       ρR  = ρ_R_Y[i,j]
+                uL   = u_Y_L_Y[i,j];     uR  = u_Y_R_Y[i,j]
+                vL   = u_X_L_Y[i,j];     vR  = u_X_R_Y[i,j] # Transverse velocities 
+                PL   = P_L_Y[i,j];       PR  = P_R_Y[i,j]
+                eL   = e_dual_L_Y[i,j];  eR  = e_dual_R_Y[i,j]
 
                 # Adiabatic indices:
                 γL = γad[i, clamp(j-1, 1, N_Y)]; γR = γad[i, clamp(j, 1, N_Y)]
@@ -2747,19 +3593,33 @@ function ComputeFlux_Y!( F_ρ_Y::AbstractMatrix{Float64},
                 Shock_L = Shock[i, clamp(j-1, 1, N_Y)]
                 Shock_R = Shock[i, clamp(j, 1, N_Y)]
 
-                # Get the 1D flux:
+                # Get gas interface fluxes & wave speeds:
                 F_ρ_Y[i,j], F_ρu_Y_Y[i,j], F_ρu_X_Y[i,j], F_E_Y[i,j], 
-                u_Y_star_Y[i,j],
-                F_ρd_Y[i,j], F_ρdud_Y_Y[i,j], F_ρdud_X_Y[i,j] = GetFlux( ρL, ρR, uL, uR, vL, vR, PL, PR, γL, γR,
-                                                                         ρdL, ρdR, udL, udR, vdL, vdR, 
-                                                                         Shock_L, Shock_R )
+                u_Y_star_Y[i,j], S_L, S_R, 
+                F_e_dual_Y[i,j] = GetFlux_Gas( ρL, ρR, uL, uR, vL, vR, PL, PR, γL, γR, eL, eR, 
+                                               Shock_L, Shock_R )
 
-            end
-        end # End of i-loop
-    end # End of j-loop
+                ##########################################
+                #######                            #######
+                #######           D U S T          #######
+                #######                            #######
+                ########################################## 
 
+                for bin in dN_dust 
+                    ρdL  = ρd_L_Y[bin,i,j];      ρdR  = ρd_R_Y[bin,i,j]
+                    udL  = ud_Y_L_Y[bin,i,j];    udR  = ud_Y_R_Y[bin,i,j]
+                    vdL  = ud_X_L_Y[bin,i,j];    vdR  = ud_X_R_Y[bin,i,j] # Transverse velocities 
 
-    return nothing
+                    F_ρd_Y[bin,i,j], F_ρdud_Y_Y[bin,i,j], 
+                    F_ρdud_X_Y[bin,i,j] = GetFlux_Dust( ρdL, ρdR, udL, udR, vdL, vdR, 
+                                                        ρL, ρR, uL, uR, vL, vR, S_L, S_R )
+                end
+
+            end # End of inbounds 
+        end # End of i-loop 
+    end # End of j-loop 
+
+    return nothing 
 end
 
 
@@ -2790,10 +3650,14 @@ end
     Δt      :   Time-step 
     S       :   Source term in cell i 
     inv_ΔV  :   Inverse volume 1 / ΔV of cell i 
-    A_L     :   Area of left interface i - 1/2
-    A_R     :   Area of right interface i + 1/2
-    F_L     :   Flux F at left interface i - 1/2
-    F_R     :   Flux F at right interface i + 1/2
+    AX_L    :   Area of left interface i - 1/2
+    AX_R    :   Area of right interface i + 1/2
+    AY_L    :   Area of left interface j - 1/2
+    AY_R    :   Area of right interface j + 1/2
+    FX_L    :   Flux F at left interface i - 1/2
+    FX_R    :   Flux F at right interface i + 1/2
+    FY_L    :   Flux F at left interface j - 1/2
+    FY_R    :   Flux F at right interface j + 1/2
 
     **RETURNS:**
 
@@ -2803,23 +3667,39 @@ end
                                             Δt::Float64,
                                              S::Float64,
                                         inv_ΔV::Float64, 
-                                           A_L::Float64,
-                                           A_R::Float64,
-                                           F_L::Float64,
-                                           F_R::Float64
+                                          AX_L::Float64,
+                                          AX_R::Float64,
+                                          AY_L::Float64,
+                                          AY_R::Float64,
+                                          FX_L::Float64,
+                                          FX_R::Float64,
+                                          FY_L::Float64,
+                                          FY_R::Float64
                                              )
 
     FluxTerms = 0.0
-    if A_L > 0.0
+    if AX_L > 0.0
         # Add flux from left state if the left interface area 
         # is non-zero:
-        FluxTerms -=  A_L * F_L
+        FluxTerms -=  AX_L * FX_L
     end
 
-    if A_R > 0.0
+    if AX_R > 0.0
         # Add flux from right state if the right interface area 
         # is non-zero:
-        FluxTerms +=  A_R * F_R 
+        FluxTerms +=  AX_R * FX_R 
+    end
+
+    if AY_L > 0.0
+        # Add flux from left state if the left interface area 
+        # is non-zero:
+        FluxTerms -=  AY_L * FY_L
+    end
+
+    if AY_R > 0.0
+        # Add flux from right state if the right interface area 
+        # is non-zero:
+        FluxTerms +=  AY_R * FY_R 
     end
 
     Qnew = Q  +  S * Δt  -  (Δt * inv_ΔV) * FluxTerms
@@ -2828,55 +3708,78 @@ end
 end
 
 
-""" Update all the conserved quantities (ρ, ρu_X, ρu_Y, E) 
-    in the X-direction sweep. Cartesian or cylindrical 
-    (X,Z → r,Z) coordinates are assumed depending on the last 
-    argument. """
-function UpdateConserved_X!( ρ::AbstractMatrix{Float64},
-                         ρ_old::AbstractMatrix{Float64},
-                          ρu_X::AbstractMatrix{Float64},
-                      ρu_X_old::AbstractMatrix{Float64},
-                          ρu_Y::AbstractMatrix{Float64},
-                      ρu_Y_old::AbstractMatrix{Float64},
-                             E::AbstractMatrix{Float64},
-                         E_old::AbstractMatrix{Float64},
-                         F_ρ_X::AbstractMatrix{Float64}, 
-                      F_ρu_X_X::AbstractMatrix{Float64},
-                      F_ρu_Y_X::AbstractMatrix{Float64},
-                         F_E_X::AbstractMatrix{Float64},
+""" Update all the conserved quantities (ρ, ρu_X, ρu_Y, E).
+    Cartesian or cylindrical (X,Z → r,Z) coordinates are 
+    assumed depending on the last argument. """
+function UpdateConserved!( ρ::AbstractMatrix{Float64},
+                       ρ_old::AbstractMatrix{Float64},
+                        ρu_X::AbstractMatrix{Float64},
+                    ρu_X_old::AbstractMatrix{Float64},
+                        ρu_Y::AbstractMatrix{Float64},
+                    ρu_Y_old::AbstractMatrix{Float64},
+                           E::AbstractMatrix{Float64},
+                       E_old::AbstractMatrix{Float64},
+                      e_dual::AbstractMatrix{Float64},
+                  e_dual_old::AbstractMatrix{Float64},
 
-                            ρd::AbstractMatrix{Float64},
-                        ρd_old::AbstractMatrix{Float64},
-                        ρdud_X::AbstractMatrix{Float64},
-                    ρdud_X_old::AbstractMatrix{Float64},
-                        ρdud_Y::AbstractMatrix{Float64},
-                    ρdud_Y_old::AbstractMatrix{Float64},
-                        F_ρd_X::AbstractMatrix{Float64}, 
-                    F_ρdud_X_X::AbstractMatrix{Float64},
-                    F_ρdud_Y_X::AbstractMatrix{Float64},
+                       F_ρ_X::AbstractMatrix{Float64}, 
+                    F_ρu_X_X::AbstractMatrix{Float64},
+                    F_ρu_Y_X::AbstractMatrix{Float64},
+                       F_E_X::AbstractMatrix{Float64},
+                  F_e_dual_X::AbstractMatrix{Float64},
 
-                        inv_ΔV::AbstractMatrix{Float64},  # Inverse volume 1 / ΔV
-                           A_X::AbstractMatrix{Float64},  # Interface areas in X-direction 
-                            Δt::Float64,
-                         P_L_X::AbstractMatrix{Float64},  # Needed for geometric source term 
-                            Pc::AbstractMatrix{Float64},  # Needed for geometric source term 
-                         P_R_X::AbstractMatrix{Float64},  # Needed for geometric source term 
-                    inv_r_cell::AbstractVector{Float64},  # ⟨1/r⟩, also only needed for geometric source term
-                              ::Val{:Cartesian}
+                       F_ρ_Y::AbstractMatrix{Float64}, 
+                    F_ρu_X_Y::AbstractMatrix{Float64},
+                    F_ρu_Y_Y::AbstractMatrix{Float64},
+                       F_E_Y::AbstractMatrix{Float64},
+                  F_e_dual_Y::AbstractMatrix{Float64},
+
+                          ρd::AbstractArray{Float64, 3},
+                      ρd_old::AbstractArray{Float64, 3},
+                      ρdud_X::AbstractArray{Float64, 3},
+                  ρdud_X_old::AbstractArray{Float64, 3},
+                      ρdud_Y::AbstractArray{Float64, 3},
+                  ρdud_Y_old::AbstractArray{Float64, 3},
+
+                      F_ρd_X::AbstractArray{Float64, 3},
+                  F_ρdud_X_X::AbstractArray{Float64, 3},
+                  F_ρdud_Y_X::AbstractArray{Float64, 3},
+                      F_ρd_Y::AbstractArray{Float64, 3},
+                  F_ρdud_X_Y::AbstractArray{Float64, 3},
+                  F_ρdud_Y_Y::AbstractArray{Float64, 3},
+
+                      inv_ΔV::AbstractMatrix{Float64},  # Inverse volume 1 / ΔV
+                         A_X::AbstractMatrix{Float64},  # Interface areas in X-direction 
+                         A_Y::AbstractMatrix{Float64},  # Interface areas in X-direction 
+                          Δt::Float64,
+                           P::AbstractMatrix{Float64},  # Needed for the e_dual source term 
+                     u_X_L_X::AbstractMatrix{Float64},  # Needed for the e_dual source term
+                     u_X_R_X::AbstractMatrix{Float64},  # Needed for the e_dual source term
+                     u_Y_L_Y::AbstractMatrix{Float64},  # Needed for the e_dual source term
+                     u_Y_R_Y::AbstractMatrix{Float64},  # Needed for the e_dual source term
+                       P_L_X::AbstractMatrix{Float64},  # Needed for geometric source term 
+                          Pc::AbstractMatrix{Float64},  # Needed for geometric source term 
+                       P_R_X::AbstractMatrix{Float64},  # Needed for geometric source term 
+                  inv_r_cell::AbstractVector{Float64},  # ⟨1/r⟩, also only needed for geometric source term
+                            ::Val{:Cartesian}
                              )
 
     N_X, N_Y = size( ρ ) # Grid size
+    N_dust   = size( ρd, 1 )
     dN_X     = 1:N_X
     dN_Y     = 1:N_Y
+    dN_dust  = 1:N_dust
     
     @threads for j in dN_Y
 
         @simd for i in dN_X
-            @inbounds begin 
-
+            @inbounds begin
                 # -------- Interface areas -----------------------------
-                A_L       = A_X[i,j]    # Left interface area   
-                A_R       = A_X[i+1,j]  # Right interface area 
+                A_L_X     = A_X[i,j]    # Left X interface area   
+                A_R_X     = A_X[i+1,j]  # Right X interface area 
+
+                A_L_Y     = A_Y[i,j]    # Left X interface area   
+                A_R_Y     = A_Y[i,j+1]  # Right X interface area 
 
                 # -------- Source terms --------------------------------
                 # No density source term (for both gas & dust):
@@ -2887,26 +3790,35 @@ function UpdateConserved_X!( ρ::AbstractMatrix{Float64},
                 S_ρu_X    = 0.0
                 # No energy source term:
                 S_E       = 0.0
+                # Source term for e_dual is - P ∇⋅u, where we take the cell averaged P, and 
+                # finite volume average ∇⋅u.
+                u_R_X     = u_X_L_X[i+1,j]  # u_X_{i+1/2} from the left  (cell i)
+                u_L_X     = u_X_R_X[i,j]    # u_X_{i-1/2} from the right (cell i)
+                u_R_Y     = u_Y_L_Y[i,j+1]  # u_Y_{j+1/2} from the left  (cell j)
+                u_L_Y     = u_Y_R_Y[i,j]    # u_Y_{j-1/2} from the right (cell j)
+
+                S_e_dual  = - P[i,j] * inv_ΔV[i,j] * ( A_R_X * u_R_X  -  A_L_X * u_L_X
+                                                     + A_R_Y * u_R_Y  -  A_L_Y * u_L_Y )
 
                 # ------- Updates --------------------------------------
-                # Update density:
-                ρ[i,j]      = max( UpdateConservativeQuantity(ρ_old[i,j], Δt, S_ρ, inv_ΔV[i,j], A_L, A_R, F_ρ_X[i,j], F_ρ_X[i+1,j]),
+                # Update gas density:
+                ρ[i,j]      = max( UpdateConservativeQuantity(ρ_old[i,j], Δt, S_ρ, inv_ΔV[i,j], 
+                                   A_L_X, A_R_X, A_L_Y, A_R_Y, F_ρ_X[i,j], F_ρ_X[i+1,j], F_ρ_Y[i,j], F_ρ_Y[i,j+1]),
                                    ρ_floor )
-                # Update momentum in X-direction:
-                ρu_X[i,j]   = UpdateConservativeQuantity(ρu_X_old[i,j], Δt, S_ρu_X, inv_ΔV[i,j], A_L, A_R, F_ρu_X_X[i,j], F_ρu_X_X[i+1,j])
-                # Update momentum in Y-direction:
-                ρu_Y[i,j]   = UpdateConservativeQuantity(ρu_Y_old[i,j], Δt, S_ρu_Y, inv_ΔV[i,j], A_L, A_R, F_ρu_Y_X[i,j], F_ρu_Y_X[i+1,j])
-                # Update energy:
-                E[i,j]      = UpdateConservativeQuantity(E_old[i,j], Δt, S_E, inv_ΔV[i,j], A_L, A_R, F_E_X[i,j], F_E_X[i+1,j])
-
-                # Update dust density:
-                ρd[i,j]     = max( UpdateConservativeQuantity(ρd_old[i,j], Δt, S_ρ, inv_ΔV[i,j], A_L, A_R, F_ρd_X[i,j], F_ρd_X[i+1,j]),
-                                   ρd_floor )
-                # Update dust momentum in X-direction:
-                ρdud_X[i,j] = UpdateConservativeQuantity(ρdud_X_old[i,j], Δt, S_ρu_X, inv_ΔV[i,j], A_L, A_R, F_ρdud_X_X[i,j], F_ρdud_X_X[i+1,j])
-                # Update dust momentum in Y-direction:
-                ρdud_Y[i,j] = UpdateConservativeQuantity(ρdud_Y_old[i,j], Δt, S_ρu_Y, inv_ΔV[i,j], A_L, A_R, F_ρdud_Y_X[i,j], F_ρdud_Y_X[i+1,j])
-
+                # Update gas momentum in X-direction:
+                ρu_X[i,j]   = UpdateConservativeQuantity(ρu_X_old[i,j], Δt, S_ρu_X, inv_ΔV[i,j], 
+                              A_L_X, A_R_X, A_L_Y, A_R_Y, F_ρu_X_X[i,j], F_ρu_X_X[i+1,j], F_ρu_X_Y[i,j], F_ρu_X_Y[i,j+1])
+                # Update gas momentum in Y-direction:
+                ρu_Y[i,j]   = UpdateConservativeQuantity(ρu_Y_old[i,j], Δt, S_ρu_Y, inv_ΔV[i,j], 
+                              A_L_X, A_R_X, A_L_Y, A_R_Y, F_ρu_Y_X[i,j], F_ρu_Y_X[i+1,j], F_ρu_Y_Y[i,j], F_ρu_Y_Y[i,j+1])
+                # Update gas energy:
+                E[i,j]      = UpdateConservativeQuantity(E_old[i,j], Δt, S_E, inv_ΔV[i,j], 
+                              A_L_X, A_R_X, A_L_Y, A_R_Y, F_E_X[i,j], F_E_X[i+1,j], F_E_Y[i,j], F_E_Y[i,j+1])
+                # Update dual internal energy density:
+                e_dual[i,j] = max( UpdateConservativeQuantity(e_dual_old[i,j], Δt, S_e_dual, inv_ΔV[i,j], 
+                                   A_L_X, A_R_X, A_L_Y, A_R_Y, F_e_dual_X[i,j], F_e_dual_X[i+1,j], F_e_dual_Y[i,j], F_e_dual_Y[i,j+1]),
+                                   e_dual_floor )   
+                                   
                 if DEBUG_Hydro
                     @assert isfinite(ρ[i,j])    "ρ[$(i),$(j)] = $(ρ[i,j]) following the update in UpdateConserved_X!."
                     @assert isfinite(ρu_X[i,j]) "ρu_X[$(i),$(j)] = $(ρu_X[i,j]) following the update in UpdateConserved_X!."
@@ -2914,16 +3826,44 @@ function UpdateConserved_X!( ρ::AbstractMatrix{Float64},
                     @assert isfinite(E[i,j])    """ E[$(i),$(j)] = $(E[i,j]) following the update in UpdateConserved_X!. More info:
                                                     E_old[$(i),$(j)]   = $(E_old[i,j])
                                                     F_E_X[$(i),$(j)]   = $(F_E_X[i,j])
-                                                    F_E_X[$(i+1),$(j)] = $(F_E_X[i+1,j]). """
-
-                    @assert isfinite(ρd[i,j])     "ρd[$(i),$(j)] = $(ρd[i,j]) following the update in UpdateConserved_X!."
-                    @assert isfinite(ρdud_X[i,j]) "ρdud_X[$(i),$(j)] = $(ρdud_X[i,j]) following the update in UpdateConserved_X!."
-                    @assert isfinite(ρdud_Y[i,j]) "ρdud_Y[$(i),$(j)] = $(ρdud_Y[i,j]) following the update in UpdateConserved_X!."
+                                                    F_E_X[$(i+1),$(j)] = $(F_E_X[i+1,j])
+                                                    F_E_Y[$(i),$(j)]   = $(F_E_Y[i,j])
+                                                    F_E_Y[$(i+1),$(j)] = $(F_E_Y[i+1,j]). """
                 end
-            end
+
+                # Update every dust bin:
+                inv_ρ = 1 / ρ[i,j]  # Convenient variable
+                for bin in dN_dust 
+                    # Update dust density:
+                    ρd[bin,i,j]  = max( UpdateConservativeQuantity(ρd_old[bin,i,j], Δt, S_ρ, inv_ΔV[i,j], 
+                                        A_L_X, A_R_X, A_L_Y, A_R_Y, F_ρd_X[bin,i,j], F_ρd_X[bin,i+1,j], F_ρd_Y[bin,i,j], F_ρd_Y[bin,i,j+1]),
+                                        ρd_floor )
+                    # Update dust momentum in X-direction:
+                    ρdud_X[bin,i,j] = UpdateConservativeQuantity(ρdud_X_old[bin,i,j], Δt, S_ρu_X, inv_ΔV[i,j], 
+                                      A_L_X, A_R_X, A_L_Y, A_R_Y, F_ρdud_X_X[bin,i,j], F_ρdud_X_X[bin,i+1,j], F_ρdud_X_Y[bin,i,j], F_ρdud_X_Y[bin,i,j+1])
+                    # Update dust momentum in Y-direction:
+                    ρdud_Y[bin,i,j] = UpdateConservativeQuantity(ρdud_Y_old[bin,i,j], Δt, S_ρu_Y, inv_ΔV[i,j],
+                                      A_L_X, A_R_X, A_L_Y, A_R_Y, F_ρdud_Y_X[bin,i,j], F_ρdud_Y_X[bin,i+1,j], F_ρdud_Y_Y[bin,i,j], F_ρdud_Y_Y[bin,i,j+1])
+
+                    if DEBUG_Hydro
+                        @assert isfinite(ρd[bin,i,j])     "ρd[$(bin),$(i),$(j)] = $(ρd[bin,i,j]) following the update in UpdateConserved_X!."
+                        @assert isfinite(ρdud_X[bin,i,j]) "ρdud_X[$(bin),$(i),$(j)] = $(ρdud_X[bin,i,j]) following the update in UpdateConserved_X!."
+                        @assert isfinite(ρdud_Y[bin,i,j]) "ρdud_Y[$(bin),$(i),$(j)] = $(ρdud_Y[bin,i,j]) following the update in UpdateConserved_X!."
+                    end
+
+                    if ρd[bin,i,j] ≤ ρd_IGNORE || ρd[bin,i,j] ≤ DG_th * ρ[i,j]
+                        # Since dust density is negligible, let it travel with the gas:
+                        DensityRatio    = ρd[bin,i,j] * inv_ρ
+                        ρdud_X[bin,i,j] = ρu_X[i,j]   * DensityRatio 
+                        ρdud_Y[bin,i,j] = ρu_Y[i,j]   * DensityRatio 
+                    end
+                end
+                
+            end # End of inbounds 
         end # End of i-loop 
     end # End of j-loop 
 
+    return nothing 
 end
 
 
@@ -2933,87 +3873,121 @@ end
 γ̂::Float64       = 2 / 3  # Weight for Pc_{i}    (cell-center value, *not* cell-averaged)
 γ̂_plus::Float64  = 1 / 6  # Weight for P_{i+1/2}
 
-""" Update all the conserved quantities (ρ, ρu_X, ρu_Y, E) 
-    in the X-direction sweep. Cartesian or cylindrical 
-    (X,Z → r,Z) coordinates are assumed depending on the last 
-    argument. """
-function UpdateConserved_X!( ρ::AbstractMatrix{Float64},
-                         ρ_old::AbstractMatrix{Float64},
-                          ρu_X::AbstractMatrix{Float64},
-                      ρu_X_old::AbstractMatrix{Float64},
-                          ρu_Y::AbstractMatrix{Float64},
-                      ρu_Y_old::AbstractMatrix{Float64},
-                             E::AbstractMatrix{Float64},
-                         E_old::AbstractMatrix{Float64},
-                         F_ρ_X::AbstractMatrix{Float64}, 
-                      F_ρu_X_X::AbstractMatrix{Float64},
-                      F_ρu_Y_X::AbstractMatrix{Float64},
-                         F_E_X::AbstractMatrix{Float64},
+""" Update all the conserved quantities (ρ, ρu_X, ρu_Y, E).
+    Cartesian or cylindrical (X,Z → r,Z) coordinates are 
+    assumed depending on the last argument. """
+function UpdateConserved!( ρ::AbstractMatrix{Float64},
+                       ρ_old::AbstractMatrix{Float64},
+                        ρu_X::AbstractMatrix{Float64},
+                    ρu_X_old::AbstractMatrix{Float64},
+                        ρu_Y::AbstractMatrix{Float64},
+                    ρu_Y_old::AbstractMatrix{Float64},
+                           E::AbstractMatrix{Float64},
+                       E_old::AbstractMatrix{Float64},
+                      e_dual::AbstractMatrix{Float64},
+                  e_dual_old::AbstractMatrix{Float64},
 
-                            ρd::AbstractMatrix{Float64},
-                        ρd_old::AbstractMatrix{Float64},
-                        ρdud_X::AbstractMatrix{Float64},
-                    ρdud_X_old::AbstractMatrix{Float64},
-                        ρdud_Y::AbstractMatrix{Float64},
-                    ρdud_Y_old::AbstractMatrix{Float64},
-                        F_ρd_X::AbstractMatrix{Float64}, 
-                    F_ρdud_X_X::AbstractMatrix{Float64},
-                    F_ρdud_Y_X::AbstractMatrix{Float64},
+                       F_ρ_X::AbstractMatrix{Float64}, 
+                    F_ρu_X_X::AbstractMatrix{Float64},
+                    F_ρu_Y_X::AbstractMatrix{Float64},
+                       F_E_X::AbstractMatrix{Float64},
+                  F_e_dual_X::AbstractMatrix{Float64},
 
-                        inv_ΔV::AbstractMatrix{Float64},  # Inverse volume 1 / ΔV
-                           A_X::AbstractMatrix{Float64},  # Interface areas in X-direction 
-                            Δt::Float64,
-                         P_L_X::AbstractMatrix{Float64},  # Needed for geometric source term 
-                            Pc::AbstractMatrix{Float64},  # Needed for geometric source term 
-                         P_R_X::AbstractMatrix{Float64},  # Needed for geometric source term 
-                    inv_r_cell::AbstractVector{Float64},  # ⟨1/r⟩, also needed for geometric source term
-                              ::Val{:Cylindrical}
+                       F_ρ_Y::AbstractMatrix{Float64}, 
+                    F_ρu_X_Y::AbstractMatrix{Float64},
+                    F_ρu_Y_Y::AbstractMatrix{Float64},
+                       F_E_Y::AbstractMatrix{Float64},
+                  F_e_dual_Y::AbstractMatrix{Float64},
+
+                          ρd::AbstractArray{Float64, 3},
+                      ρd_old::AbstractArray{Float64, 3},
+                      ρdud_X::AbstractArray{Float64, 3},
+                  ρdud_X_old::AbstractArray{Float64, 3},
+                      ρdud_Y::AbstractArray{Float64, 3},
+                  ρdud_Y_old::AbstractArray{Float64, 3},
+
+                      F_ρd_X::AbstractArray{Float64, 3},
+                  F_ρdud_X_X::AbstractArray{Float64, 3},
+                  F_ρdud_Y_X::AbstractArray{Float64, 3},
+                      F_ρd_Y::AbstractArray{Float64, 3},
+                  F_ρdud_X_Y::AbstractArray{Float64, 3},
+                  F_ρdud_Y_Y::AbstractArray{Float64, 3},
+
+                      inv_ΔV::AbstractMatrix{Float64},  # Inverse volume 1 / ΔV
+                         A_X::AbstractMatrix{Float64},  # Interface areas in X-direction 
+                         A_Y::AbstractMatrix{Float64},  # Interface areas in X-direction 
+                          Δt::Float64,
+                           P::AbstractMatrix{Float64},  # Needed for the e_dual source term 
+                     u_X_L_X::AbstractMatrix{Float64},  # Needed for the e_dual source term
+                     u_X_R_X::AbstractMatrix{Float64},  # Needed for the e_dual source term
+                     u_Y_L_Y::AbstractMatrix{Float64},  # Needed for the e_dual source term
+                     u_Y_R_Y::AbstractMatrix{Float64},  # Needed for the e_dual source term
+                       P_L_X::AbstractMatrix{Float64},  # Needed for geometric source term 
+                          Pc::AbstractMatrix{Float64},  # Needed for geometric source term 
+                       P_R_X::AbstractMatrix{Float64},  # Needed for geometric source term 
+                  inv_r_cell::AbstractVector{Float64},  # ⟨1/r⟩, also only needed for geometric source term
+                            ::Val{:Cylindrical}
                              )
 
     N_X, N_Y = size( ρ ) # Grid size
+    N_dust   = size( ρd, 1 )
     dN_X     = 1:N_X
     dN_Y     = 1:N_Y
+    dN_dust  = 1:N_dust
     
     @threads for j in dN_Y
 
         @simd for i in dN_X
-            @inbounds begin 
-
+            @inbounds begin
                 # -------- Interface areas -----------------------------
-                A_L       = A_X[i,j]    # Left interface area   
-                A_R       = A_X[i+1,j]  # Right interface area 
+                A_L_X     = A_X[i,j]    # Left X interface area   
+                A_R_X     = A_X[i+1,j]  # Right X interface area 
+
+                A_L_Y     = A_Y[i,j]    # Left X interface area   
+                A_R_Y     = A_Y[i,j+1]  # Right X interface area 
 
                 # -------- Source terms --------------------------------
-                # No density source term:
+                # No density source term (for both gas & dust):
                 S_ρ       = 0.0
-                # No momentum source term in the Y-direction:
+                # No momentum source term in the Y-direction (for both gas & dust):
                 S_ρu_Y    = 0.0 
                 # Momentum source term in the X-direction (i.e. r-direction) in cylindrical coordinates: 
-                S_ρu_X    = ( γ̂_minus * P_L_X[i+1,j]  +  γ̂ * Pc[i,j]  +  γ̂_plus * P_R_X[i,j] ) * inv_r_cell[i]
+                P_imhalf  = P_R_X[i,j]   # P_{i-1/2} from right, i.e. cell i 
+                P_iphalf  = P_L_X[i+1,j] # P_{i+1/2} from left, i.e. cell i 
+                S_ρu_X    = ( γ̂_minus * P_imhalf  +  γ̂ * Pc[i,j]  +  γ̂_plus * P_iphalf ) * inv_r_cell[i]
+
                 S_ρdud_X  = 0.0  # No dust pressure, hence no geometric source term
                 # No energy source term:
                 S_E       = 0.0
+                # Source term for e_dual is - P ∇⋅u, where we take the cell averaged P, and 
+                # finite volume average ∇⋅u.
+                u_R_X     = u_X_L_X[i+1,j]  # u_X_{i+1/2} from the left  (cell i)
+                u_L_X     = u_X_R_X[i,j]    # u_X_{i-1/2} from the right (cell i)
+                u_R_Y     = u_Y_L_Y[i,j+1]  # u_Y_{j+1/2} from the left  (cell j)
+                u_L_Y     = u_Y_R_Y[i,j]    # u_Y_{j-1/2} from the right (cell j)
+
+                S_e_dual  = - P[i,j] * inv_ΔV[i,j] * ( A_R_X * u_R_X  -  A_L_X * u_L_X
+                                                     + A_R_Y * u_R_Y  -  A_L_Y * u_L_Y )
 
                 # ------- Updates --------------------------------------
-                # Update density:
-                ρ[i,j]      = max( UpdateConservativeQuantity(ρ_old[i,j], Δt, S_ρ, inv_ΔV[i,j], A_L, A_R, F_ρ_X[i,j], F_ρ_X[i+1,j]),
+                # Update gas density:
+                ρ[i,j]      = max( UpdateConservativeQuantity(ρ_old[i,j], Δt, S_ρ, inv_ΔV[i,j], 
+                                   A_L_X, A_R_X, A_L_Y, A_R_Y, F_ρ_X[i,j], F_ρ_X[i+1,j], F_ρ_Y[i,j], F_ρ_Y[i,j+1]),
                                    ρ_floor )
-                # Update momentum in X-direction:
-                ρu_X[i,j]   = UpdateConservativeQuantity(ρu_X_old[i,j], Δt, S_ρu_X, inv_ΔV[i,j], A_L, A_R, F_ρu_X_X[i,j], F_ρu_X_X[i+1,j])
-                # Update momentum in Y-direction:
-                ρu_Y[i,j]   = UpdateConservativeQuantity(ρu_Y_old[i,j], Δt, S_ρu_Y, inv_ΔV[i,j], A_L, A_R, F_ρu_Y_X[i,j], F_ρu_Y_X[i+1,j])
-                # Update energy:
-                E[i,j]      = UpdateConservativeQuantity(E_old[i,j], Δt, S_E, inv_ΔV[i,j], A_L, A_R, F_E_X[i,j], F_E_X[i+1,j])
-
-                # Update dust density:
-                ρd[i,j]     = max( UpdateConservativeQuantity(ρd_old[i,j], Δt, S_ρ, inv_ΔV[i,j], A_L, A_R, F_ρd_X[i,j], F_ρd_X[i+1,j]),
-                                   ρd_floor )
-                # Update dust momentum in X-direction:
-                ρdud_X[i,j] = UpdateConservativeQuantity(ρdud_X_old[i,j], Δt, S_ρdud_X, inv_ΔV[i,j], A_L, A_R, F_ρdud_X_X[i,j], F_ρdud_X_X[i+1,j])
-                # Update dust momentum in Y-direction:
-                ρdud_Y[i,j] = UpdateConservativeQuantity(ρdud_Y_old[i,j], Δt, S_ρu_Y, inv_ΔV[i,j], A_L, A_R, F_ρdud_Y_X[i,j], F_ρdud_Y_X[i+1,j])
-
-
+                # Update gas momentum in X-direction:
+                ρu_X[i,j]   = UpdateConservativeQuantity(ρu_X_old[i,j], Δt, S_ρu_X, inv_ΔV[i,j], 
+                              A_L_X, A_R_X, A_L_Y, A_R_Y, F_ρu_X_X[i,j], F_ρu_X_X[i+1,j], F_ρu_X_Y[i,j], F_ρu_X_Y[i,j+1])
+                # Update gas momentum in Y-direction:
+                ρu_Y[i,j]   = UpdateConservativeQuantity(ρu_Y_old[i,j], Δt, S_ρu_Y, inv_ΔV[i,j], 
+                              A_L_X, A_R_X, A_L_Y, A_R_Y, F_ρu_Y_X[i,j], F_ρu_Y_X[i+1,j], F_ρu_Y_Y[i,j], F_ρu_Y_Y[i,j+1])
+                # Update gas energy:
+                E[i,j]      = UpdateConservativeQuantity(E_old[i,j], Δt, S_E, inv_ΔV[i,j], 
+                              A_L_X, A_R_X, A_L_Y, A_R_Y, F_E_X[i,j], F_E_X[i+1,j], F_E_Y[i,j], F_E_Y[i,j+1])
+                # Update dual internal energy density:
+                e_dual[i,j] = max( UpdateConservativeQuantity(e_dual_old[i,j], Δt, S_e_dual, inv_ΔV[i,j], 
+                                   A_L_X, A_R_X, A_L_Y, A_R_Y, F_e_dual_X[i,j], F_e_dual_X[i+1,j], F_e_dual_Y[i,j], F_e_dual_Y[i,j+1]),
+                                   e_dual_floor )   
+                                   
                 if DEBUG_Hydro
                     @assert isfinite(ρ[i,j])    "ρ[$(i),$(j)] = $(ρ[i,j]) following the update in UpdateConserved_X!."
                     @assert isfinite(ρu_X[i,j]) "ρu_X[$(i),$(j)] = $(ρu_X[i,j]) following the update in UpdateConserved_X!."
@@ -3021,212 +3995,215 @@ function UpdateConserved_X!( ρ::AbstractMatrix{Float64},
                     @assert isfinite(E[i,j])    """ E[$(i),$(j)] = $(E[i,j]) following the update in UpdateConserved_X!. More info:
                                                     E_old[$(i),$(j)]   = $(E_old[i,j])
                                                     F_E_X[$(i),$(j)]   = $(F_E_X[i,j])
-                                                    F_E_X[$(i+1),$(j)] = $(F_E_X[i+1,j]). """
-
-                    @assert isfinite(ρd[i,j])     "ρd[$(i),$(j)] = $(ρd[i,j]) following the update in UpdateConserved_X!."
-                    @assert isfinite(ρdud_X[i,j]) "ρdud_X[$(i),$(j)] = $(ρdud_X[i,j]) following the update in UpdateConserved_X!."
-                    @assert isfinite(ρdud_Y[i,j]) "ρdud_Y[$(i),$(j)] = $(ρdud_Y[i,j]) following the update in UpdateConserved_X!."
+                                                    F_E_X[$(i+1),$(j)] = $(F_E_X[i+1,j])
+                                                    F_E_Y[$(i),$(j)]   = $(F_E_Y[i,j])
+                                                    F_E_Y[$(i+1),$(j)] = $(F_E_Y[i+1,j]). """
                 end
-            end
+
+                # Update every dust bin:
+                inv_ρ = 1 / ρ[i,j]  # Convenient variable
+                for bin in dN_dust
+                    # Update dust density:
+                    ρd[bin,i,j] = max( UpdateConservativeQuantity(ρd_old[bin,i,j], Δt, S_ρ, inv_ΔV[i,j], 
+                                       A_L_X, A_R_X, A_L_Y, A_R_Y, F_ρd_X[bin,i,j], F_ρd_X[bin,i+1,j], F_ρd_Y[bin,i,j], F_ρd_Y[bin,i,j+1]),
+                                       ρd_floor )
+                    # Update dust momentum in X-direction:
+                    ρdud_X[bin,i,j] = UpdateConservativeQuantity(ρdud_X_old[bin,i,j], Δt, S_ρdud_X, inv_ΔV[i,j], 
+                                      A_L_X, A_R_X, A_L_Y, A_R_Y, F_ρdud_X_X[bin,i,j], F_ρdud_X_X[bin,i+1,j], F_ρdud_X_Y[bin,i,j], F_ρdud_X_Y[bin,i,j+1])
+                    # Update dust momentum in Y-direction:
+                    ρdud_Y[bin,i,j] = UpdateConservativeQuantity(ρdud_Y_old[bin,i,j], Δt, S_ρu_Y, inv_ΔV[i,j],
+                                      A_L_X, A_R_X, A_L_Y, A_R_Y, F_ρdud_Y_X[bin,i,j], F_ρdud_Y_X[bin,i+1,j], F_ρdud_Y_Y[bin,i,j], F_ρdud_Y_Y[bin,i,j+1])
+
+                    if DEBUG_Hydro
+                        @assert isfinite(ρd[bin,i,j])     "ρd[$(bin),$(i),$(j)] = $(ρd[bin,i,j]) following the update in UpdateConserved_X!."
+                        @assert isfinite(ρdud_X[bin,i,j]) "ρdud_X[$(bin),$(i),$(j)] = $(ρdud_X[bin,i,j]) following the update in UpdateConserved_X!."
+                        @assert isfinite(ρdud_Y[bin,i,j]) "ρdud_Y[$(bin),$(i),$(j)] = $(ρdud_Y[bin,i,j]) following the update in UpdateConserved_X!."
+                    end
+
+                    if ρd[bin,i,j] ≤ ρd_IGNORE || ρd[bin,i,j] ≤ DG_th * ρ[i,j]
+                        # Since dust density is negligible, let it travel with the gas:
+                        DensityRatio    = ρd[bin,i,j] * inv_ρ
+                        ρdud_X[bin,i,j] = ρu_X[i,j]   * DensityRatio 
+                        ρdud_Y[bin,i,j] = ρu_Y[i,j]   * DensityRatio 
+                    end
+                end
+
+            end # End of inbounds 
         end # End of i-loop 
     end # End of j-loop 
 
-end
-
-
-""" Update all the conserved quantities (ρ, ρu_X, ρu_Y, E) 
-    in the Z-direction sweep. """
-function UpdateConserved_Y!( ρ::AbstractMatrix{Float64},
-                         ρ_old::AbstractMatrix{Float64},
-                          ρu_X::AbstractMatrix{Float64},
-                      ρu_X_old::AbstractMatrix{Float64},
-                          ρu_Y::AbstractMatrix{Float64},
-                      ρu_Y_old::AbstractMatrix{Float64},
-                             E::AbstractMatrix{Float64},
-                         E_old::AbstractMatrix{Float64},
-                         F_ρ_Y::AbstractMatrix{Float64}, 
-                      F_ρu_X_Y::AbstractMatrix{Float64},
-                      F_ρu_Y_Y::AbstractMatrix{Float64},
-                         F_E_Y::AbstractMatrix{Float64},
-
-                            ρd::AbstractMatrix{Float64},
-                        ρd_old::AbstractMatrix{Float64},
-                        ρdud_X::AbstractMatrix{Float64},
-                    ρdud_X_old::AbstractMatrix{Float64},
-                        ρdud_Y::AbstractMatrix{Float64},
-                    ρdud_Y_old::AbstractMatrix{Float64},
-                        F_ρd_Y::AbstractMatrix{Float64}, 
-                    F_ρdud_X_Y::AbstractMatrix{Float64},
-                    F_ρdud_Y_Y::AbstractMatrix{Float64},
-
-                        inv_ΔV::AbstractMatrix{Float64},  # Inverse volume 1 / ΔV
-                           A_Y::AbstractMatrix{Float64},  # Interface areas in Y-direction 
-                            Δt::Float64
-                             )
-
-    N_X, N_Y = size( ρ ) # Grid size
-    dN_X     = 1:N_X
-    dN_Y     = 1:N_Y
-    
-    @threads for j in dN_Y
-        @simd for i in dN_X
-            @inbounds begin 
-                # -------- Interface areas -----------------------------
-                A_L       = A_Y[i,j]    # Left interface area   
-                A_R       = A_Y[i,j+1]  # Right interface area 
-
-                # -------- Source terms --------------------------------
-                # No density source term (for gas and dust):
-                S_ρ       = 0.0
-                # No momentum source term in the Y-direction (for gas and dust):
-                S_ρu_Y    = 0.0 
-                # No momentum source term in the X-direction (for gas and dust):  
-                S_ρu_X    = 0.0
-                # No energy source term:
-                S_E       = 0.0
-                
-                # ------- Updates --------------------------------------
-                # Update density:
-                ρ[i,j]     = max( UpdateConservativeQuantity(ρ_old[i,j], Δt, S_ρ, inv_ΔV[i,j], A_L, A_R, F_ρ_Y[i,j], F_ρ_Y[i,j+1]),
-                                  ρ_floor )
-                # Update momentum in X-direction:
-                ρu_X[i,j]  = UpdateConservativeQuantity(ρu_X_old[i,j], Δt, S_ρu_X, inv_ΔV[i,j], A_L, A_R, F_ρu_X_Y[i,j], F_ρu_X_Y[i,j+1])
-                # Update momentum in Y-direction:
-                ρu_Y[i,j]  = UpdateConservativeQuantity(ρu_Y_old[i,j], Δt, S_ρu_Y, inv_ΔV[i,j], A_L, A_R, F_ρu_Y_Y[i,j], F_ρu_Y_Y[i,j+1])
-                # Update energy:
-                E[i,j]     = UpdateConservativeQuantity(E_old[i,j], Δt, S_E, inv_ΔV[i,j], A_L, A_R, F_E_Y[i,j], F_E_Y[i,j+1])
-
-                # Update dust density:
-                ρd[i,j]     = max( UpdateConservativeQuantity(ρd_old[i,j], Δt, S_ρ, inv_ΔV[i,j], A_L, A_R, F_ρd_Y[i,j], F_ρd_Y[i,j+1]),
-                                   ρd_floor )
-                # Update dust momentum in X-direction:
-                ρdud_X[i,j] = UpdateConservativeQuantity(ρdud_X_old[i,j], Δt, S_ρu_X, inv_ΔV[i,j], A_L, A_R, F_ρdud_X_Y[i,j], F_ρdud_X_Y[i,j+1])
-                # Update dust momentum in Y-direction:
-                ρdud_Y[i,j] = UpdateConservativeQuantity(ρdud_Y_old[i,j], Δt, S_ρu_Y, inv_ΔV[i,j], A_L, A_R, F_ρdud_Y_Y[i,j], F_ρdud_Y_Y[i,j+1])
-
-
-                if DEBUG_Hydro
-                    @assert isfinite(ρ[i,j])    "ρ[$(i),$(j)] = $(ρ[i,j]) following the update in UpdateConserved_X!."
-                    @assert isfinite(ρu_X[i,j]) "ρu_X[$(i),$(j)] = $(ρu_X[i,j]) following the update in UpdateConserved_X!."
-                    @assert isfinite(ρu_Y[i,j]) "ρu_Y[$(i),$(j)] = $(ρu_Y[i,j]) following the update in UpdateConserved_X!."
-                    @assert isfinite(E[i,j])    "E[$(i),$(j)] = $(E[i,j]) following the update in UpdateConserved_X!. More info:
-                                                 E_old[$(i),$(j)]   = $(E_old[i,j])
-                                                 F_E_Y[$(i),$(j)]   = $(F_E_Y[i,j])
-                                                 F_E_Y[$(i),$(j+1)] = $(F_E_Y[i,j+1])."
-
-                    @assert isfinite(ρd[i,j])     "ρd[$(i),$(j)] = $(ρd[i,j]) following the update in UpdateConserved_X!."
-                    @assert isfinite(ρdud_X[i,j]) "ρdud_X[$(i),$(j)] = $(ρdud_X[i,j]) following the update in UpdateConserved_X!."
-                    @assert isfinite(ρdud_Y[i,j]) "ρdud_Y[$(i),$(j)] = $(ρdud_Y[i,j]) following the update in UpdateConserved_X!."
-                end
-            end
-        end # End of i-loop 
-    end # End of j-loop 
-
+    return nothing 
 end
 
 
 const CoordSystem = Union{Val{:Cartesian}, Val{:Cylindrical}}
 
-function ForwardEuler_X!( ρ_new::AbstractMatrix{Float64},
-                       ρu_X_new::AbstractMatrix{Float64},
-                       ρu_Y_new::AbstractMatrix{Float64},
-                          E_new::AbstractMatrix{Float64},
-                              ρ::AbstractMatrix{Float64},
-                           ρu_X::AbstractMatrix{Float64},
-                           ρu_Y::AbstractMatrix{Float64},
-                              E::AbstractMatrix{Float64},
-                            γad::AbstractMatrix{Float64},
-                            u_X::AbstractMatrix{Float64},
-                            u_Y::AbstractMatrix{Float64},
+""" This function performs a full forward-Euler time-step update 
+    of the hydro conservative variables. This includes the required 
+    interface reconstruction & calculation of interface fluxes. 
+    
+    This function is used to construct the higher-order time-step 
+    method. """
+function ForwardEuler!( ρ_new::AbstractMatrix{Float64},
+                     ρu_X_new::AbstractMatrix{Float64},
+                     ρu_Y_new::AbstractMatrix{Float64},
+                        E_new::AbstractMatrix{Float64},
+                   e_dual_new::AbstractMatrix{Float64},
+                            ρ::AbstractMatrix{Float64},
+                         ρu_X::AbstractMatrix{Float64},
+                         ρu_Y::AbstractMatrix{Float64},
+                            E::AbstractMatrix{Float64},
+                       e_dual::AbstractMatrix{Float64},
+                          γad::AbstractMatrix{Float64},
+                          u_X::AbstractMatrix{Float64},
+                          u_Y::AbstractMatrix{Float64},
 
-                         ρd_new::AbstractMatrix{Float64},
-                     ρdud_X_new::AbstractMatrix{Float64},
-                     ρdud_Y_new::AbstractMatrix{Float64},
-                             ρd::AbstractMatrix{Float64},
-                         ρdud_X::AbstractMatrix{Float64},
-                         ρdud_Y::AbstractMatrix{Float64},
-                           ud_X::AbstractMatrix{Float64},
-                           ud_Y::AbstractMatrix{Float64},
+                       ρd_new::AbstractArray{Float64, 3},
+                   ρdud_X_new::AbstractArray{Float64, 3},
+                   ρdud_Y_new::AbstractArray{Float64, 3},
+                           ρd::AbstractArray{Float64, 3},
+                       ρdud_X::AbstractArray{Float64, 3},
+                       ρdud_Y::AbstractArray{Float64, 3},
+                         ud_X::AbstractArray{Float64, 3},
+                         ud_Y::AbstractArray{Float64, 3},
 
-                         inv_ΔV::AbstractMatrix{Float64},
-                            A_X::AbstractMatrix{Float64},
-                             Δt::Float64,
+                       inv_ΔV::AbstractMatrix{Float64},
+                          A_X::AbstractMatrix{Float64},
+                          A_Y::AbstractMatrix{Float64},
+                           Δt::Float64,
 
                         # Conservative & primitive variables @ cell centers:
-                             ρc::AbstractMatrix{Float64}, 
-                          ρu_Xc::AbstractMatrix{Float64}, 
-                          ρu_Yc::AbstractMatrix{Float64},
-                             Ec::AbstractMatrix{Float64},         
-                           u_Xc::AbstractMatrix{Float64}, 
-                           u_Yc::AbstractMatrix{Float64}, 
-                             Pc::AbstractMatrix{Float64},  
+                           ρc::AbstractMatrix{Float64}, 
+                        ρu_Xc::AbstractMatrix{Float64}, 
+                        ρu_Yc::AbstractMatrix{Float64},
+                           Ec::AbstractMatrix{Float64},         
+                         u_Xc::AbstractMatrix{Float64}, 
+                         u_Yc::AbstractMatrix{Float64}, 
+                           Pc::AbstractMatrix{Float64},  
                              
-                            ρdc::AbstractMatrix{Float64}, 
-                        ρdud_Xc::AbstractMatrix{Float64}, 
-                        ρdud_Yc::AbstractMatrix{Float64},  
-                          ud_Xc::AbstractMatrix{Float64}, 
-                          ud_Yc::AbstractMatrix{Float64}, 
+                          ρdc::AbstractArray{Float64, 3}, 
+                      ρdud_Xc::AbstractArray{Float64, 3},
+                      ρdud_Yc::AbstractArray{Float64, 3},
+                        ud_Xc::AbstractArray{Float64, 3}, 
+                        ud_Yc::AbstractArray{Float64, 3},
 
                         # Weights to convert between cell-averages and cell-centers: 
-                       w_i_m1_X::AbstractVector{Float64}, 
-                        w_i_0_X::AbstractVector{Float64},
-                       w_i_p1_X::AbstractVector{Float64},  
-                       q_i_m1_X::AbstractVector{Float64}, 
-                        q_i_0_X::AbstractVector{Float64}, 
-                       q_i_p1_X::AbstractVector{Float64},  
+                     w_i_m1_X::AbstractVector{Float64}, 
+                      w_i_0_X::AbstractVector{Float64},
+                     w_i_p1_X::AbstractVector{Float64},  
+                     q_i_m1_X::AbstractVector{Float64}, 
+                      q_i_0_X::AbstractVector{Float64}, 
+                     q_i_p1_X::AbstractVector{Float64},  
+
+                     w_j_m1_Y::AbstractVector{Float64}, 
+                      w_j_0_Y::AbstractVector{Float64}, 
+                     w_j_p1_Y::AbstractVector{Float64},  
+                     q_j_m1_Y::AbstractVector{Float64}, 
+                      q_j_0_Y::AbstractVector{Float64}, 
+                     q_j_p1_Y::AbstractVector{Float64},  
 
                         # Weights for WENO3 interface reconstruction:
-                    w_plus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{i,1}
-                   w_minus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{i,1} 
+                  w_plus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{i,1}
+                 w_minus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{i,1} 
+                  w_plus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{j,1}
+                 w_minus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{j,1}
 
-                          ρ_L_X::AbstractMatrix{Float64},
-                          ρ_R_X::AbstractMatrix{Float64},
-                        u_X_L_X::AbstractMatrix{Float64},
-                        u_X_R_X::AbstractMatrix{Float64},
-                        u_Y_L_X::AbstractMatrix{Float64},
-                        u_Y_R_X::AbstractMatrix{Float64},
-                          P_L_X::AbstractMatrix{Float64},
-                          P_R_X::AbstractMatrix{Float64},
-                          F_ρ_X::AbstractMatrix{Float64},
-                       F_ρu_X_X::AbstractMatrix{Float64},
-                       F_ρu_Y_X::AbstractMatrix{Float64},
-                          F_E_X::AbstractMatrix{Float64},
-                              P::AbstractMatrix{Float64},
-                     u_X_star_X::AbstractMatrix{Float64},
+                        # Interface variables & fluxes:
+                        ρ_L_X::AbstractMatrix{Float64},
+                        ρ_R_X::AbstractMatrix{Float64},
+                      u_X_L_X::AbstractMatrix{Float64},
+                      u_X_R_X::AbstractMatrix{Float64},
+                      u_Y_L_X::AbstractMatrix{Float64},
+                      u_Y_R_X::AbstractMatrix{Float64},
+                        P_L_X::AbstractMatrix{Float64},
+                        P_R_X::AbstractMatrix{Float64},
+                   e_dual_L_X::AbstractMatrix{Float64},
+                   e_dual_R_X::AbstractMatrix{Float64},
+                        F_ρ_X::AbstractMatrix{Float64},
+                     F_ρu_X_X::AbstractMatrix{Float64},
+                     F_ρu_Y_X::AbstractMatrix{Float64},
+                        F_E_X::AbstractMatrix{Float64},
+                   F_e_dual_X::AbstractMatrix{Float64},
+                   u_X_star_X::AbstractMatrix{Float64},
 
-                         ρd_L_X::AbstractMatrix{Float64},
-                         ρd_R_X::AbstractMatrix{Float64},
-                       ud_X_L_X::AbstractMatrix{Float64},
-                       ud_X_R_X::AbstractMatrix{Float64},
-                       ud_Y_L_X::AbstractMatrix{Float64},
-                       ud_Y_R_X::AbstractMatrix{Float64},
-                         F_ρd_X::AbstractMatrix{Float64},
-                     F_ρdud_X_X::AbstractMatrix{Float64},
-                     F_ρdud_Y_X::AbstractMatrix{Float64},
+                       ρd_L_X::AbstractArray{Float64, 3},
+                       ρd_R_X::AbstractArray{Float64, 3},
+                     ud_X_L_X::AbstractArray{Float64, 3},
+                     ud_X_R_X::AbstractArray{Float64, 3},
+                     ud_Y_L_X::AbstractArray{Float64, 3},
+                     ud_Y_R_X::AbstractArray{Float64, 3},
+                       F_ρd_X::AbstractArray{Float64, 3},
+                   F_ρdud_X_X::AbstractArray{Float64, 3},
+                   F_ρdud_Y_X::AbstractArray{Float64, 3},
+
+                        ρ_L_Y::AbstractMatrix{Float64},
+                        ρ_R_Y::AbstractMatrix{Float64},
+                      u_Y_L_Y::AbstractMatrix{Float64},
+                      u_Y_R_Y::AbstractMatrix{Float64},
+                      u_X_L_Y::AbstractMatrix{Float64},
+                      u_X_R_Y::AbstractMatrix{Float64},
+                        P_L_Y::AbstractMatrix{Float64},
+                        P_R_Y::AbstractMatrix{Float64},
+                   e_dual_L_Y::AbstractMatrix{Float64},
+                   e_dual_R_Y::AbstractMatrix{Float64},
+                        F_ρ_Y::AbstractMatrix{Float64},
+                     F_ρu_X_Y::AbstractMatrix{Float64},
+                     F_ρu_Y_Y::AbstractMatrix{Float64},
+                        F_E_Y::AbstractMatrix{Float64},
+                   F_e_dual_Y::AbstractMatrix{Float64},
+                   u_Y_star_Y::AbstractMatrix{Float64},
+
+                       ρd_L_Y::AbstractArray{Float64, 3},
+                       ρd_R_Y::AbstractArray{Float64, 3},
+                     ud_Y_L_Y::AbstractArray{Float64, 3},
+                     ud_Y_R_Y::AbstractArray{Float64, 3},
+                     ud_X_L_Y::AbstractArray{Float64, 3},
+                     ud_X_R_Y::AbstractArray{Float64, 3},
+                       F_ρd_Y::AbstractArray{Float64, 3},
+                   F_ρdud_X_Y::AbstractArray{Float64, 3},
+                   F_ρdud_Y_Y::AbstractArray{Float64, 3},
+
+                        # Gas pressure (cell-averaged):
+                            P::AbstractMatrix{Float64},
                                        
                         # Ghost‐padded primitives & grid:
-                         ρg_old::AbstractMatrix{Float64}, 
-                       u_Xg_old::AbstractMatrix{Float64}, 
-                       u_Yg_old::AbstractMatrix{Float64}, 
-                         Pg_old::AbstractMatrix{Float64},
+                       ρg_old::AbstractMatrix{Float64}, 
+                     u_Xg_old::AbstractMatrix{Float64}, 
+                     u_Yg_old::AbstractMatrix{Float64}, 
+                       Pg_old::AbstractMatrix{Float64},
+                  e_dualg_old::AbstractMatrix{Float64},
 
-                        ρdg_old::AbstractMatrix{Float64}, 
-                      ud_Xg_old::AbstractMatrix{Float64}, 
-                      ud_Yg_old::AbstractMatrix{Float64}, 
+                      ρdg_old::AbstractArray{Float64, 3}, 
+                    ud_Xg_old::AbstractArray{Float64, 3}, 
+                    ud_Yg_old::AbstractArray{Float64, 3},
 
-                             Xg::AbstractVector{Float64},
-                          XCoMg::AbstractVector{Float64},
+                           Xg::AbstractVector{Float64},
+                        XCoMg::AbstractVector{Float64},
+                           Yg::AbstractVector{Float64},
+                        YCoMg::AbstractVector{Float64},
 
-                       CoordSys::CoordSystem,
-                     inv_r_cell::AbstractVector{Float64},
+                     CoordSys::CoordSystem,
+                   inv_r_cell::AbstractVector{Float64},
   
                         # Shock indicator:
-                          Shock::AbstractMatrix{Int}, 
+                        Shock::AbstractMatrix{Int}, 
  
                         # BCs:
-                      BC_X_left::Symbol, BC_X_right::Symbol,
-                      BC_Y_left::Symbol, BC_Y_right::Symbol
+                    BC_X_left::Symbol, BC_X_right::Symbol,
+                    BC_Y_left::Symbol, BC_Y_right::Symbol
                           )
+
+    N_dust  = size( ρd, 1 )
+    dN_dust = 1:N_dust      # Convenient interval below 
+
+    # Update shock indicators for the Riemann solver:
+    UpdateShockFinder!( Shock, P, ρ, ρd )
+
+    ###############################################################
+    #######                                                 #######
+    #######        X - R E C O N S T R U C T I O N          #######
+    #######                                                 #######
+    ###############################################################
 
     # (a) Get cell-center conservatives (in X-direction) from 
     # cell-averaged conservatives:
@@ -3234,6 +4211,7 @@ function ForwardEuler_X!( ρ_new::AbstractMatrix{Float64},
                                      ρdc, ρdud_Xc, ρdud_Yc,
                                      ρ,  ρu_X,  ρu_Y,  E, γad,  # Cell-averaged values 
                                      ρd, ρdud_X,  ρdud_Y,
+                                     e_dual,
                                      w_i_m1_X, w_i_0_X, w_i_p1_X,
                                      Shock,
                                      BC_X_left, BC_X_right )
@@ -3243,7 +4221,7 @@ function ForwardEuler_X!( ρ_new::AbstractMatrix{Float64},
     RecoverPointwisePrimitivesFromConservatives!( ρc, ρu_Xc, ρu_Yc, Ec,
                                                   ρdc, ρdud_Xc, ρdud_Yc,
                                                   u_Xc, u_Yc, Pc, γad,
-                                                  ud_Xc, ud_Yc )
+                                                  ud_Xc, ud_Yc, e_dual )
 
     # (c) Get cell-averaged primitives (in X-direction) from cell-center primitives:
     RecoverCellAveragedPrimitives_X!( u_Xc, u_Yc, Pc,    # Cell-centered primitives 
@@ -3254,37 +4232,40 @@ function ForwardEuler_X!( ρ_new::AbstractMatrix{Float64},
                                       Shock,
                                       BC_X_left, BC_X_right )
 
-    # Update shock indicators for the Riemann solver:
-    UpdateShockFinder!( Shock, P )
-
     # (d) Fill ghost-arrays with values from the updated 
-    # cell-averaged primitives: 
+    # cell-averaged (in X-direction) primitives: 
     @views @inbounds begin 
-        ρg_old[ng+1:end-ng, ng+1:end-ng]    .= ρ
-        u_Xg_old[ng+1:end-ng, ng+1:end-ng]  .= u_X
-        u_Yg_old[ng+1:end-ng, ng+1:end-ng]  .= u_Y
-        Pg_old[ng+1:end-ng, ng+1:end-ng]    .= P
+        ρg_old[ng+1:end-ng, ng+1:end-ng]      .= ρ
+        u_Xg_old[ng+1:end-ng, ng+1:end-ng]    .= u_X
+        u_Yg_old[ng+1:end-ng, ng+1:end-ng]    .= u_Y
+        Pg_old[ng+1:end-ng, ng+1:end-ng]      .= P
+        e_dualg_old[ng+1:end-ng, ng+1:end-ng] .= e_dual
 
-        ρdg_old[ng+1:end-ng, ng+1:end-ng]   .= ρd
-        ud_Xg_old[ng+1:end-ng, ng+1:end-ng] .= ud_X
-        ud_Yg_old[ng+1:end-ng, ng+1:end-ng] .= ud_Y
+        for bin in dN_dust 
+            ρdg_old[bin,ng+1:end-ng, ng+1:end-ng]   .= ρd[bin,:,:]
+            ud_Xg_old[bin,ng+1:end-ng, ng+1:end-ng] .= ud_X[bin,:,:]
+            ud_Yg_old[bin,ng+1:end-ng, ng+1:end-ng] .= ud_Y[bin,:,:]
+        end
     end
     FillGhosts!( ρg_old, u_Xg_old, u_Yg_old, Pg_old,
+                 e_dualg_old,
                  ρdg_old, ud_Xg_old, ud_Yg_old, 
                  BC_X_left, BC_X_right, 
                  BC_Y_left, BC_Y_right )
 
     # (e) Reconstruct X-interfaces:
-    UpdateInterfaceValues_X!( ρ_L_X, ρ_R_X,  P_L_X, P_R_X,  u_X_L_X, u_X_R_X,  u_Y_L_X, u_Y_R_X,
+    UpdateInterfaceValues_X!( ρ_L_X, ρ_R_X,  P_L_X, P_R_X,  e_dual_L_X, e_dual_R_X,
+                              u_X_L_X, u_X_R_X,  u_Y_L_X, u_Y_R_X,
                               ρd_L_X, ρd_R_X,  ud_X_L_X, ud_X_R_X,  ud_Y_L_X, ud_Y_R_X,
-                              ρg_old, Pg_old, u_Xg_old, u_Yg_old, 
+                              ρg_old, Pg_old, e_dualg_old, u_Xg_old, u_Yg_old, 
                               ρdg_old, ud_Xg_old, ud_Yg_old, 
                               Xg, XCoMg, Shock, w_plus_i_p1, w_minus_i_p1 )
 
     # (f) Get X-direction fluxes:
-    ComputeFlux_X!( F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X,
+    ComputeFlux_X!( F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X, F_e_dual_X,
                     ρ_L_X, ρ_R_X, u_X_L_X, u_X_R_X,
                     u_Y_L_X, u_Y_R_X, P_L_X, P_R_X,
+                    e_dual_L_X, e_dual_R_X,
 
                     F_ρd_X, F_ρdud_X_X, F_ρdud_Y_X, 
                     ρd_L_X, ρd_R_X, ud_X_L_X, ud_X_R_X,
@@ -3292,129 +4273,11 @@ function ForwardEuler_X!( ρ_new::AbstractMatrix{Float64},
 
                     ρ, u_X_star_X, γad, Shock )
 
-    # (g) Update over time-step Δt (write into *_new):
-    UpdateConserved_X!( ρ_new, ρ, ρu_X_new, ρu_X, ρu_Y_new, ρu_Y,
-                        E_new, E,
-                        F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X,
-
-                        ρd_new, ρd, ρdud_X_new, ρdud_X, ρdud_Y_new, ρdud_Y,
-                        F_ρd_X, F_ρdud_X_X, F_ρdud_Y_X,
-
-                        inv_ΔV, A_X, Δt,
-                        P_L_X, Pc, P_R_X, inv_r_cell, CoordSys )
-
-    # (h) Update old variables:
-    ρ      .= ρ_new 
-    ρu_X   .= ρu_X_new
-    ρu_Y   .= ρu_Y_new
-    E      .= E_new
-
-    ρd     .= ρd_new 
-    ρdud_X .= ρdud_X_new
-    ρdud_Y .= ρdud_Y_new
-
-    return nothing 
-end
-
-
-function ForwardEuler_Y!( ρ_new::AbstractMatrix{Float64},
-                       ρu_X_new::AbstractMatrix{Float64},
-                       ρu_Y_new::AbstractMatrix{Float64},
-                          E_new::AbstractMatrix{Float64},
-                              ρ::AbstractMatrix{Float64},
-                           ρu_X::AbstractMatrix{Float64},
-                           ρu_Y::AbstractMatrix{Float64},
-                              E::AbstractMatrix{Float64},
-                            γad::AbstractMatrix{Float64},
-                            u_X::AbstractMatrix{Float64},
-                            u_Y::AbstractMatrix{Float64},
-
-                         ρd_new::AbstractMatrix{Float64},
-                     ρdud_X_new::AbstractMatrix{Float64},
-                     ρdud_Y_new::AbstractMatrix{Float64},
-                             ρd::AbstractMatrix{Float64},
-                         ρdud_X::AbstractMatrix{Float64},
-                         ρdud_Y::AbstractMatrix{Float64},
-                           ud_X::AbstractMatrix{Float64},
-                           ud_Y::AbstractMatrix{Float64},
-
-                         inv_ΔV::AbstractMatrix{Float64},
-                            A_Y::AbstractMatrix{Float64},
-                             Δt::Float64,
-
-                            # Conservative & primitive variables @ cell centers:
-                             ρc::AbstractMatrix{Float64}, 
-                          ρu_Xc::AbstractMatrix{Float64}, 
-                          ρu_Yc::AbstractMatrix{Float64},
-                             Ec::AbstractMatrix{Float64},         
-                           u_Xc::AbstractMatrix{Float64}, 
-                           u_Yc::AbstractMatrix{Float64}, 
-                             Pc::AbstractMatrix{Float64},    
-                             
-                            ρdc::AbstractMatrix{Float64}, 
-                        ρdud_Xc::AbstractMatrix{Float64}, 
-                        ρdud_Yc::AbstractMatrix{Float64},   
-                          ud_Xc::AbstractMatrix{Float64}, 
-                          ud_Yc::AbstractMatrix{Float64}, 
-
-                            # Weights to convert between cell-averages and cell-centers: 
-                       w_j_m1_Y::AbstractVector{Float64}, 
-                        w_j_0_Y::AbstractVector{Float64}, 
-                       w_j_p1_Y::AbstractVector{Float64},  
-                       q_j_m1_Y::AbstractVector{Float64}, 
-                        q_j_0_Y::AbstractVector{Float64}, 
-                       q_j_p1_Y::AbstractVector{Float64},  
-
-                            # Weights for WENO3 interface reconstruction:
-                    w_plus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{j,1}
-                   w_minus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{j,1}
-
-                          ρ_L_Y::AbstractMatrix{Float64},
-                          ρ_R_Y::AbstractMatrix{Float64},
-                        u_Y_L_Y::AbstractMatrix{Float64},
-                        u_Y_R_Y::AbstractMatrix{Float64},
-                        u_X_L_Y::AbstractMatrix{Float64},
-                        u_X_R_Y::AbstractMatrix{Float64},
-                          P_L_Y::AbstractMatrix{Float64},
-                          P_R_Y::AbstractMatrix{Float64},
-                          F_ρ_Y::AbstractMatrix{Float64},
-                       F_ρu_X_Y::AbstractMatrix{Float64},
-                       F_ρu_Y_Y::AbstractMatrix{Float64},
-                          F_E_Y::AbstractMatrix{Float64},
-                              P::AbstractMatrix{Float64},
-                     u_Y_star_Y::AbstractMatrix{Float64},
-
-                         ρd_L_Y::AbstractMatrix{Float64},
-                         ρd_R_Y::AbstractMatrix{Float64},
-                       ud_Y_L_Y::AbstractMatrix{Float64},
-                       ud_Y_R_Y::AbstractMatrix{Float64},
-                       ud_X_L_Y::AbstractMatrix{Float64},
-                       ud_X_R_Y::AbstractMatrix{Float64},
-                         F_ρd_Y::AbstractMatrix{Float64},
-                     F_ρdud_X_Y::AbstractMatrix{Float64},
-                     F_ρdud_Y_Y::AbstractMatrix{Float64},
-                                       
-                            # Ghost‐padded primitives & grid:
-                         ρg_old::AbstractMatrix{Float64}, 
-                       u_Xg_old::AbstractMatrix{Float64}, 
-                       u_Yg_old::AbstractMatrix{Float64}, 
-                         Pg_old::AbstractMatrix{Float64},
-
-                        ρdg_old::AbstractMatrix{Float64}, 
-                      ud_Xg_old::AbstractMatrix{Float64}, 
-                      ud_Yg_old::AbstractMatrix{Float64}, 
-
-                             Yg::AbstractVector{Float64},
-                          YCoMg::AbstractVector{Float64},
-
-  
-                            # Shock indicator:
-                          Shock::AbstractMatrix{Int}, 
- 
-                            # BCs:
-                      BC_X_left::Symbol, BC_X_right::Symbol,
-                      BC_Y_left::Symbol, BC_Y_right::Symbol
-                       )
+    ###############################################################
+    #######                                                 #######
+    #######        Y - R E C O N S T R U C T I O N          #######
+    #######                                                 #######
+    ###############################################################
 
     # (a) Get cell-center conservatives (in Y-direction) from 
     # cell-averaged conservatives:
@@ -3422,6 +4285,7 @@ function ForwardEuler_Y!( ρ_new::AbstractMatrix{Float64},
                                      ρdc, ρdud_Xc, ρdud_Yc,
                                      ρ,  ρu_X,  ρu_Y,  E, γad,  # Cell-averaged values 
                                      ρd,  ρdud_X,  ρdud_Y,
+                                     e_dual,
                                      w_j_m1_Y, w_j_0_Y, w_j_p1_Y,
                                      Shock,
                                      BC_Y_left, BC_Y_right )
@@ -3431,7 +4295,7 @@ function ForwardEuler_Y!( ρ_new::AbstractMatrix{Float64},
     RecoverPointwisePrimitivesFromConservatives!( ρc, ρu_Xc, ρu_Yc, Ec,
                                                   ρdc, ρdud_Xc, ρdud_Yc,
                                                   u_Xc, u_Yc, Pc, γad,
-                                                  ud_Xc, ud_Yc )
+                                                  ud_Xc, ud_Yc, e_dual )
 
     # (c) Get cell-averaged primitives (in Y-direction) from cell-center primitives:
     RecoverCellAveragedPrimitives_Y!( u_Xc, u_Yc, Pc,    # Cell-centered primitives 
@@ -3442,37 +4306,41 @@ function ForwardEuler_Y!( ρ_new::AbstractMatrix{Float64},
                                       Shock,
                                       BC_Y_left, BC_Y_right )
 
-    # Update shock indicators for the Riemann solver:
-    UpdateShockFinder!( Shock, P )
-
     # (d) Fill ghost-arrays with values from the updated 
-    # cell-averaged primitives: 
+    # cell-averaged (in Y-direction) primitives: 
     @views @inbounds begin 
-        ρg_old[ng+1:end-ng, ng+1:end-ng]    .= ρ
-        u_Xg_old[ng+1:end-ng, ng+1:end-ng]  .= u_X
-        u_Yg_old[ng+1:end-ng, ng+1:end-ng]  .= u_Y
-        Pg_old[ng+1:end-ng, ng+1:end-ng]    .= P
+        ρg_old[ng+1:end-ng, ng+1:end-ng]      .= ρ
+        u_Xg_old[ng+1:end-ng, ng+1:end-ng]    .= u_X
+        u_Yg_old[ng+1:end-ng, ng+1:end-ng]    .= u_Y
+        Pg_old[ng+1:end-ng, ng+1:end-ng]      .= P
+        e_dualg_old[ng+1:end-ng, ng+1:end-ng] .= e_dual
 
-        ρdg_old[ng+1:end-ng, ng+1:end-ng]   .= ρd
-        ud_Xg_old[ng+1:end-ng, ng+1:end-ng] .= ud_X
-        ud_Yg_old[ng+1:end-ng, ng+1:end-ng] .= ud_Y
+        for bin in dN_dust 
+            ρdg_old[bin,ng+1:end-ng, ng+1:end-ng]   .= ρd[bin,:,:]
+            ud_Xg_old[bin,ng+1:end-ng, ng+1:end-ng] .= ud_X[bin,:,:]
+            ud_Yg_old[bin,ng+1:end-ng, ng+1:end-ng] .= ud_Y[bin,:,:]
+        end
     end
     FillGhosts!( ρg_old, u_Xg_old, u_Yg_old, Pg_old,
-                 ρdg_old, ud_Xg_old, ud_Yg_old,
+                 e_dualg_old,
+                 ρdg_old, ud_Xg_old, ud_Yg_old, 
                  BC_X_left, BC_X_right, 
                  BC_Y_left, BC_Y_right )
 
     # (e) Reconstruct Y-interfaces:
-    UpdateInterfaceValues_Y!( ρ_L_Y, ρ_R_Y,  P_L_Y, P_R_Y,  u_X_L_Y, u_X_R_Y,  u_Y_L_Y, u_Y_R_Y,
+    UpdateInterfaceValues_Y!( ρ_L_Y, ρ_R_Y,  P_L_Y, P_R_Y,  e_dual_L_Y, e_dual_R_Y,  
+                              u_X_L_Y, u_X_R_Y,  u_Y_L_Y, u_Y_R_Y,
                               ρd_L_Y, ρd_R_Y,  ud_X_L_Y, ud_X_R_Y,  ud_Y_L_Y, ud_Y_R_Y, 
-                              ρg_old, Pg_old, u_Xg_old, u_Yg_old,
+                              ρg_old, Pg_old, e_dualg_old, u_Xg_old, u_Yg_old,
                               ρdg_old, ud_Xg_old, ud_Yg_old,
                               Yg, YCoMg, Shock, w_plus_j_p1, w_minus_j_p1 )
 
     # (f) Get Y-direction fluxes:
-    ComputeFlux_Y!( F_ρ_Y, F_ρu_X_Y, F_ρu_Y_Y, F_E_Y,
+    ComputeFlux_Y!( F_ρ_Y, F_ρu_X_Y, F_ρu_Y_Y, F_E_Y, 
+                    F_e_dual_Y,
                     ρ_L_Y, ρ_R_Y, u_Y_L_Y, u_Y_R_Y,
                     u_X_L_Y, u_X_R_Y, P_L_Y, P_R_Y,
+                    e_dual_L_Y, e_dual_R_Y,
 
                     F_ρd_Y, F_ρdud_X_Y, F_ρdud_Y_Y, 
                     ρd_L_Y, ρd_R_Y, ud_Y_L_Y, ud_Y_R_Y,
@@ -3480,41 +4348,52 @@ function ForwardEuler_Y!( ρ_new::AbstractMatrix{Float64},
 
                     ρ, u_Y_star_Y, γad, Shock )
 
-    # (g) Update over time-step Δt (write into *_new):
-    UpdateConserved_Y!( ρ_new, ρ, ρu_X_new, ρu_X,
-                        ρu_Y_new, ρu_Y, E_new, E,
-                        F_ρ_Y, F_ρu_X_Y, F_ρu_Y_Y, F_E_Y,
+    ###############################################################
+    #######                                                 #######
+    #######             U P D A T E  O V E R  Δt            #######
+    #######                                                 #######
+    ###############################################################
 
-                        ρd_new, ρd, ρdud_X_new, ρdud_X,
-                        ρdud_Y_new, ρdud_Y, 
-                        F_ρd_Y, F_ρdud_X_Y, F_ρdud_Y_Y,
+    # Update over time-step Δt (write into *_new):
+    UpdateConserved!( ρ_new, ρ, ρu_X_new, ρu_X, ρu_Y_new, ρu_Y,
+                      E_new, E, e_dual_new, e_dual,
+                      F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X, F_e_dual_X,
+                      F_ρ_Y, F_ρu_X_Y, F_ρu_Y_Y, F_E_Y, F_e_dual_Y,
 
-                        inv_ΔV, A_Y, Δt )
+                      ρd_new, ρd, ρdud_X_new, ρdud_X, ρdud_Y_new, ρdud_Y,
+                      F_ρd_X, F_ρdud_X_X, F_ρdud_Y_X,
+                      F_ρd_Y, F_ρdud_X_Y, F_ρdud_Y_Y,
 
-    # (h) Update old variables:
-    ρ      .= ρ_new
+                      inv_ΔV, A_X, A_Y, Δt,
+                      P, u_X_L_X, u_X_R_X, u_Y_L_Y, u_Y_R_Y,
+                      P_L_X, Pc, P_R_X, inv_r_cell, CoordSys )
+
+    # Update old variables:
+    ρ      .= ρ_new 
     ρu_X   .= ρu_X_new
     ρu_Y   .= ρu_Y_new
     E      .= E_new
+    e_dual .= e_dual_new
 
-    ρd     .= ρd_new
+    ρd     .= ρd_new 
     ρdud_X .= ρdud_X_new
     ρdud_Y .= ρdud_Y_new
 
     return nothing 
-end
+end 
 
 
-""" This function performs a forward Euler update in the X-direction for all 
+""" This function performs a forward-Euler time-step update for all 
     passive scalars. """
-function ForwardEuler_X_Scalars!( Scalars::AbstractArray{Float64, 3},  # Array of passive scalars, for all cells 
-                              Scalars_old::AbstractArray{Float64, 3},  # Array of old passive scalars, for all cells 
-                                    ρ_old::AbstractMatrix{Float64},    # Gas density *before* forward Euler update 
-                                    F_ρ_X::AbstractMatrix{Float64},
-                                   inv_ΔV::AbstractMatrix{Float64},
-                                      A_X::AbstractMatrix{Float64},
-                                       Δt::Float64
-                                 )
+function ForwardEuler_Scalars!( Scalars::AbstractArray{Float64, 3},  # Array of passive scalars, for all cells 
+                            Scalars_old::AbstractArray{Float64, 3},  # Array of old passive scalars, for all cells 
+                                  ρ_old::AbstractMatrix{Float64},    # Gas density *before* forward Euler update 
+                                  F_ρ_X::AbstractMatrix{Float64},
+                                  F_ρ_Y::AbstractMatrix{Float64},
+                                 inv_ΔV::AbstractMatrix{Float64},
+                                    A_X::AbstractMatrix{Float64},
+                                    A_Y::AbstractMatrix{Float64},
+                                     Δt::Float64 )
 
     N_X, N_Y, N_Scalars = size( Scalars )
     dN_X                = 1:N_X 
@@ -3527,90 +4406,54 @@ function ForwardEuler_X_Scalars!( Scalars::AbstractArray{Float64, 3},  # Array o
                 # Clamp indices that enter x, which implicitly assumes 
                 # zero gradient extrapolation BC's:
                 ip1 = min( i + 1, N_X )
-                im1 = max( i - 1, 1 )        
+                im1 = max( i - 1, 1 )   
+                jp1 = min( j + 1, N_Y )
+                jm1 = max( j - 1, 1 )       
                 
-                # Reconstruct x on interfaces, using a simple first-order method: 
+                # Reconstruct x on X-interfaces, using a simple first-order method: 
                 if F_ρ_X[i,j] ≥ 0.0
-                    xL = Scalars_old[im1,j,k] / ρ_old[im1,j]  # Flow left → right
+                    xL_X = Scalars_old[im1,j,k] / ρ_old[im1,j]  # Flow left → right
                 else
-                    xL = Scalars_old[i,j,k] / ρ_old[i,j]      # Flow right → left
+                    xL_X = Scalars_old[i,j,k] / ρ_old[i,j]      # Flow right → left
                 end
 
                 if F_ρ_X[i+1,j] ≥ 0.0
-                    xR = Scalars_old[i,j,k] / ρ_old[i,j]      # Flow left → right
+                    xR_X = Scalars_old[i,j,k] / ρ_old[i,j]      # Flow left → right
                 else
-                    xR = Scalars_old[ip1,j,k] / ρ_old[ip1,j]  # Flow right → left
+                    xR_X = Scalars_old[ip1,j,k] / ρ_old[ip1,j]  # Flow right → left
                 end
 
-                # Get left (i-1/2) & right (i+1/2) interface fluxes:
-                F_L_X   = F_ρ_X[i,j]   * xL
-                F_R_X   = F_ρ_X[i+1,j] * xR
-
-                # Get interface areas:
-                A_R     = A_X[i+1,j]
-                A_L     = A_X[i,j]
-
-                # Advect scalar ρx over a time-step Δt:
-                Scalars[i,j,k] = Scalars_old[i,j,k] - ( Δt * inv_ΔV[i,j] ) * ( A_R * F_R_X  -  A_L * F_L_X )
-
-                # Floor scalars, since they are all supposed to be positive:
-                Scalars[i,j,k] = max( Scalars[i,j,k], 0.0 )
-
-            end # End of i-loop 
-        end # End of j-loop 
-    end # End of loop over passive scalars 
-
-    return nothing 
-end
-
-
-""" This function performs a forward Euler update in the Y-direction for all 
-    passive scalars. """
-function ForwardEuler_Y_Scalars!( Scalars::AbstractArray{Float64, 3},  # Array of passive scalars, for all cells 
-                              Scalars_old::AbstractArray{Float64, 3},  # Array of old passive scalars, for all cells 
-                                    ρ_old::AbstractMatrix{Float64},    # Gas density *before* forward Euler update 
-                                    F_ρ_Y::AbstractMatrix{Float64},
-                                   inv_ΔV::AbstractMatrix{Float64},
-                                      A_Y::AbstractMatrix{Float64},
-                                       Δt::Float64
-                                 )
-
-    N_X, N_Y, N_Scalars = size( Scalars )
-    dN_X                = 1:N_X 
-    dN_Y                = 1:N_Y 
-    dN_Scalars          = 1:N_Scalars
-
-    for k in dN_Scalars 
-        @threads for j in dN_Y
-            @inbounds @simd for i in dN_X 
-                # Clamp indices that enter x, which implicitly assumes 
-                # zero gradient extrapolation BC's:
-                jp1 = min( j + 1, N_Y )
-                jm1 = max( j - 1, 1 )         
-                
-                # Reconstruct x on interfaces, using a simple first-order method: 
+                # Reconstruct x on Y-interfaces, using a simple first-order method:
                 if F_ρ_Y[i,j] ≥ 0.0
-                    xL = Scalars_old[i,jm1,k] / ρ_old[i,jm1]  # Flow left → right
+                    xL_Y = Scalars_old[i,jm1,k] / ρ_old[i,jm1]  # Flow left → right
                 else
-                    xL = Scalars_old[i,j,k] / ρ_old[i,j]      # Flow right → left
+                    xL_Y = Scalars_old[i,j,k] / ρ_old[i,j]      # Flow right → left
                 end
 
                 if F_ρ_Y[i,j+1] ≥ 0.0
-                    xR = Scalars_old[i,j,k] / ρ_old[i,j]      # Flow left → right
+                    xR_Y = Scalars_old[i,j,k] / ρ_old[i,j]      # Flow left → right
                 else
-                    xR = Scalars_old[i,jp1,k] / ρ_old[i,jp1]  # Flow right → left
+                    xR_Y = Scalars_old[i,jp1,k] / ρ_old[i,jp1]  # Flow right → left
                 end
 
-                # Get left (j-1/2) & right (j+1/2) interface fluxes:
-                F_L_Y   = F_ρ_Y[i,j]   * xL
-                F_R_Y   = F_ρ_Y[i,j+1] * xR
+                # Get left (i-1/2) & right (i+1/2) X-interface fluxes:
+                F_L_X   = F_ρ_X[i,j]   * xL_X
+                F_R_X   = F_ρ_X[i+1,j] * xR_X
+
+                # Get left (j-1/2) & right (j+1/2) Y-interface fluxes:
+                F_L_Y   = F_ρ_Y[i,j]   * xL_Y
+                F_R_Y   = F_ρ_Y[i,j+1] * xR_Y
 
                 # Get interface areas:
-                A_R     = A_Y[i,j+1]
-                A_L     = A_Y[i,j]
+                A_X_R   = A_X[i+1,j]
+                A_X_L   = A_X[i,j]
+                A_Y_R   = A_Y[i,j+1]
+                A_Y_L   = A_Y[i,j]
 
                 # Advect scalar ρx over a time-step Δt:
-                Scalars[i,j,k] = Scalars_old[i,j,k] - ( Δt * inv_ΔV[i,j] ) * ( A_R * F_R_Y  -  A_L * F_L_Y )
+                Scalars[i,j,k] = ( Scalars_old[i,j,k] 
+                               - ( Δt * inv_ΔV[i,j] ) * ( A_X_R * F_R_X  -  A_X_L * F_L_X 
+                                                        + A_Y_R * F_R_Y  -  A_Y_L * F_L_Y ) )
 
                 # Floor scalars, since they are all supposed to be positive:
                 Scalars[i,j,k] = max( Scalars[i,j,k], 0.0 )
@@ -3623,1410 +4466,18 @@ function ForwardEuler_Y_Scalars!( Scalars::AbstractArray{Float64, 3},  # Array o
 end
 
 
-function RK2_X!( ρ_new::AbstractMatrix{Float64},
-              ρu_X_new::AbstractMatrix{Float64},
-              ρu_Y_new::AbstractMatrix{Float64},
-                 E_new::AbstractMatrix{Float64},
-                     ρ::AbstractMatrix{Float64},
-                  ρu_X::AbstractMatrix{Float64},
-                  ρu_Y::AbstractMatrix{Float64},
-                     E::AbstractMatrix{Float64},
-                   γad::AbstractMatrix{Float64},
-                   u_X::AbstractMatrix{Float64},
-                   u_Y::AbstractMatrix{Float64},
-
-                ρd_new::AbstractMatrix{Float64},
-            ρdud_X_new::AbstractMatrix{Float64},
-            ρdud_Y_new::AbstractMatrix{Float64},
-                    ρd::AbstractMatrix{Float64},
-                ρdud_X::AbstractMatrix{Float64},
-                ρdud_Y::AbstractMatrix{Float64},
-                  ud_X::AbstractMatrix{Float64},
-                  ud_Y::AbstractMatrix{Float64},
-
-                inv_ΔV::AbstractMatrix{Float64},
-                   A_X::AbstractMatrix{Float64},
-                    Δt::Float64,
-
-                # Scratch arrays to store state at the start:
-               ρ_stage::AbstractMatrix{Float64},
-            ρu_X_stage::AbstractMatrix{Float64},
-            ρu_Y_stage::AbstractMatrix{Float64},
-               E_stage::AbstractMatrix{Float64},
-
-              ρd_stage::AbstractMatrix{Float64},
-          ρdud_X_stage::AbstractMatrix{Float64},
-          ρdud_Y_stage::AbstractMatrix{Float64},
-
-                # Conservative & primitive variables @ cell centers:
-                    ρc::AbstractMatrix{Float64}, 
-                 ρu_Xc::AbstractMatrix{Float64}, 
-                 ρu_Yc::AbstractMatrix{Float64},
-                    Ec::AbstractMatrix{Float64},         
-                  u_Xc::AbstractMatrix{Float64}, 
-                  u_Yc::AbstractMatrix{Float64}, 
-                    Pc::AbstractMatrix{Float64},  
-                    
-                   ρdc::AbstractMatrix{Float64}, 
-               ρdud_Xc::AbstractMatrix{Float64}, 
-               ρdud_Yc::AbstractMatrix{Float64},      
-                 ud_Xc::AbstractMatrix{Float64}, 
-                 ud_Yc::AbstractMatrix{Float64},
-
-                # Weights to convert between cell-averages and cell-centers: 
-              w_i_m1_X::AbstractVector{Float64}, 
-               w_i_0_X::AbstractVector{Float64},
-              w_i_p1_X::AbstractVector{Float64},  
-              q_i_m1_X::AbstractVector{Float64}, 
-               q_i_0_X::AbstractVector{Float64}, 
-              q_i_p1_X::AbstractVector{Float64},  
-
-                # Weights for WENO3 interface reconstruction:
-           w_plus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{i,1}
-          w_minus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{i,1} 
-
-                 ρ_L_X::AbstractMatrix{Float64},
-                 ρ_R_X::AbstractMatrix{Float64},
-               u_X_L_X::AbstractMatrix{Float64},
-               u_X_R_X::AbstractMatrix{Float64},
-               u_Y_L_X::AbstractMatrix{Float64},
-               u_Y_R_X::AbstractMatrix{Float64},
-                 P_L_X::AbstractMatrix{Float64},
-                 P_R_X::AbstractMatrix{Float64},
-                 F_ρ_X::AbstractMatrix{Float64},
-              F_ρu_X_X::AbstractMatrix{Float64},
-              F_ρu_Y_X::AbstractMatrix{Float64},
-                 F_E_X::AbstractMatrix{Float64},
-                     P::AbstractMatrix{Float64},
-            u_X_star_X::AbstractMatrix{Float64},
-
-                ρd_L_X::AbstractMatrix{Float64},
-                ρd_R_X::AbstractMatrix{Float64},
-              ud_X_L_X::AbstractMatrix{Float64},
-              ud_X_R_X::AbstractMatrix{Float64},
-              ud_Y_L_X::AbstractMatrix{Float64},
-              ud_Y_R_X::AbstractMatrix{Float64},
-                F_ρd_X::AbstractMatrix{Float64},
-            F_ρdud_X_X::AbstractMatrix{Float64},
-            F_ρdud_Y_X::AbstractMatrix{Float64},
-                                       
-                # Ghost‐padded primitives & grid:
-                ρg_old::AbstractMatrix{Float64}, 
-              u_Xg_old::AbstractMatrix{Float64}, 
-              u_Yg_old::AbstractMatrix{Float64}, 
-                Pg_old::AbstractMatrix{Float64},
-
-               ρdg_old::AbstractMatrix{Float64}, 
-             ud_Xg_old::AbstractMatrix{Float64}, 
-             ud_Yg_old::AbstractMatrix{Float64}, 
-
-                    Xg::AbstractVector{Float64},
-                 XCoMg::AbstractVector{Float64},
-
-              CoordSys::CoordSystem,
-            inv_r_cell::AbstractVector{Float64},
-  
-                # Shock indicator:
-                 Shock::AbstractMatrix{Int}, 
-
-                # Arrays for advection of passive scalars:
-               Scalars::AbstractArray{Float64, 3},
-           Scalars_old::AbstractArray{Float64, 3},
-         Scalars_stage::AbstractArray{Float64, 3},
-                ρ_save::AbstractMatrix{Float64},
- 
-                # BCs:
-                BC_X_left::Symbol, BC_X_right::Symbol,
-                BC_Y_left::Symbol, BC_Y_right::Symbol
-                     )
-
-    # Save the state at the start, before the update (needed later in RK2):
-    @. ρ_stage       = ρ
-    @. ρu_X_stage    = ρu_X 
-    @. ρu_Y_stage    = ρu_Y
-    @. E_stage       = E 
-    @. ρd_stage      = ρd
-    @. ρdud_X_stage  = ρdud_X
-    @. ρdud_Y_stage  = ρdud_Y 
-    @. Scalars_stage = Scalars
-    @. Scalars_old   = Scalars
-
-    # Step 1: Forward Euler in X:  U → U^(1)
-    ForwardEuler_X!( ρ_new, ρu_X_new, ρu_Y_new, E_new,
-                     ρ, ρu_X, ρu_Y, E,
-                     γad, u_X, u_Y, 
-
-                     ρd_new, ρdud_X_new, ρdud_Y_new,
-                     ρd, ρdud_X, ρdud_Y, ud_X, ud_Y, 
-                     
-                     inv_ΔV, A_X, Δt,
-
-                     ρc, ρu_Xc, ρu_Yc, Ec,
-                     u_Xc, u_Yc, Pc,
-
-                     ρdc, ρdud_Xc, ρdud_Yc, 
-                     ud_Xc, ud_Yc, 
-
-                     w_i_m1_X, w_i_0_X, w_i_p1_X,
-                     q_i_m1_X, q_i_0_X, q_i_p1_X,
-                     w_plus_i_p1, w_minus_i_p1,
-
-                     ρ_L_X, ρ_R_X,
-                     u_X_L_X, u_X_R_X,
-                     u_Y_L_X, u_Y_R_X,
-                     P_L_X, P_R_X,
-                     F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X,
-                     P, u_X_star_X,
-
-                     ρd_L_X, ρd_R_X,
-                     ud_X_L_X, ud_X_R_X,
-                     ud_Y_L_X, ud_Y_R_X,
-                     F_ρd_X, F_ρdud_X_X, F_ρdud_Y_X, 
-
-                     ρg_old, u_Xg_old, u_Yg_old, Pg_old,
-
-                     ρdg_old, ud_Xg_old, ud_Yg_old, 
-
-                     Xg, XCoMg,
-                     CoordSys, inv_r_cell,
-                     Shock,
-                     BC_X_left, BC_X_right, 
-                     BC_Y_left, BC_Y_right )
-
-    ForwardEuler_X_Scalars!( Scalars, Scalars_old, ρ_stage, F_ρ_X, inv_ΔV, A_X, Δt )  # Advect passive scalars too
-
-    # Step 2: Forward Euler step in X: U^(1) -> U^(2)
-    @. ρ_save = ρ # Save density from after step 1 (before we update ρ), needed for scalar advection
-
-    ForwardEuler_X!( ρ_new, ρu_X_new, ρu_Y_new, E_new,
-                     ρ, ρu_X, ρu_Y, E,
-                     γad, u_X, u_Y, 
-
-                     ρd_new, ρdud_X_new, ρdud_Y_new,
-                     ρd, ρdud_X, ρdud_Y, ud_X, ud_Y, 
-                     
-                     inv_ΔV, A_X, Δt,
-
-                     ρc, ρu_Xc, ρu_Yc, Ec,
-                     u_Xc, u_Yc, Pc,
-
-                     ρdc, ρdud_Xc, ρdud_Yc, 
-                     ud_Xc, ud_Yc, 
-
-                     w_i_m1_X, w_i_0_X, w_i_p1_X,
-                     q_i_m1_X, q_i_0_X, q_i_p1_X,
-                     w_plus_i_p1, w_minus_i_p1,
-
-                     ρ_L_X, ρ_R_X,
-                     u_X_L_X, u_X_R_X,
-                     u_Y_L_X, u_Y_R_X,
-                     P_L_X, P_R_X,
-                     F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X,
-                     P, u_X_star_X,
-
-                     ρd_L_X, ρd_R_X,
-                     ud_X_L_X, ud_X_R_X,
-                     ud_Y_L_X, ud_Y_R_X,
-                     F_ρd_X, F_ρdud_X_X, F_ρdud_Y_X, 
-
-                     ρg_old, u_Xg_old, u_Yg_old, Pg_old,
-
-                     ρdg_old, ud_Xg_old, ud_Yg_old, 
-
-                     Xg, XCoMg,
-                     CoordSys, inv_r_cell,
-                     Shock,
-                     BC_X_left, BC_X_right, 
-                     BC_Y_left, BC_Y_right )
-
-    @. Scalars_old = Scalars  # Update old values of passive scalars 
-    ForwardEuler_X_Scalars!( Scalars, Scalars_old, ρ_save, F_ρ_X, inv_ΔV, A_X, Δt )  # Advect passive scalars too
-
-    # Step 3: Combine to get RK2 update:
-    #
-    # U^(n+1) = 0.5 × ( U_start + U^(2) )
-    #
-    # Note: ρ, ρu_X, ρu_Y, E contain U^(2).
-    @. ρ       = 0.5 * ( ρ_stage       + ρ )
-    @. ρu_X    = 0.5 * ( ρu_X_stage    + ρu_X )
-    @. ρu_Y    = 0.5 * ( ρu_Y_stage    + ρu_Y )
-    @. E       = 0.5 * ( E_stage       + E )
-    @. ρd      = 0.5 * ( ρd_stage      + ρd )
-    @. ρdud_X  = 0.5 * ( ρdud_X_stage  + ρdud_X )
-    @. ρdud_Y  = 0.5 * ( ρdud_Y_stage  + ρdud_Y )
-    @. Scalars = 0.5 * ( Scalars_stage + Scalars )
-
-    return nothing 
-end
-
-
-function RK2_Y!( ρ_new::AbstractMatrix{Float64},
-              ρu_X_new::AbstractMatrix{Float64},
-              ρu_Y_new::AbstractMatrix{Float64},
-                 E_new::AbstractMatrix{Float64},
-                     ρ::AbstractMatrix{Float64},
-                  ρu_X::AbstractMatrix{Float64},
-                  ρu_Y::AbstractMatrix{Float64},
-                     E::AbstractMatrix{Float64},
-                   γad::AbstractMatrix{Float64},
-                   u_X::AbstractMatrix{Float64},
-                   u_Y::AbstractMatrix{Float64},
-
-                ρd_new::AbstractMatrix{Float64},
-            ρdud_X_new::AbstractMatrix{Float64},
-            ρdud_Y_new::AbstractMatrix{Float64},
-                    ρd::AbstractMatrix{Float64},
-                ρdud_X::AbstractMatrix{Float64},
-                ρdud_Y::AbstractMatrix{Float64},
-                  ud_X::AbstractMatrix{Float64},
-                  ud_Y::AbstractMatrix{Float64},
-
-                inv_ΔV::AbstractMatrix{Float64},
-                   A_Y::AbstractMatrix{Float64},
-                    Δt::Float64,
-
-                # Scratch arrays to store state at the start:
-               ρ_stage::AbstractMatrix{Float64},
-            ρu_X_stage::AbstractMatrix{Float64},
-            ρu_Y_stage::AbstractMatrix{Float64},
-               E_stage::AbstractMatrix{Float64},
-
-              ρd_stage::AbstractMatrix{Float64},
-          ρdud_X_stage::AbstractMatrix{Float64},
-          ρdud_Y_stage::AbstractMatrix{Float64},
-
-                # Conservative & primitive variables @ cell centers:
-                    ρc::AbstractMatrix{Float64}, 
-                 ρu_Xc::AbstractMatrix{Float64}, 
-                 ρu_Yc::AbstractMatrix{Float64},
-                    Ec::AbstractMatrix{Float64},         
-                  u_Xc::AbstractMatrix{Float64}, 
-                  u_Yc::AbstractMatrix{Float64}, 
-                    Pc::AbstractMatrix{Float64}, 
-                    
-                   ρdc::AbstractMatrix{Float64}, 
-               ρdud_Xc::AbstractMatrix{Float64}, 
-               ρdud_Yc::AbstractMatrix{Float64},       
-                 ud_Xc::AbstractMatrix{Float64}, 
-                 ud_Yc::AbstractMatrix{Float64}, 
-
-                # Weights to convert between cell-averages and cell-centers: 
-              w_j_m1_Y::AbstractVector{Float64}, 
-               w_j_0_Y::AbstractVector{Float64}, 
-              w_j_p1_Y::AbstractVector{Float64},  
-              q_j_m1_Y::AbstractVector{Float64}, 
-               q_j_0_Y::AbstractVector{Float64}, 
-              q_j_p1_Y::AbstractVector{Float64},  
-
-                # Weights for WENO3 interface reconstruction:
-           w_plus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{j,1}
-          w_minus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{j,1}
-
-                 ρ_L_Y::AbstractMatrix{Float64},
-                 ρ_R_Y::AbstractMatrix{Float64},
-               u_Y_L_Y::AbstractMatrix{Float64},
-               u_Y_R_Y::AbstractMatrix{Float64},
-               u_X_L_Y::AbstractMatrix{Float64},
-               u_X_R_Y::AbstractMatrix{Float64},
-                 P_L_Y::AbstractMatrix{Float64},
-                 P_R_Y::AbstractMatrix{Float64},
-                 F_ρ_Y::AbstractMatrix{Float64},
-              F_ρu_X_Y::AbstractMatrix{Float64},
-              F_ρu_Y_Y::AbstractMatrix{Float64},
-                 F_E_Y::AbstractMatrix{Float64},
-                     P::AbstractMatrix{Float64},
-            u_Y_star_Y::AbstractMatrix{Float64},
-
-                ρd_L_Y::AbstractMatrix{Float64},
-                ρd_R_Y::AbstractMatrix{Float64},
-              ud_Y_L_Y::AbstractMatrix{Float64},
-              ud_Y_R_Y::AbstractMatrix{Float64},
-              ud_X_L_Y::AbstractMatrix{Float64},
-              ud_X_R_Y::AbstractMatrix{Float64},
-                F_ρd_Y::AbstractMatrix{Float64},
-            F_ρdud_X_Y::AbstractMatrix{Float64},
-            F_ρdud_Y_Y::AbstractMatrix{Float64},
-                                       
-                # Ghost‐padded primitives & grid:
-                ρg_old::AbstractMatrix{Float64}, 
-              u_Xg_old::AbstractMatrix{Float64}, 
-              u_Yg_old::AbstractMatrix{Float64}, 
-                Pg_old::AbstractMatrix{Float64},
-
-               ρdg_old::AbstractMatrix{Float64}, 
-             ud_Xg_old::AbstractMatrix{Float64}, 
-             ud_Yg_old::AbstractMatrix{Float64}, 
-
-                    Yg::AbstractVector{Float64},
-                 YCoMg::AbstractVector{Float64},
-
-                # Shock indicator:
-                 Shock::AbstractMatrix{Int},
-
-                # Arrays for advection of passive scalars:
-               Scalars::AbstractArray{Float64, 3},
-           Scalars_old::AbstractArray{Float64, 3},
-         Scalars_stage::AbstractArray{Float64, 3},
-                ρ_save::AbstractMatrix{Float64},
- 
-                # BCs:
-             BC_X_left::Symbol, BC_X_right::Symbol,
-             BC_Y_left::Symbol, BC_Y_right::Symbol
-                       )
-
-    # Save the state at the start, before the update (needed later in RK2):
-    @. ρ_stage       = ρ
-    @. ρu_X_stage    = ρu_X 
-    @. ρu_Y_stage    = ρu_Y
-    @. E_stage       = E 
-    @. ρd_stage      = ρd
-    @. ρdud_X_stage  = ρdud_X
-    @. ρdud_Y_stage  = ρdud_Y 
-    @. Scalars_stage = Scalars
-    @. Scalars_old   = Scalars
-
-    # Step 1: Forward Euler in Y: U → U^(1)
-    ForwardEuler_Y!( ρ_new, ρu_X_new, ρu_Y_new, E_new,
-                     ρ, ρu_X, ρu_Y, E,
-                     γad, u_X, u_Y, 
-
-                     ρd_new, ρdud_X_new, ρdud_Y_new,
-                     ρd, ρdud_X, ρdud_Y, 
-                     ud_X, ud_Y, 
-                     
-                     inv_ΔV, A_Y, Δt,
-
-
-                     ρc, ρu_Xc, ρu_Yc, Ec,
-                     u_Xc, u_Yc, Pc,
-
-                     ρdc, ρdud_Xc, ρdud_Yc, 
-                     ud_Xc, ud_Yc, 
-
-                     w_j_m1_Y, w_j_0_Y, w_j_p1_Y,
-                     q_j_m1_Y, q_j_0_Y, q_j_p1_Y,
-                     w_plus_j_p1, w_minus_j_p1,
-
-                     ρ_L_Y, ρ_R_Y,
-                     u_Y_L_Y, u_Y_R_Y,
-                     u_X_L_Y, u_X_R_Y,
-                     P_L_Y, P_R_Y,
-                     F_ρ_Y, F_ρu_X_Y, F_ρu_Y_Y, F_E_Y,
-                     P, u_Y_star_Y,
-
-                     ρd_L_Y, ρd_R_Y,
-                     ud_Y_L_Y, ud_Y_R_Y,
-                     ud_X_L_Y, ud_X_R_Y,
-                     F_ρd_Y, F_ρdud_X_Y, F_ρdud_Y_Y, 
-
-                     ρg_old, u_Xg_old, u_Yg_old, Pg_old,
-
-                     ρdg_old, ud_Xg_old, ud_Yg_old, 
-
-                     Yg, YCoMg,
-                     Shock,
-                     BC_X_left, BC_X_right,
-                     BC_Y_left, BC_Y_right )
-
-
-    ForwardEuler_Y_Scalars!( Scalars, Scalars_old, ρ_stage, F_ρ_Y, inv_ΔV, A_Y, Δt )  # Advect passive scalars too
-
-    # Step 2: Forward Euler in Y again: U^(1) → U^(2)
-    @. ρ_save = ρ # Save density from after step 1 (before we update ρ), needed for scalar advection
-
-    ForwardEuler_Y!( ρ_new, ρu_X_new, ρu_Y_new, E_new,
-                     ρ, ρu_X, ρu_Y, E,
-                     γad, u_X, u_Y, 
-
-                     ρd_new, ρdud_X_new, ρdud_Y_new,
-                     ρd, ρdud_X, ρdud_Y, 
-                     ud_X, ud_Y, 
-                     
-                     inv_ΔV, A_Y, Δt,
-
-
-                     ρc, ρu_Xc, ρu_Yc, Ec,
-                     u_Xc, u_Yc, Pc,
-
-                     ρdc, ρdud_Xc, ρdud_Yc, 
-                     ud_Xc, ud_Yc, 
-
-                     w_j_m1_Y, w_j_0_Y, w_j_p1_Y,
-                     q_j_m1_Y, q_j_0_Y, q_j_p1_Y,
-                     w_plus_j_p1, w_minus_j_p1,
-
-                     ρ_L_Y, ρ_R_Y,
-                     u_Y_L_Y, u_Y_R_Y,
-                     u_X_L_Y, u_X_R_Y,
-                     P_L_Y, P_R_Y,
-                     F_ρ_Y, F_ρu_X_Y, F_ρu_Y_Y, F_E_Y,
-                     P, u_Y_star_Y,
-
-                     ρd_L_Y, ρd_R_Y,
-                     ud_Y_L_Y, ud_Y_R_Y,
-                     ud_X_L_Y, ud_X_R_Y,
-                     F_ρd_Y, F_ρdud_X_Y, F_ρdud_Y_Y, 
-
-                     ρg_old, u_Xg_old, u_Yg_old, Pg_old,
-
-                     ρdg_old, ud_Xg_old, ud_Yg_old, 
-
-                     Yg, YCoMg,
-                     Shock,
-                     BC_X_left, BC_X_right,
-                     BC_Y_left, BC_Y_right )
-
-
-    @. Scalars_old = Scalars  # Update old values of passive scalars 
-    ForwardEuler_Y_Scalars!( Scalars, Scalars_old, ρ_save, F_ρ_Y, inv_ΔV, A_Y, Δt )  # Advect passive scalars too
-
-    # Step 3: Combine to get RK2 update:
-    #
-    # U^(n+1) = 0.5 × ( U_start + U^(2) )
-    #
-    # Note: ρ, ρu_X, ρu_Y, E contain U^(2).
-    @. ρ       = 0.5 * ( ρ_stage       + ρ )
-    @. ρu_X    = 0.5 * ( ρu_X_stage    + ρu_X )
-    @. ρu_Y    = 0.5 * ( ρu_Y_stage    + ρu_Y )
-    @. E       = 0.5 * ( E_stage       + E )
-    @. ρd      = 0.5 * ( ρd_stage      + ρd )
-    @. ρdud_X  = 0.5 * ( ρdud_X_stage  + ρdud_X )
-    @. ρdud_Y  = 0.5 * ( ρdud_Y_stage  + ρdud_Y )
-    @. Scalars = 0.5 * ( Scalars_stage + Scalars )
-
-    return nothing
-end
-
-
-function UpdateHydro_StrangSplit_Xfirst!( ρ_new::AbstractMatrix{Float64},
-                                       ρu_X_new::AbstractMatrix{Float64},
-                                       ρu_Y_new::AbstractMatrix{Float64},
-                                          E_new::AbstractMatrix{Float64},
-                                              ρ::AbstractMatrix{Float64},
-                                           ρu_X::AbstractMatrix{Float64},
-                                           ρu_Y::AbstractMatrix{Float64},
-                                              E::AbstractMatrix{Float64},
-                                            γad::AbstractMatrix{Float64},
-                                            u_X::AbstractMatrix{Float64},
-                                            u_Y::AbstractMatrix{Float64},
-
-                                         ρd_new::AbstractMatrix{Float64},
-                                     ρdud_X_new::AbstractMatrix{Float64},
-                                     ρdud_Y_new::AbstractMatrix{Float64},
-                                             ρd::AbstractMatrix{Float64},
-                                         ρdud_X::AbstractMatrix{Float64},
-                                         ρdud_Y::AbstractMatrix{Float64},
-                                           ud_X::AbstractMatrix{Float64},
-                                           ud_Y::AbstractMatrix{Float64},
-
-                                         inv_ΔV::AbstractMatrix{Float64},
-                                            A_X::AbstractMatrix{Float64},
-                                            A_Y::AbstractMatrix{Float64},
-                                             Δt::Float64,
-
-                                             # Scratch arrays for RK integration:
-                                        ρ_stage::AbstractMatrix{Float64},
-                                     ρu_X_stage::AbstractMatrix{Float64},
-                                     ρu_Y_stage::AbstractMatrix{Float64},
-                                        E_stage::AbstractMatrix{Float64},
-
-                                       ρd_stage::AbstractMatrix{Float64},
-                                   ρdud_X_stage::AbstractMatrix{Float64},
-                                   ρdud_Y_stage::AbstractMatrix{Float64},
-
-                                             # Conservative & primitive variables @ cell centers:
-                                             ρc::AbstractMatrix{Float64}, 
-                                          ρu_Xc::AbstractMatrix{Float64}, 
-                                          ρu_Yc::AbstractMatrix{Float64},
-                                             Ec::AbstractMatrix{Float64},         
-                                           u_Xc::AbstractMatrix{Float64}, 
-                                           u_Yc::AbstractMatrix{Float64}, 
-                                             Pc::AbstractMatrix{Float64},  
-                                             
-                                            ρdc::AbstractMatrix{Float64}, 
-                                        ρdud_Xc::AbstractMatrix{Float64}, 
-                                        ρdud_Yc::AbstractMatrix{Float64},     
-                                          ud_Xc::AbstractMatrix{Float64}, 
-                                          ud_Yc::AbstractMatrix{Float64},  
-
-                                            # Weights to convert between cell-averages and cell-centers: 
-                                       w_i_m1_X::AbstractVector{Float64}, 
-                                        w_i_0_X::AbstractVector{Float64},
-                                       w_i_p1_X::AbstractVector{Float64},  
-                                       w_j_m1_Y::AbstractVector{Float64}, 
-                                        w_j_0_Y::AbstractVector{Float64}, 
-                                       w_j_p1_Y::AbstractVector{Float64}, 
-                                       q_i_m1_X::AbstractVector{Float64}, 
-                                        q_i_0_X::AbstractVector{Float64}, 
-                                       q_i_p1_X::AbstractVector{Float64},  
-                                       q_j_m1_Y::AbstractVector{Float64}, 
-                                        q_j_0_Y::AbstractVector{Float64}, 
-                                       q_j_p1_Y::AbstractVector{Float64},  
-
-                                           # Weights for WENO3 interface reconstruction:
-                                    w_plus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{i,1}
-                                   w_minus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{i,1} 
-                                    w_plus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{j,1}
-                                   w_minus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{j,1}
-
-                                          ρ_L_X::AbstractMatrix{Float64},
-                                          ρ_R_X::AbstractMatrix{Float64},
-                                        u_X_L_X::AbstractMatrix{Float64},
-                                        u_X_R_X::AbstractMatrix{Float64},
-                                        u_Y_L_X::AbstractMatrix{Float64},
-                                        u_Y_R_X::AbstractMatrix{Float64},
-                                          P_L_X::AbstractMatrix{Float64},
-                                          P_R_X::AbstractMatrix{Float64},
-                                          F_ρ_X::AbstractMatrix{Float64},
-                                       F_ρu_X_X::AbstractMatrix{Float64},
-                                       F_ρu_Y_X::AbstractMatrix{Float64},
-                                          F_E_X::AbstractMatrix{Float64},
-
-                                          ρ_L_Y::AbstractMatrix{Float64},
-                                          ρ_R_Y::AbstractMatrix{Float64},
-                                        u_Y_L_Y::AbstractMatrix{Float64},
-                                        u_Y_R_Y::AbstractMatrix{Float64},
-                                        u_X_L_Y::AbstractMatrix{Float64},
-                                        u_X_R_Y::AbstractMatrix{Float64},
-                                          P_L_Y::AbstractMatrix{Float64},
-                                          P_R_Y::AbstractMatrix{Float64},
-                                          F_ρ_Y::AbstractMatrix{Float64},
-                                       F_ρu_X_Y::AbstractMatrix{Float64},
-                                       F_ρu_Y_Y::AbstractMatrix{Float64},
-                                          F_E_Y::AbstractMatrix{Float64},
-                                              P::AbstractMatrix{Float64},
-                                     u_X_star_X::AbstractMatrix{Float64},
-                                     u_Y_star_Y::AbstractMatrix{Float64},
-
-                                         ρd_L_X::AbstractMatrix{Float64},
-                                         ρd_R_X::AbstractMatrix{Float64},
-                                       ud_X_L_X::AbstractMatrix{Float64},
-                                       ud_X_R_X::AbstractMatrix{Float64},
-                                       ud_Y_L_X::AbstractMatrix{Float64},
-                                       ud_Y_R_X::AbstractMatrix{Float64},
-                                         F_ρd_X::AbstractMatrix{Float64},
-                                     F_ρdud_X_X::AbstractMatrix{Float64},
-                                     F_ρdud_Y_X::AbstractMatrix{Float64},
-
-                                         ρd_L_Y::AbstractMatrix{Float64},
-                                         ρd_R_Y::AbstractMatrix{Float64},
-                                       ud_Y_L_Y::AbstractMatrix{Float64},
-                                       ud_Y_R_Y::AbstractMatrix{Float64},
-                                       ud_X_L_Y::AbstractMatrix{Float64},
-                                       ud_X_R_Y::AbstractMatrix{Float64},
-                                         F_ρd_Y::AbstractMatrix{Float64},
-                                     F_ρdud_X_Y::AbstractMatrix{Float64},
-                                     F_ρdud_Y_Y::AbstractMatrix{Float64},
-                                       
-                                         # Ghost‐padded primitives & grid:
-                                         ρg_old::AbstractMatrix{Float64}, 
-                                       u_Xg_old::AbstractMatrix{Float64}, 
-                                       u_Yg_old::AbstractMatrix{Float64}, 
-                                         Pg_old::AbstractMatrix{Float64},
-
-                                        ρdg_old::AbstractMatrix{Float64}, 
-                                      ud_Xg_old::AbstractMatrix{Float64}, 
-                                      ud_Yg_old::AbstractMatrix{Float64}, 
-
-                                             Xg::AbstractVector{Float64},
-                                          XCoMg::AbstractVector{Float64},
-                                             Yg::AbstractVector{Float64},
-                                          YCoMg::AbstractVector{Float64},
-
-                                       CoordSys::CoordSystem,
-                                     inv_r_cell::AbstractVector{Float64},
-  
-                                        # Shock indicator:
-                                          Shock::AbstractMatrix{Int}, 
-
-                                        # Arrays for advection of passive scalars:
-                                        Scalars::AbstractArray{Float64, 3},
-                                    Scalars_old::AbstractArray{Float64, 3},
-                                  Scalars_stage::AbstractArray{Float64, 3},
-                                         ρ_save::AbstractMatrix{Float64},
- 
-                                          # BCs:
-                                      BC_X_left::Symbol, BC_X_right::Symbol,
-                                      BC_Y_left::Symbol, BC_Y_right::Symbol
-
-                                          )
-
-    Δt_half  = 0.5 * Δt
-
-    #####################################################################
-    #######                                                       #######
-    #######   1)  H A L F - S T E P  I N  X - D I R E C T I O N   #######
-    #######                                                       #######
-    #####################################################################
-
-    RK2_X!( ρ_new, ρu_X_new, ρu_Y_new, E_new,
-            ρ, ρu_X, ρu_Y, E, γad, u_X, u_Y,
-
-            ρd_new, ρdud_X_new, ρdud_Y_new, 
-            ρd, ρdud_X, ρdud_Y, ud_X, ud_Y,
-
-            inv_ΔV, A_X, Δt_half,
-
-            ρ_stage, ρu_X_stage, ρu_Y_stage, E_stage,
-
-            ρd_stage, ρdud_X_stage, ρdud_Y_stage,
-
-            ρc, ρu_Xc, ρu_Yc, Ec,         
-            u_Xc, u_Yc, Pc,
-            
-            ρdc, ρdud_Xc, ρdud_Yc,         
-            ud_Xc, ud_Yc, 
-
-            w_i_m1_X, w_i_0_X, w_i_p1_X,  q_i_m1_X, q_i_0_X, q_i_p1_X,  
-
-            w_plus_i_p1, w_minus_i_p1,
-
-            ρ_L_X, ρ_R_X, u_X_L_X, u_X_R_X, u_Y_L_X, u_Y_R_X, P_L_X, P_R_X,
-            F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X, P, u_X_star_X,
-
-            ρd_L_X, ρd_R_X, ud_X_L_X, ud_X_R_X, ud_Y_L_X, ud_Y_R_X, 
-            F_ρd_X, F_ρdud_X_X, F_ρdud_Y_X, 
-                                       
-            ρg_old, u_Xg_old, u_Yg_old, Pg_old, 
-
-            ρdg_old, ud_Xg_old, ud_Yg_old,
-            
-            Xg, XCoMg, 
-
-            CoordSys, inv_r_cell, Shock, 
-
-            Scalars, Scalars_old, Scalars_stage, ρ_save,
- 
-            BC_X_left, BC_X_right,
-            BC_Y_left, BC_Y_right )
-
-    #####################################################################
-    #######                                                       #######
-    #######   2)  F U L L - S T E P  I N  Y - D I R E C T I O N   #######
-    #######                                                       #######
-    #####################################################################
-
-    RK2_Y!( ρ_new, ρu_X_new, ρu_Y_new, E_new,
-            ρ, ρu_X, ρu_Y, E, γad, u_X, u_Y,
-
-            ρd_new, ρdud_X_new, ρdud_Y_new, 
-            ρd, ρdud_X, ρdud_Y, ud_X, ud_Y,
-
-            inv_ΔV, A_Y, Δt,
-
-            ρ_stage, ρu_X_stage, ρu_Y_stage, E_stage,
-
-            ρd_stage, ρdud_X_stage, ρdud_Y_stage,
-
-            ρc, ρu_Xc, ρu_Yc, Ec, u_Xc, u_Yc, Pc,
-
-            ρdc, ρdud_Xc, ρdud_Yc, ud_Xc, ud_Yc,          
-
-            w_j_m1_Y, w_j_0_Y, w_j_p1_Y,  q_j_m1_Y, q_j_0_Y, q_j_p1_Y,  
-
-            w_plus_j_p1, w_minus_j_p1, 
-
-            ρ_L_Y, ρ_R_Y, u_Y_L_Y, u_Y_R_Y, u_X_L_Y, u_X_R_Y, P_L_Y, P_R_Y,
-            F_ρ_Y, F_ρu_X_Y, F_ρu_Y_Y, F_E_Y, P, u_Y_star_Y,
-
-            ρd_L_Y, ρd_R_Y, ud_Y_L_Y, ud_Y_R_Y, ud_X_L_Y, ud_X_R_Y, 
-            F_ρd_Y, F_ρdud_X_Y, F_ρdud_Y_Y,
-                                       
-            ρg_old, u_Xg_old, u_Yg_old, Pg_old, 
-
-            ρdg_old, ud_Xg_old, ud_Yg_old,
-            
-            Yg, YCoMg, 
-            
-            Shock,
-
-            Scalars, Scalars_old, Scalars_stage, ρ_save,
-            
-            BC_X_left, BC_X_right,
-            BC_Y_left, BC_Y_right )
-
-    ###############################################################################
-    #######                                                                 #######
-    #######   3) F I N A L  H A L F - S T E P  I N  X - D I R E C T I O N   #######
-    #######                                                                 #######
-    ###############################################################################
-
-    RK2_X!( ρ_new, ρu_X_new, ρu_Y_new, E_new,
-            ρ, ρu_X, ρu_Y, E, γad, u_X, u_Y,
-
-            ρd_new, ρdud_X_new, ρdud_Y_new, 
-            ρd, ρdud_X, ρdud_Y, ud_X, ud_Y,
-
-            inv_ΔV, A_X, Δt_half,
-
-            ρ_stage, ρu_X_stage, ρu_Y_stage, E_stage,
-
-            ρd_stage, ρdud_X_stage, ρdud_Y_stage,
-
-            ρc, ρu_Xc, ρu_Yc, Ec,         
-            u_Xc, u_Yc, Pc,
-            
-            ρdc, ρdud_Xc, ρdud_Yc,         
-            ud_Xc, ud_Yc, 
-
-            w_i_m1_X, w_i_0_X, w_i_p1_X,  q_i_m1_X, q_i_0_X, q_i_p1_X,  
-
-            w_plus_i_p1, w_minus_i_p1,
-
-            ρ_L_X, ρ_R_X, u_X_L_X, u_X_R_X, u_Y_L_X, u_Y_R_X, P_L_X, P_R_X,
-            F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X, P, u_X_star_X,
-
-            ρd_L_X, ρd_R_X, ud_X_L_X, ud_X_R_X, ud_Y_L_X, ud_Y_R_X, 
-            F_ρd_X, F_ρdud_X_X, F_ρdud_Y_X, 
-                                       
-            ρg_old, u_Xg_old, u_Yg_old, Pg_old, 
-
-            ρdg_old, ud_Xg_old, ud_Yg_old,
-            
-            Xg, XCoMg, 
-
-            CoordSys, inv_r_cell, Shock, 
-
-            Scalars, Scalars_old, Scalars_stage, ρ_save,
- 
-            BC_X_left, BC_X_right,
-            BC_Y_left, BC_Y_right )
-
+""" This function performs a full RK3 time-step update of 
+    hydrodynamical and dust-dynamical variables (ignoring stiff 
+    interaction terms, e.g. dust drag & gas cooling, as well as gravity).
     
-    return nothing
-end
-
-
-
-function UpdateHydro_StrangSplit_Yfirst!( ρ_new::AbstractMatrix{Float64},
-                                       ρu_X_new::AbstractMatrix{Float64},
-                                       ρu_Y_new::AbstractMatrix{Float64},
-                                          E_new::AbstractMatrix{Float64},
-                                              ρ::AbstractMatrix{Float64},
-                                           ρu_X::AbstractMatrix{Float64},
-                                           ρu_Y::AbstractMatrix{Float64},
-                                              E::AbstractMatrix{Float64},
-                                            γad::AbstractMatrix{Float64},
-                                            u_X::AbstractMatrix{Float64},
-                                            u_Y::AbstractMatrix{Float64},
-
-                                         ρd_new::AbstractMatrix{Float64},
-                                     ρdud_X_new::AbstractMatrix{Float64},
-                                     ρdud_Y_new::AbstractMatrix{Float64},
-                                             ρd::AbstractMatrix{Float64},
-                                         ρdud_X::AbstractMatrix{Float64},
-                                         ρdud_Y::AbstractMatrix{Float64},
-                                           ud_X::AbstractMatrix{Float64},
-                                           ud_Y::AbstractMatrix{Float64},
-
-                                         inv_ΔV::AbstractMatrix{Float64},
-                                            A_X::AbstractMatrix{Float64},
-                                            A_Y::AbstractMatrix{Float64},
-                                             Δt::Float64,
-
-                                            # Scratch arrays for RK integration:
-                                        ρ_stage::AbstractMatrix{Float64},
-                                     ρu_X_stage::AbstractMatrix{Float64},
-                                     ρu_Y_stage::AbstractMatrix{Float64},
-                                        E_stage::AbstractMatrix{Float64},
-
-                                       ρd_stage::AbstractMatrix{Float64},
-                                   ρdud_X_stage::AbstractMatrix{Float64},
-                                   ρdud_Y_stage::AbstractMatrix{Float64},
-
-                                            # Conservative & primitive variables @ cell centers:
-                                             ρc::AbstractMatrix{Float64}, 
-                                          ρu_Xc::AbstractMatrix{Float64}, 
-                                          ρu_Yc::AbstractMatrix{Float64},
-                                             Ec::AbstractMatrix{Float64},         
-                                           u_Xc::AbstractMatrix{Float64}, 
-                                           u_Yc::AbstractMatrix{Float64}, 
-                                             Pc::AbstractMatrix{Float64}, 
-                                             
-                                            ρdc::AbstractMatrix{Float64}, 
-                                        ρdud_Xc::AbstractMatrix{Float64}, 
-                                        ρdud_Yc::AbstractMatrix{Float64},     
-                                          ud_Xc::AbstractMatrix{Float64}, 
-                                          ud_Yc::AbstractMatrix{Float64}, 
-
-                                            # Weights to convert between cell-averages and cell-centers: 
-                                       w_i_m1_X::AbstractVector{Float64}, 
-                                        w_i_0_X::AbstractVector{Float64},
-                                       w_i_p1_X::AbstractVector{Float64},  
-                                       w_j_m1_Y::AbstractVector{Float64}, 
-                                        w_j_0_Y::AbstractVector{Float64}, 
-                                       w_j_p1_Y::AbstractVector{Float64}, 
-                                       q_i_m1_X::AbstractVector{Float64}, 
-                                        q_i_0_X::AbstractVector{Float64}, 
-                                       q_i_p1_X::AbstractVector{Float64},  
-                                       q_j_m1_Y::AbstractVector{Float64}, 
-                                        q_j_0_Y::AbstractVector{Float64}, 
-                                       q_j_p1_Y::AbstractVector{Float64},  
-
-                                            # Weights for WENO3 interface reconstruction:
-                                    w_plus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{i,1}
-                                   w_minus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{i,1} 
-                                    w_plus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{j,1}
-                                   w_minus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{j,1}
-
-
-                                          ρ_L_X::AbstractMatrix{Float64},
-                                          ρ_R_X::AbstractMatrix{Float64},
-                                        u_X_L_X::AbstractMatrix{Float64},
-                                        u_X_R_X::AbstractMatrix{Float64},
-                                        u_Y_L_X::AbstractMatrix{Float64},
-                                        u_Y_R_X::AbstractMatrix{Float64},
-                                          P_L_X::AbstractMatrix{Float64},
-                                          P_R_X::AbstractMatrix{Float64},
-                                          F_ρ_X::AbstractMatrix{Float64},
-                                       F_ρu_X_X::AbstractMatrix{Float64},
-                                       F_ρu_Y_X::AbstractMatrix{Float64},
-                                          F_E_X::AbstractMatrix{Float64},
-
-                                          ρ_L_Y::AbstractMatrix{Float64},
-                                          ρ_R_Y::AbstractMatrix{Float64},
-                                        u_Y_L_Y::AbstractMatrix{Float64},
-                                        u_Y_R_Y::AbstractMatrix{Float64},
-                                        u_X_L_Y::AbstractMatrix{Float64},
-                                        u_X_R_Y::AbstractMatrix{Float64},
-                                          P_L_Y::AbstractMatrix{Float64},
-                                          P_R_Y::AbstractMatrix{Float64},
-                                          F_ρ_Y::AbstractMatrix{Float64},
-                                       F_ρu_X_Y::AbstractMatrix{Float64},
-                                       F_ρu_Y_Y::AbstractMatrix{Float64},
-                                          F_E_Y::AbstractMatrix{Float64},
-                                              P::AbstractMatrix{Float64},
-                                     u_X_star_X::AbstractMatrix{Float64},
-                                     u_Y_star_Y::AbstractMatrix{Float64},
-
-                                         ρd_L_X::AbstractMatrix{Float64},
-                                         ρd_R_X::AbstractMatrix{Float64},
-                                       ud_X_L_X::AbstractMatrix{Float64},
-                                       ud_X_R_X::AbstractMatrix{Float64},
-                                       ud_Y_L_X::AbstractMatrix{Float64},
-                                       ud_Y_R_X::AbstractMatrix{Float64},
-                                         F_ρd_X::AbstractMatrix{Float64},
-                                     F_ρdud_X_X::AbstractMatrix{Float64},
-                                     F_ρdud_Y_X::AbstractMatrix{Float64},
-
-                                         ρd_L_Y::AbstractMatrix{Float64},
-                                         ρd_R_Y::AbstractMatrix{Float64},
-                                       ud_Y_L_Y::AbstractMatrix{Float64},
-                                       ud_Y_R_Y::AbstractMatrix{Float64},
-                                       ud_X_L_Y::AbstractMatrix{Float64},
-                                       ud_X_R_Y::AbstractMatrix{Float64},
-                                         F_ρd_Y::AbstractMatrix{Float64},
-                                     F_ρdud_X_Y::AbstractMatrix{Float64},
-                                     F_ρdud_Y_Y::AbstractMatrix{Float64},
-                                        
-                                    # Ghost‐padded primitives & grid:
-                                         ρg_old::AbstractMatrix{Float64}, 
-                                       u_Xg_old::AbstractMatrix{Float64}, 
-                                       u_Yg_old::AbstractMatrix{Float64}, 
-                                         Pg_old::AbstractMatrix{Float64},
-
-                                        ρdg_old::AbstractMatrix{Float64}, 
-                                      ud_Xg_old::AbstractMatrix{Float64}, 
-                                      ud_Yg_old::AbstractMatrix{Float64}, 
-
-                                             Xg::AbstractVector{Float64},
-                                          XCoMg::AbstractVector{Float64},
-                                             Yg::AbstractVector{Float64},
-                                          YCoMg::AbstractVector{Float64},
-
-                                       CoordSys::CoordSystem,
-                                     inv_r_cell::AbstractVector{Float64}, 
-
-                                    # Shock indicator:
-                                          Shock::AbstractMatrix{Int}, 
-
-                                    # Arrays for advection of passive scalars:
-                                        Scalars::AbstractArray{Float64, 3},
-                                    Scalars_old::AbstractArray{Float64, 3},
-                                  Scalars_stage::AbstractArray{Float64, 3},
-                                         ρ_save::AbstractMatrix{Float64},
-
-                                      # BCs:
-                                      BC_X_left::Symbol, BC_X_right::Symbol,
-                                      BC_Y_left::Symbol, BC_Y_right::Symbol
-                             )
-
-    Δt_half  = 0.5 * Δt
-
-    #####################################################################
-    #######                                                       #######
-    #######   1)  H A L F - S T E P  I N  Y - D I R E C T I O N   #######
-    #######                                                       #######
-    #####################################################################
-    
-    RK2_Y!( ρ_new, ρu_X_new, ρu_Y_new, E_new,
-            ρ, ρu_X, ρu_Y, E, γad, u_X, u_Y,
-
-            ρd_new, ρdud_X_new, ρdud_Y_new, 
-            ρd, ρdud_X, ρdud_Y, ud_X, ud_Y,
-
-            inv_ΔV, A_Y, Δt_half,
-
-            ρ_stage, ρu_X_stage, ρu_Y_stage, E_stage,
-
-            ρd_stage, ρdud_X_stage, ρdud_Y_stage,
-
-            ρc, ρu_Xc, ρu_Yc, Ec, u_Xc, u_Yc, Pc,
-
-            ρdc, ρdud_Xc, ρdud_Yc, ud_Xc, ud_Yc,          
-
-            w_j_m1_Y, w_j_0_Y, w_j_p1_Y,  q_j_m1_Y, q_j_0_Y, q_j_p1_Y,  
-
-            w_plus_j_p1, w_minus_j_p1, 
-
-            ρ_L_Y, ρ_R_Y, u_Y_L_Y, u_Y_R_Y, u_X_L_Y, u_X_R_Y, P_L_Y, P_R_Y,
-            F_ρ_Y, F_ρu_X_Y, F_ρu_Y_Y, F_E_Y, P, u_Y_star_Y,
-
-            ρd_L_Y, ρd_R_Y, ud_Y_L_Y, ud_Y_R_Y, ud_X_L_Y, ud_X_R_Y, 
-            F_ρd_Y, F_ρdud_X_Y, F_ρdud_Y_Y,
-                                       
-            ρg_old, u_Xg_old, u_Yg_old, Pg_old, 
-
-            ρdg_old, ud_Xg_old, ud_Yg_old,
-            
-            Yg, YCoMg, 
-            
-            Shock,
-
-            Scalars, Scalars_old, Scalars_stage, ρ_save,
-            
-            BC_X_left, BC_X_right,
-            BC_Y_left, BC_Y_right )
-
-    #####################################################################
-    #######                                                       #######
-    #######   2)  F U L L - S T E P  I N  X - D I R E C T I O N   #######
-    #######                                                       #######
-    #####################################################################
-    
-    RK2_X!( ρ_new, ρu_X_new, ρu_Y_new, E_new,
-            ρ, ρu_X, ρu_Y, E, γad, u_X, u_Y,
-
-            ρd_new, ρdud_X_new, ρdud_Y_new, 
-            ρd, ρdud_X, ρdud_Y, ud_X, ud_Y,
-
-            inv_ΔV, A_X, Δt,
-
-            ρ_stage, ρu_X_stage, ρu_Y_stage, E_stage,
-
-            ρd_stage, ρdud_X_stage, ρdud_Y_stage,
-
-            ρc, ρu_Xc, ρu_Yc, Ec,         
-            u_Xc, u_Yc, Pc,
-            
-            ρdc, ρdud_Xc, ρdud_Yc,         
-            ud_Xc, ud_Yc, 
-
-            w_i_m1_X, w_i_0_X, w_i_p1_X,  q_i_m1_X, q_i_0_X, q_i_p1_X,  
-
-            w_plus_i_p1, w_minus_i_p1,
-
-            ρ_L_X, ρ_R_X, u_X_L_X, u_X_R_X, u_Y_L_X, u_Y_R_X, P_L_X, P_R_X,
-            F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X, P, u_X_star_X,
-
-            ρd_L_X, ρd_R_X, ud_X_L_X, ud_X_R_X, ud_Y_L_X, ud_Y_R_X, 
-            F_ρd_X, F_ρdud_X_X, F_ρdud_Y_X, 
-                                       
-            ρg_old, u_Xg_old, u_Yg_old, Pg_old, 
-
-            ρdg_old, ud_Xg_old, ud_Yg_old,
-            
-            Xg, XCoMg, 
-
-            CoordSys, inv_r_cell, Shock, 
-
-            Scalars, Scalars_old, Scalars_stage, ρ_save,
- 
-            BC_X_left, BC_X_right,
-            BC_Y_left, BC_Y_right )
-
-    ###############################################################################
-    #######                                                                 #######
-    #######   3) F I N A L  H A L F - S T E P  I N  Y - D I R E C T I O N   #######
-    #######                                                                 #######
-    ###############################################################################
-    
-    RK2_Y!( ρ_new, ρu_X_new, ρu_Y_new, E_new,
-            ρ, ρu_X, ρu_Y, E, γad, u_X, u_Y,
-
-            ρd_new, ρdud_X_new, ρdud_Y_new, 
-            ρd, ρdud_X, ρdud_Y, ud_X, ud_Y,
-
-            inv_ΔV, A_Y, Δt_half,
-
-            ρ_stage, ρu_X_stage, ρu_Y_stage, E_stage,
-
-            ρd_stage, ρdud_X_stage, ρdud_Y_stage,
-
-            ρc, ρu_Xc, ρu_Yc, Ec, u_Xc, u_Yc, Pc,
-
-            ρdc, ρdud_Xc, ρdud_Yc, ud_Xc, ud_Yc,          
-
-            w_j_m1_Y, w_j_0_Y, w_j_p1_Y,  q_j_m1_Y, q_j_0_Y, q_j_p1_Y,  
-
-            w_plus_j_p1, w_minus_j_p1, 
-
-            ρ_L_Y, ρ_R_Y, u_Y_L_Y, u_Y_R_Y, u_X_L_Y, u_X_R_Y, P_L_Y, P_R_Y,
-            F_ρ_Y, F_ρu_X_Y, F_ρu_Y_Y, F_E_Y, P, u_Y_star_Y,
-
-            ρd_L_Y, ρd_R_Y, ud_Y_L_Y, ud_Y_R_Y, ud_X_L_Y, ud_X_R_Y, 
-            F_ρd_Y, F_ρdud_X_Y, F_ρdud_Y_Y,
-                                       
-            ρg_old, u_Xg_old, u_Yg_old, Pg_old, 
-
-            ρdg_old, ud_Xg_old, ud_Yg_old,
-            
-            Yg, YCoMg, 
-            
-            Shock,
-
-            Scalars, Scalars_old, Scalars_stage, ρ_save,
-            
-            BC_X_left, BC_X_right,
-            BC_Y_left, BC_Y_right )
-
-    return nothing
-end
-
-
-function UpdateHydro!( ρ_new::AbstractMatrix{Float64},
-                    ρu_X_new::AbstractMatrix{Float64},
-                    ρu_Y_new::AbstractMatrix{Float64},
-                       E_new::AbstractMatrix{Float64},
-                           ρ::AbstractMatrix{Float64},
-                        ρu_X::AbstractMatrix{Float64},
-                        ρu_Y::AbstractMatrix{Float64},
-                           E::AbstractMatrix{Float64},
-                          ρ0::AbstractMatrix{Float64},
-                       ρu_X0::AbstractMatrix{Float64},
-                       ρu_Y0::AbstractMatrix{Float64},
-                          E0::AbstractMatrix{Float64},
-
-                         γad::AbstractMatrix{Float64},
-                         u_X::AbstractMatrix{Float64},
-                         u_Y::AbstractMatrix{Float64},
-
-                      ρd_new::AbstractMatrix{Float64},
-                  ρdud_X_new::AbstractMatrix{Float64},
-                  ρdud_Y_new::AbstractMatrix{Float64},
-                          ρd::AbstractMatrix{Float64},
-                      ρdud_X::AbstractMatrix{Float64},
-                      ρdud_Y::AbstractMatrix{Float64},
-                         ρd0::AbstractMatrix{Float64},
-                     ρdud_X0::AbstractMatrix{Float64},
-                     ρdud_Y0::AbstractMatrix{Float64},
-
-                        ud_X::AbstractMatrix{Float64},
-                        ud_Y::AbstractMatrix{Float64},
-
-                      inv_ΔV::AbstractMatrix{Float64},
-                         A_X::AbstractMatrix{Float64},
-                         A_Y::AbstractMatrix{Float64},
-                          Δt::Float64,
-
-                     # Scratch arrays for RK integration: 
-                     ρ_stage::AbstractMatrix{Float64},
-                  ρu_X_stage::AbstractMatrix{Float64},
-                  ρu_Y_stage::AbstractMatrix{Float64},
-                     E_stage::AbstractMatrix{Float64},
-
-                    ρd_stage::AbstractMatrix{Float64},
-                ρdud_X_stage::AbstractMatrix{Float64},
-                ρdud_Y_stage::AbstractMatrix{Float64},
-
-                        # Conservative & primitive variables @ cell centers:
-                          ρc::AbstractMatrix{Float64}, 
-                       ρu_Xc::AbstractMatrix{Float64}, 
-                       ρu_Yc::AbstractMatrix{Float64},
-                          Ec::AbstractMatrix{Float64},         
-                        u_Xc::AbstractMatrix{Float64}, 
-                        u_Yc::AbstractMatrix{Float64}, 
-                          Pc::AbstractMatrix{Float64},
-                          
-                         ρdc::AbstractMatrix{Float64}, 
-                     ρdud_Xc::AbstractMatrix{Float64}, 
-                     ρdud_Yc::AbstractMatrix{Float64},     
-                       ud_Xc::AbstractMatrix{Float64}, 
-                       ud_Yc::AbstractMatrix{Float64},
-
-                        # Weights to convert between cell-averages and cell-centers: 
-                    w_i_m1_X::AbstractVector{Float64}, 
-                     w_i_0_X::AbstractVector{Float64},
-                    w_i_p1_X::AbstractVector{Float64},  
-                    w_j_m1_Y::AbstractVector{Float64}, 
-                     w_j_0_Y::AbstractVector{Float64}, 
-                    w_j_p1_Y::AbstractVector{Float64}, 
-                    q_i_m1_X::AbstractVector{Float64}, 
-                     q_i_0_X::AbstractVector{Float64}, 
-                    q_i_p1_X::AbstractVector{Float64},  
-                    q_j_m1_Y::AbstractVector{Float64}, 
-                     q_j_0_Y::AbstractVector{Float64}, 
-                    q_j_p1_Y::AbstractVector{Float64},  
-
-                   # Weights for WENO3 interface reconstruction:
-                 w_plus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{i,1}
-                w_minus_i_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{i,1} 
-                 w_plus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁺_{j,1}
-                w_minus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{j,1}
-
-                       ρ_L_X::AbstractMatrix{Float64},
-                       ρ_R_X::AbstractMatrix{Float64},
-                     u_X_L_X::AbstractMatrix{Float64},
-                     u_X_R_X::AbstractMatrix{Float64},
-                     u_Y_L_X::AbstractMatrix{Float64},
-                     u_Y_R_X::AbstractMatrix{Float64},
-                       P_L_X::AbstractMatrix{Float64},
-                       P_R_X::AbstractMatrix{Float64},
-                       F_ρ_X::AbstractMatrix{Float64},
-                    F_ρu_X_X::AbstractMatrix{Float64},
-                    F_ρu_Y_X::AbstractMatrix{Float64},
-                       F_E_X::AbstractMatrix{Float64},
-
-                       ρ_L_Y::AbstractMatrix{Float64},
-                       ρ_R_Y::AbstractMatrix{Float64},
-                     u_Y_L_Y::AbstractMatrix{Float64},
-                     u_Y_R_Y::AbstractMatrix{Float64},
-                     u_X_L_Y::AbstractMatrix{Float64},
-                     u_X_R_Y::AbstractMatrix{Float64},
-                       P_L_Y::AbstractMatrix{Float64},
-                       P_R_Y::AbstractMatrix{Float64},
-                       F_ρ_Y::AbstractMatrix{Float64},
-                    F_ρu_X_Y::AbstractMatrix{Float64},
-                    F_ρu_Y_Y::AbstractMatrix{Float64},
-                       F_E_Y::AbstractMatrix{Float64},
-                           P::AbstractMatrix{Float64},
-                  u_X_star_X::AbstractMatrix{Float64},
-                  u_Y_star_Y::AbstractMatrix{Float64},
-            
-                      ρd_L_X::AbstractMatrix{Float64},
-                      ρd_R_X::AbstractMatrix{Float64},
-                    ud_X_L_X::AbstractMatrix{Float64},
-                    ud_X_R_X::AbstractMatrix{Float64},
-                    ud_Y_L_X::AbstractMatrix{Float64},
-                    ud_Y_R_X::AbstractMatrix{Float64},
-                      F_ρd_X::AbstractMatrix{Float64},
-                  F_ρdud_X_X::AbstractMatrix{Float64},
-                  F_ρdud_Y_X::AbstractMatrix{Float64},
-
-                      ρd_L_Y::AbstractMatrix{Float64},
-                      ρd_R_Y::AbstractMatrix{Float64},
-                    ud_Y_L_Y::AbstractMatrix{Float64},
-                    ud_Y_R_Y::AbstractMatrix{Float64},
-                    ud_X_L_Y::AbstractMatrix{Float64},
-                    ud_X_R_Y::AbstractMatrix{Float64},
-                      F_ρd_Y::AbstractMatrix{Float64},
-                  F_ρdud_X_Y::AbstractMatrix{Float64},
-                  F_ρdud_Y_Y::AbstractMatrix{Float64},      
-                                       
-                    # Ghost‐padded primitives & grid:
-                      ρg_old::AbstractMatrix{Float64}, 
-                    u_Xg_old::AbstractMatrix{Float64}, 
-                    u_Yg_old::AbstractMatrix{Float64}, 
-                      Pg_old::AbstractMatrix{Float64},
-
-                     ρdg_old::AbstractMatrix{Float64}, 
-                   ud_Xg_old::AbstractMatrix{Float64}, 
-                   ud_Yg_old::AbstractMatrix{Float64}, 
-
-                          Xg::AbstractVector{Float64},
-                       XCoMg::AbstractVector{Float64},
-                          Yg::AbstractVector{Float64},
-                       YCoMg::AbstractVector{Float64},
-
-                    CoordSys::CoordSystem,
-                  inv_r_cell::AbstractVector{Float64},
-                      Xfirst::Bool,
-
-                    # Shock indicator:
-                       Shock::AbstractMatrix{Int},
-
-                    # Arrays for advection of passive scalars:
-                     Scalars::AbstractArray{Float64, 3},
-                 Scalars_old::AbstractArray{Float64, 3},
-               Scalars_stage::AbstractArray{Float64, 3},
-                      ρ_save::AbstractMatrix{Float64}, 
-
-                      # BCs:
-                   BC_X_left::Symbol  = :Reflect, BC_X_right::Symbol  = :Outflow,
-                   BC_Y_left::Symbol  = :Reflect, BC_Y_right::Symbol  = :Outflow 
-                   )
-
-    # Save old variables, for use in the 2nd-order gravity kick function:
-    @. ρ0       =  ρ  
-    @. ρu_X0    =  ρu_X  
-    @. ρu_Y0    =  ρu_Y 
-    @. E0       =  E
-    @. ρd0      =  ρd  
-
-    # Update shock indicators (so it uses latest values from e.g. gas cooling/heating):
-    UpdateShockFinder!( Shock, P )
-
-    if Xfirst
-        UpdateHydro_StrangSplit_Xfirst!(
-            ρ_new, ρu_X_new, ρu_Y_new, E_new,
-            ρ, ρu_X, ρu_Y, E,         
-            γad, u_X, u_Y,
-            
-            ρd_new, ρdud_X_new, ρdud_Y_new,
-            ρd, ρdud_X, ρdud_Y,       
-            ud_X, ud_Y,
-            
-            inv_ΔV, A_X, A_Y, Δt,
-
-            ρ_stage, ρu_X_stage, ρu_Y_stage, E_stage,
-
-            ρd_stage, ρdud_X_stage, ρdud_Y_stage,
-
-            ρc, ρu_Xc, ρu_Yc, Ec, u_Xc, u_Yc, Pc,     
-            
-            ρdc, ρdud_Xc, ρdud_Yc, ud_Xc, ud_Yc, 
-
-            w_i_m1_X, w_i_0_X, w_i_p1_X, w_j_m1_Y, w_j_0_Y, w_j_p1_Y, 
-            q_i_m1_X, q_i_0_X, q_i_p1_X, q_j_m1_Y, q_j_0_Y, q_j_p1_Y,  
-            w_plus_i_p1,  
-            w_minus_i_p1,   
-            w_plus_j_p1,  
-            w_minus_j_p1, 
-
-            ρ_L_X, ρ_R_X, u_X_L_X, u_X_R_X, u_Y_L_X, u_Y_R_X, P_L_X, P_R_X, F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X,
-            ρ_L_Y, ρ_R_Y, u_Y_L_Y, u_Y_R_Y, u_X_L_Y, u_X_R_Y, P_L_Y, P_R_Y, F_ρ_Y, F_ρu_X_Y, F_ρu_Y_Y, F_E_Y,
-            P, u_X_star_X, u_Y_star_Y,
-
-            ρd_L_X, ρd_R_X, ud_X_L_X, ud_X_R_X, ud_Y_L_X, ud_Y_R_X, F_ρd_X, F_ρdud_X_X, F_ρdud_Y_X,
-            ρd_L_Y, ρd_R_Y, ud_Y_L_Y, ud_Y_R_Y, ud_X_L_Y, ud_X_R_Y, F_ρd_Y, F_ρdud_X_Y, F_ρdud_Y_Y, 
-
-            ρg_old, u_Xg_old, u_Yg_old, Pg_old,
-
-            ρdg_old, ud_Xg_old, ud_Yg_old,
-
-            Xg, XCoMg, Yg, YCoMg, 
-            CoordSys, inv_r_cell,
-            Shock,
-            Scalars, Scalars_old, Scalars_stage, ρ_save,
-            BC_X_left, BC_X_right, 
-            BC_Y_left, BC_Y_right )
-
-    else
-        UpdateHydro_StrangSplit_Yfirst!(
-            ρ_new, ρu_X_new, ρu_Y_new, E_new,
-            ρ, ρu_X, ρu_Y, E,         
-            γad, u_X, u_Y,
-            
-            ρd_new, ρdud_X_new, ρdud_Y_new,
-            ρd, ρdud_X, ρdud_Y,       
-            ud_X, ud_Y,
-            
-            inv_ΔV, A_X, A_Y, Δt,
-
-            ρ_stage, ρu_X_stage, ρu_Y_stage, E_stage,
-
-            ρd_stage, ρdud_X_stage, ρdud_Y_stage,
-
-            ρc, ρu_Xc, ρu_Yc, Ec, u_Xc, u_Yc, Pc,
-
-            ρdc, ρdud_Xc, ρdud_Yc, ud_Xc, ud_Yc, 
-
-            w_i_m1_X, w_i_0_X, w_i_p1_X, w_j_m1_Y, w_j_0_Y, w_j_p1_Y, 
-            q_i_m1_X, q_i_0_X, q_i_p1_X, q_j_m1_Y, q_j_0_Y, q_j_p1_Y, 
-            w_plus_i_p1,  
-            w_minus_i_p1,   
-            w_plus_j_p1,  
-            w_minus_j_p1,  
-
-            ρ_L_X, ρ_R_X, u_X_L_X, u_X_R_X, u_Y_L_X, u_Y_R_X, P_L_X, P_R_X, F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X,
-            ρ_L_Y, ρ_R_Y, u_Y_L_Y, u_Y_R_Y, u_X_L_Y, u_X_R_Y, P_L_Y, P_R_Y, F_ρ_Y, F_ρu_X_Y, F_ρu_Y_Y, F_E_Y,
-            P, u_X_star_X, u_Y_star_Y,
-
-            ρd_L_X, ρd_R_X, ud_X_L_X, ud_X_R_X, ud_Y_L_X, ud_Y_R_X, F_ρd_X, F_ρdud_X_X, F_ρdud_Y_X,
-            ρd_L_Y, ρd_R_Y, ud_Y_L_Y, ud_Y_R_Y, ud_X_L_Y, ud_X_R_Y, F_ρd_Y, F_ρdud_X_Y, F_ρdud_Y_Y, 
-
-            ρg_old, u_Xg_old, u_Yg_old, Pg_old,
-
-            ρdg_old, ud_Xg_old, ud_Yg_old,
-
-            Xg, XCoMg, Yg, YCoMg, 
-            CoordSys, inv_r_cell,
-            Shock,
-            Scalars, Scalars_old, Scalars_stage, ρ_save,
-            BC_X_left, BC_X_right, 
-            BC_Y_left, BC_Y_right )
-
-    end
-
-    # Update of primitives, for the later purpose of computing the CFL time-step:
-    if Xfirst 
-        # Get cell-center conservatives (in X-direction) from 
-        # cell-averaged conservatives:
-        RecoverPointwiseFromAverages_X!( ρc, ρu_Xc, ρu_Yc, Ec,      # Cell-center values (updated)
-                                         ρdc, ρdud_Xc, ρdud_Yc,
-                                         ρ,  ρu_X,  ρu_Y,  E, γad,  # Cell-averaged values 
-                                         ρd,  ρdud_X,  ρdud_Y,
-                                         w_i_m1_X, w_i_0_X, w_i_p1_X,
-                                         Shock,
-                                         BC_X_left, BC_X_right )
-
-        # Get cell-center primitives (in X-direction) from 
-        # cell-center conservatives:
-        RecoverPointwisePrimitivesFromConservatives!( ρc, ρu_Xc, ρu_Yc, Ec,
-                                                      ρdc, ρdud_Xc, ρdud_Yc,
-                                                      u_Xc, u_Yc, Pc, γad,
-                                                      ud_Xc, ud_Yc )
-
-        # Get cell-averaged primitives (in X-direction) from cell-center primitives:
-        RecoverCellAveragedPrimitives_X!( u_Xc, u_Yc, Pc,    # Cell-centered primitives 
-                                          ud_Xc, ud_Yc,
-                                          u_X,  u_Y,  P,     # Cell-averaged primitives (updated)
-                                          ud_X,  ud_Y,
-                                          q_i_m1_X, q_i_0_X, q_i_p1_X,
-                                          Shock,
-                                          BC_X_left, BC_X_right )
-
-    else
-        # Get cell-center conservatives (in Y-direction) from 
-        # cell-averaged conservatives:
-        RecoverPointwiseFromAverages_Y!( ρc, ρu_Xc, ρu_Yc, Ec,      # Cell-center values (updated)
-                                         ρdc, ρdud_Xc, ρdud_Yc,
-                                         ρ,  ρu_X,  ρu_Y,  E, γad,  # Cell-averaged values 
-                                         ρd,  ρdud_X,  ρdud_Y,
-                                         w_j_m1_Y, w_j_0_Y, w_j_p1_Y,
-                                         Shock,
-                                         BC_Y_left, BC_Y_right )
-
-        # Get cell-center primitives (in Y-direction) from 
-        # cell-center conservatives:
-        RecoverPointwisePrimitivesFromConservatives!( ρc, ρu_Xc, ρu_Yc, Ec,
-                                                      ρdc, ρdud_Xc, ρdud_Yc,
-                                                      u_Xc, u_Yc, Pc, γad,
-                                                      ud_Xc, ud_Yc )
-
-        # Get cell-averaged primitives (in Y-direction) from cell-center primitives:
-        RecoverCellAveragedPrimitives_Y!( u_Xc, u_Yc, Pc,    # Cell-centered primitives 
-                                          ud_Xc, ud_Yc, 
-                                          u_X,  u_Y,  P,     # Cell-averaged primitives (updated)
-                                          ud_X,  ud_Y,
-                                          q_j_m1_Y, q_j_0_Y, q_j_p1_Y,
-                                          Shock,
-                                          BC_Y_left, BC_Y_right )
-    end
-
-    # Update shock indicators:
-    UpdateShockFinder!( Shock, P )
-
-    return nothing 
-end
-
-
+    Passive scalars are also advected. """
 function UpdateHydro!( Δt::Float64, 
-               HydroState::HydrodynamicsState,
+                    Hydro::HydrodynamicsState,
                 GhostGrid::GhostPaddedGrid,
                    inv_ΔV::AbstractMatrix{Float64},
                       A_X::AbstractMatrix{Float64},
                       A_Y::AbstractMatrix{Float64},
+
                   # Weights to convert between cell-averages and cell-centers: 
                  w_i_m1_X::AbstractVector{Float64}, 
                   w_i_0_X::AbstractVector{Float64},
@@ -5049,164 +4500,368 @@ function UpdateHydro!( Δt::Float64,
 
                  CoordSys::CoordSystem,
                inv_r_cell::AbstractVector{Float64}
-                      )
+                     )
 
-    # Select Strang-split order:    
-    HydroState.rfirst_Hydro = !HydroState.rfirst_Hydro   # Change order from its previous value 
-    Xfirst                  =  HydroState.rfirst_Hydro
+    # Save the state at the start, before the update (needed later in RK3):
+    @. Hydro.ρ_stage       = Hydro.ρ
+    @. Hydro.ρu_X_stage    = Hydro.ρu_X 
+    @. Hydro.ρu_Y_stage    = Hydro.ρu_Y
+    @. Hydro.E_stage       = Hydro.E 
+    @. Hydro.e_dual_stage  = Hydro.e_dual 
+    @. Hydro.ρd_stage      = Hydro.ρd
+    @. Hydro.ρdud_X_stage  = Hydro.ρdud_X
+    @. Hydro.ρdud_Y_stage  = Hydro.ρdud_Y 
+    @. Hydro.Scalars_stage = Hydro.Scalars
+    @. Hydro.Scalars_old   = Hydro.Scalars
 
-    # Update hydrodynamics: 
-    UpdateHydro!( HydroState.ρ_new,
-                  HydroState.ρu_X_new,
-                  HydroState.ρu_Y_new,
-                  HydroState.E_new,
-                  HydroState.ρ,
-                  HydroState.ρu_X,
-                  HydroState.ρu_Y,
-                  HydroState.E,
-                  HydroState.ρ0,
-                  HydroState.ρu_X0,
-                  HydroState.ρu_Y0,
-                  HydroState.E0,
+    ###############################################################
+    #######                                                 #######
+    #######     S T E P  1:  U^(*) = U^(n)  +  L^(n) Δt     #######
+    #######                                                 #######
+    ###############################################################
 
-                  HydroState.γad,
-                  HydroState.u_X,
-                  HydroState.u_Y,
+    # Forward-Euler:  U^(n) → U^(*), result stored in the non-subscript 
+    # arrays (e.g. ρ, ρu_X):
+    ForwardEuler!( Hydro.ρ_new, Hydro.ρu_X_new, Hydro.ρu_Y_new, Hydro.E_new, Hydro.e_dual_new,
+                   Hydro.ρ, Hydro.ρu_X, Hydro.ρu_Y, Hydro.E, Hydro.e_dual, Hydro.γad, Hydro.u_X, Hydro.u_Y,
 
-                  HydroState.ρd_new,
-                  HydroState.ρdud_X_new,
-                  HydroState.ρdud_Y_new,
-                  HydroState.ρd,
-                  HydroState.ρdud_X,
-                  HydroState.ρdud_Y,
-                  HydroState.ρd0,
-                  HydroState.ρdud_X0,
-                  HydroState.ρdud_Y0,
+                   Hydro.ρd_new, Hydro.ρdud_X_new, Hydro.ρdud_Y_new, Hydro.ρd, Hydro.ρdud_X, Hydro.ρdud_Y,
+                   Hydro.ud_X, Hydro.ud_Y,
 
-                  HydroState.ud_X,
-                  HydroState.ud_Y,
+                   inv_ΔV, A_X, A_Y, Δt,
 
-                  inv_ΔV,
-                  A_X,
-                  A_Y,
-                  Δt,
+                   # Conservative & primitive variables @ cell centers:
+                   Hydro.ρc, Hydro.ρu_Xc, Hydro.ρu_Yc, Hydro.Ec, Hydro.u_Xc, Hydro.u_Yc, Hydro.Pc,  
+                             
+                   Hydro.ρdc, Hydro.ρdud_Xc, Hydro.ρdud_Yc, Hydro.ud_Xc, Hydro.ud_Yc, 
 
-                  # Scratch arrays for RK integration: 
-                  HydroState.ρ_stage,
-                  HydroState.ρu_X_stage,
-                  HydroState.ρu_Y_stage,
-                  HydroState.E_stage,
+                   # Weights to convert between cell-averages and cell-centers: 
+                   w_i_m1_X, w_i_0_X, w_i_p1_X, q_i_m1_X, q_i_0_X, q_i_p1_X,  
 
-                  HydroState.ρd_stage,
-                  HydroState.ρdud_X_stage,
-                  HydroState.ρdud_Y_stage,
-
-                  # Conservative & primitive variables @ cell centers:
-                  HydroState.ρc, 
-                  HydroState.ρu_Xc, 
-                  HydroState.ρu_Yc,
-                  HydroState.Ec,         
-                  HydroState.u_Xc, 
-                  HydroState.u_Yc, 
-                  HydroState.Pc,     
-                  
-                  HydroState.ρdc, 
-                  HydroState.ρdud_Xc, 
-                  HydroState.ρdud_Yc,  
-                  HydroState.ud_Xc, 
-                  HydroState.ud_Yc, 
-
-                  # Weights to convert between cell-averages and cell-centers: 
-                  w_i_m1_X,  w_i_0_X,  w_i_p1_X,  w_j_m1_Y,  w_j_0_Y,  w_j_p1_Y, 
-                  q_i_m1_X,   q_i_0_X,  q_i_p1_X,  q_j_m1_Y, q_j_0_Y,  q_j_p1_Y,  
+                   w_j_m1_Y, w_j_0_Y, w_j_p1_Y, q_j_m1_Y, q_j_0_Y, q_j_p1_Y,  
 
                    # Weights for WENO3 interface reconstruction:
-                 w_plus_i_p1,  # WENO3 weights w⁺_{i,1}
-                w_minus_i_p1,  # WENO3 weights w⁻_{i,1} 
-                 w_plus_j_p1,  # WENO3 weights w⁺_{j,1}
-                w_minus_j_p1,  # WENO3 weights w⁻_{j,1}
+                   w_plus_i_p1,   # WENO3 weights w⁺_{i,1}
+                   w_minus_i_p1,  # WENO3 weights w⁻_{i,1} 
+                   w_plus_j_p1,   # WENO3 weights w⁺_{j,1}
+                   w_minus_j_p1,  # WENO3 weights w⁻_{j,1}
 
-                  HydroState.ρ_L_X,
-                  HydroState.ρ_R_X,
-                  HydroState.u_X_L_X,
-                  HydroState.u_X_R_X,
-                  HydroState.u_Y_L_X,
-                  HydroState.u_Y_R_X,
-                  HydroState.P_L_X,
-                  HydroState.P_R_X,
-                  HydroState.F_ρ_X,
-                  HydroState.F_ρu_X_X,
-                  HydroState.F_ρu_Y_X,
-                  HydroState.F_E_X,
+                   # Interface variables & fluxes:
+                   Hydro.ρ_L_X, Hydro.ρ_R_X, Hydro.u_X_L_X, Hydro.u_X_R_X, Hydro.u_Y_L_X, Hydro.u_Y_R_X, 
+                   Hydro.P_L_X, Hydro.P_R_X,
+                   Hydro.e_dual_L_X, Hydro.e_dual_R_X,
+                   Hydro.F_ρ_X, Hydro.F_ρu_X_X, Hydro.F_ρu_Y_X, Hydro.F_E_X, Hydro.F_e_dual_X, Hydro.u_X_star_X,
 
-                  HydroState.ρ_L_Y,
-                  HydroState.ρ_R_Y,
-                  HydroState.u_Y_L_Y,
-                  HydroState.u_Y_R_Y,
-                  HydroState.u_X_L_Y,
-                  HydroState.u_X_R_Y,
-                  HydroState.P_L_Y,
-                  HydroState.P_R_Y,
-                  HydroState.F_ρ_Y,
-                  HydroState.F_ρu_X_Y,
-                  HydroState.F_ρu_Y_Y,
-                  HydroState.F_E_Y,
-                  HydroState.P,
-                  HydroState.u_X_star_X,
-                  HydroState.u_Y_star_Y,
-                  
-                  HydroState.ρd_L_X,
-                  HydroState.ρd_R_X,
-                  HydroState.ud_X_L_X,
-                  HydroState.ud_X_R_X,
-                  HydroState.ud_Y_L_X,
-                  HydroState.ud_Y_R_X,
-                  HydroState.F_ρd_X,
-                  HydroState.F_ρdud_X_X,
-                  HydroState.F_ρdud_Y_X,
+                   Hydro.ρd_L_X, Hydro.ρd_R_X, Hydro.ud_X_L_X, Hydro.ud_X_R_X, Hydro.ud_Y_L_X, Hydro.ud_Y_R_X,
+                   Hydro.F_ρd_X, Hydro.F_ρdud_X_X, Hydro.F_ρdud_Y_X,
 
-                  HydroState.ρd_L_Y,
-                  HydroState.ρd_R_Y,
-                  HydroState.ud_Y_L_Y,
-                  HydroState.ud_Y_R_Y,
-                  HydroState.ud_X_L_Y,
-                  HydroState.ud_X_R_Y,
-                  HydroState.F_ρd_Y,
-                  HydroState.F_ρdud_X_Y,
-                  HydroState.F_ρdud_Y_Y,   
+                   Hydro.ρ_L_Y, Hydro.ρ_R_Y, Hydro.u_Y_L_Y, Hydro.u_Y_R_Y, Hydro.u_X_L_Y, Hydro.u_X_R_Y, 
+                   Hydro.P_L_Y, Hydro.P_R_Y,
+                   Hydro.e_dual_L_Y, Hydro.e_dual_R_Y, 
+                   Hydro.F_ρ_Y, Hydro.F_ρu_X_Y, Hydro.F_ρu_Y_Y, Hydro.F_E_Y, Hydro.F_e_dual_Y, Hydro.u_Y_star_Y,
+
+                   Hydro.ρd_L_Y, Hydro.ρd_R_Y, Hydro.ud_Y_L_Y, Hydro.ud_Y_R_Y, Hydro.ud_X_L_Y, Hydro.ud_X_R_Y,
+                   Hydro.F_ρd_Y, Hydro.F_ρdud_X_Y, Hydro.F_ρdud_Y_Y,
+
+                   # Gas pressure (cell-averaged):
+                   Hydro.P,
                                        
-                  # Ghost‐padded primitives & grid:
-                  HydroState.ρg_old, 
-                  HydroState.u_Xg_old, 
-                  HydroState.u_Yg_old, 
-                  HydroState.Pg_old,
+                   # Ghost‐padded primitives & grid:
+                   Hydro.ρg_old, Hydro.u_Xg_old, Hydro.u_Yg_old, Hydro.Pg_old, Hydro.e_dualg_old,
 
-                  HydroState.ρdg_old, 
-                  HydroState.ud_Xg_old, 
-                  HydroState.ud_Yg_old, 
+                   Hydro.ρdg_old, Hydro.ud_Xg_old, Hydro.ud_Yg_old, 
 
-                  GhostGrid.Xg,
-                  GhostGrid.XCoMg,
-                  GhostGrid.Yg,
-                  GhostGrid.YCoMg,
+                   GhostGrid.Xg, GhostGrid.XCoMg, GhostGrid.Yg, GhostGrid.YCoMg,
+
+                   CoordSys, inv_r_cell,
+  
+                   # Shock indicator:
+                   Hydro.Shock, 
+ 
+                   # BCs:
+                   Hydro.BC_X_left, Hydro.BC_X_right,
+                   Hydro.BC_Y_left, Hydro.BC_Y_right
+                  )
+
+    # Also advect passive scalars (using stored old density in ρ_stage):
+    ForwardEuler_Scalars!( Hydro.Scalars, Hydro.Scalars_old, Hydro.ρ_stage, Hydro.F_ρ_X, Hydro.F_ρ_Y,
+                           inv_ΔV, A_X, A_Y, Δt )
+
+    @. Hydro.ρ_save      = Hydro.ρ        # Save density from after step 1 (before we update ρ), needed for scalar advection
+    @. Hydro.Scalars_old = Hydro.Scalars  # Also store updated old state for the next stage 
+
+    ###########################################################################################
+    #######                                                                             #######
+    #######     S T E P  2:  U^(**) = (3/4) U^(n)  +  (1/4) [ U^(*)  +  L^(*) Δt ]      #######
+    #######                                                                             #######
+    ###########################################################################################
+
+    # To get U^(**), first do a forward-Euler step U^(*) + L^(*) Δt, which will be stored 
+    # in the arrays ρ, ρu_X, ...:
+    ForwardEuler!( Hydro.ρ_new, Hydro.ρu_X_new, Hydro.ρu_Y_new, Hydro.E_new, Hydro.e_dual_new,
+                   Hydro.ρ, Hydro.ρu_X, Hydro.ρu_Y, Hydro.E, Hydro.e_dual, Hydro.γad, Hydro.u_X, Hydro.u_Y,
+
+                   Hydro.ρd_new, Hydro.ρdud_X_new, Hydro.ρdud_Y_new, Hydro.ρd, Hydro.ρdud_X, Hydro.ρdud_Y,
+                   Hydro.ud_X, Hydro.ud_Y,
+
+                   inv_ΔV, A_X, A_Y, Δt,
+
+                   # Conservative & primitive variables @ cell centers:
+                   Hydro.ρc, Hydro.ρu_Xc, Hydro.ρu_Yc, Hydro.Ec, Hydro.u_Xc, Hydro.u_Yc, Hydro.Pc,  
+                             
+                   Hydro.ρdc, Hydro.ρdud_Xc, Hydro.ρdud_Yc, Hydro.ud_Xc, Hydro.ud_Yc, 
+
+                   # Weights to convert between cell-averages and cell-centers: 
+                   w_i_m1_X, w_i_0_X, w_i_p1_X, q_i_m1_X, q_i_0_X, q_i_p1_X,  
+
+                   w_j_m1_Y, w_j_0_Y, w_j_p1_Y, q_j_m1_Y, q_j_0_Y, q_j_p1_Y,  
+
+                   # Weights for WENO3 interface reconstruction:
+                   w_plus_i_p1,   # WENO3 weights w⁺_{i,1}
+                   w_minus_i_p1,  # WENO3 weights w⁻_{i,1} 
+                   w_plus_j_p1,   # WENO3 weights w⁺_{j,1}
+                   w_minus_j_p1,  # WENO3 weights w⁻_{j,1}
+
+                   # Interface variables & fluxes:
+                   Hydro.ρ_L_X, Hydro.ρ_R_X, Hydro.u_X_L_X, Hydro.u_X_R_X, Hydro.u_Y_L_X, Hydro.u_Y_R_X, 
+                   Hydro.P_L_X, Hydro.P_R_X,
+                   Hydro.e_dual_L_X, Hydro.e_dual_R_X,
+                   Hydro.F_ρ_X, Hydro.F_ρu_X_X, Hydro.F_ρu_Y_X, Hydro.F_E_X, Hydro.F_e_dual_X, Hydro.u_X_star_X,
+
+                   Hydro.ρd_L_X, Hydro.ρd_R_X, Hydro.ud_X_L_X, Hydro.ud_X_R_X, Hydro.ud_Y_L_X, Hydro.ud_Y_R_X,
+                   Hydro.F_ρd_X, Hydro.F_ρdud_X_X, Hydro.F_ρdud_Y_X,
+
+                   Hydro.ρ_L_Y, Hydro.ρ_R_Y, Hydro.u_Y_L_Y, Hydro.u_Y_R_Y, Hydro.u_X_L_Y, Hydro.u_X_R_Y, 
+                   Hydro.P_L_Y, Hydro.P_R_Y,
+                   Hydro.e_dual_L_Y, Hydro.e_dual_R_Y, 
+                   Hydro.F_ρ_Y, Hydro.F_ρu_X_Y, Hydro.F_ρu_Y_Y, Hydro.F_E_Y, Hydro.F_e_dual_Y, Hydro.u_Y_star_Y,
+
+                   Hydro.ρd_L_Y, Hydro.ρd_R_Y, Hydro.ud_Y_L_Y, Hydro.ud_Y_R_Y, Hydro.ud_X_L_Y, Hydro.ud_X_R_Y,
+                   Hydro.F_ρd_Y, Hydro.F_ρdud_X_Y, Hydro.F_ρdud_Y_Y,
+
+                   # Gas pressure (cell-averaged):
+                   Hydro.P,
+                                       
+                   # Ghost‐padded primitives & grid:
+                   Hydro.ρg_old, Hydro.u_Xg_old, Hydro.u_Yg_old, Hydro.Pg_old, Hydro.e_dualg_old,
+
+                   Hydro.ρdg_old, Hydro.ud_Xg_old, Hydro.ud_Yg_old, 
+
+                   GhostGrid.Xg, GhostGrid.XCoMg, GhostGrid.Yg, GhostGrid.YCoMg,
+
+                   CoordSys, inv_r_cell,
+  
+                   # Shock indicator:
+                   Hydro.Shock, 
+ 
+                   # BCs:
+                   Hydro.BC_X_left, Hydro.BC_X_right,
+                   Hydro.BC_Y_left, Hydro.BC_Y_right
+                  )
+
+    # Also advect scalars (using stored density in ρ_save):
+    ForwardEuler_Scalars!( Hydro.Scalars, Hydro.Scalars_old, Hydro.ρ_save, Hydro.F_ρ_X, Hydro.F_ρ_Y,
+                           inv_ΔV, A_X, A_Y, Δt )
+
+    # Combine to get U^(**) = (3/4) U^(n)  +  (1/4)[ U^(*) + L^(*) Δt ]:
+    @. Hydro.ρ       =  0.75 * Hydro.ρ_stage       +  0.25 * Hydro.ρ
+    @. Hydro.ρu_X    =  0.75 * Hydro.ρu_X_stage    +  0.25 * Hydro.ρu_X
+    @. Hydro.ρu_Y    =  0.75 * Hydro.ρu_Y_stage    +  0.25 * Hydro.ρu_Y
+    @. Hydro.E       =  0.75 * Hydro.E_stage       +  0.25 * Hydro.E
+    @. Hydro.e_dual  =  0.75 * Hydro.e_dual_stage  +  0.25 * Hydro.e_dual
+    @. Hydro.ρd      =  0.75 * Hydro.ρd_stage      +  0.25 * Hydro.ρd
+    @. Hydro.ρdud_X  =  0.75 * Hydro.ρdud_X_stage  +  0.25 * Hydro.ρdud_X
+    @. Hydro.ρdud_Y  =  0.75 * Hydro.ρdud_Y_stage  +  0.25 * Hydro.ρdud_Y
+    @. Hydro.Scalars =  0.75 * Hydro.Scalars_stage +  0.25 * Hydro.Scalars
+
+    @. Hydro.ρ_save      = Hydro.ρ        # Save density from after step 2 (before we update ρ), needed for scalar advection
+    @. Hydro.Scalars_old = Hydro.Scalars  # Also store updated old state for the next stage 
+
+    ##############################################################################################
+    #######                                                                                #######
+    #######     S T E P  3:  U^(n+1) = (1/3) U^(n)  +  (2/3) [ U^(**)  +  L^(**) Δt ]      #######
+    #######                                                                                #######
+    ##############################################################################################
+
+    # First get U^(**)  +  L^(**) Δt, stored in ρ, ρu_X, ...:
+    ForwardEuler!( Hydro.ρ_new, Hydro.ρu_X_new, Hydro.ρu_Y_new, Hydro.E_new, Hydro.e_dual_new,
+                   Hydro.ρ, Hydro.ρu_X, Hydro.ρu_Y, Hydro.E, Hydro.e_dual, Hydro.γad, Hydro.u_X, Hydro.u_Y,
+
+                   Hydro.ρd_new, Hydro.ρdud_X_new, Hydro.ρdud_Y_new, Hydro.ρd, Hydro.ρdud_X, Hydro.ρdud_Y,
+                   Hydro.ud_X, Hydro.ud_Y,
+
+                   inv_ΔV, A_X, A_Y, Δt,
+
+                   # Conservative & primitive variables @ cell centers:
+                   Hydro.ρc, Hydro.ρu_Xc, Hydro.ρu_Yc, Hydro.Ec, Hydro.u_Xc, Hydro.u_Yc, Hydro.Pc,  
+                             
+                   Hydro.ρdc, Hydro.ρdud_Xc, Hydro.ρdud_Yc, Hydro.ud_Xc, Hydro.ud_Yc, 
+
+                   # Weights to convert between cell-averages and cell-centers: 
+                   w_i_m1_X, w_i_0_X, w_i_p1_X, q_i_m1_X, q_i_0_X, q_i_p1_X,  
+
+                   w_j_m1_Y, w_j_0_Y, w_j_p1_Y, q_j_m1_Y, q_j_0_Y, q_j_p1_Y,  
+
+                   # Weights for WENO3 interface reconstruction:
+                   w_plus_i_p1,   # WENO3 weights w⁺_{i,1}
+                   w_minus_i_p1,  # WENO3 weights w⁻_{i,1} 
+                   w_plus_j_p1,   # WENO3 weights w⁺_{j,1}
+                   w_minus_j_p1,  # WENO3 weights w⁻_{j,1}
+
+                   # Interface variables & fluxes:
+                   Hydro.ρ_L_X, Hydro.ρ_R_X, Hydro.u_X_L_X, Hydro.u_X_R_X, Hydro.u_Y_L_X, Hydro.u_Y_R_X, 
+                   Hydro.P_L_X, Hydro.P_R_X,
+                   Hydro.e_dual_L_X, Hydro.e_dual_R_X,
+                   Hydro.F_ρ_X, Hydro.F_ρu_X_X, Hydro.F_ρu_Y_X, Hydro.F_E_X, Hydro.F_e_dual_X, Hydro.u_X_star_X,
+
+                   Hydro.ρd_L_X, Hydro.ρd_R_X, Hydro.ud_X_L_X, Hydro.ud_X_R_X, Hydro.ud_Y_L_X, Hydro.ud_Y_R_X,
+                   Hydro.F_ρd_X, Hydro.F_ρdud_X_X, Hydro.F_ρdud_Y_X,
+
+                   Hydro.ρ_L_Y, Hydro.ρ_R_Y, Hydro.u_Y_L_Y, Hydro.u_Y_R_Y, Hydro.u_X_L_Y, Hydro.u_X_R_Y, 
+                   Hydro.P_L_Y, Hydro.P_R_Y,
+                   Hydro.e_dual_L_Y, Hydro.e_dual_R_Y, 
+                   Hydro.F_ρ_Y, Hydro.F_ρu_X_Y, Hydro.F_ρu_Y_Y, Hydro.F_E_Y, Hydro.F_e_dual_Y, Hydro.u_Y_star_Y,
+
+                   Hydro.ρd_L_Y, Hydro.ρd_R_Y, Hydro.ud_Y_L_Y, Hydro.ud_Y_R_Y, Hydro.ud_X_L_Y, Hydro.ud_X_R_Y,
+                   Hydro.F_ρd_Y, Hydro.F_ρdud_X_Y, Hydro.F_ρdud_Y_Y,
+
+                   # Gas pressure (cell-averaged):
+                   Hydro.P,
+                                       
+                   # Ghost‐padded primitives & grid:
+                   Hydro.ρg_old, Hydro.u_Xg_old, Hydro.u_Yg_old, Hydro.Pg_old, Hydro.e_dualg_old,
+
+                   Hydro.ρdg_old, Hydro.ud_Xg_old, Hydro.ud_Yg_old, 
+
+                   GhostGrid.Xg, GhostGrid.XCoMg, GhostGrid.Yg, GhostGrid.YCoMg,
+
+                   CoordSys, inv_r_cell,
+  
+                   # Shock indicator:
+                   Hydro.Shock, 
+ 
+                   # BCs:
+                   Hydro.BC_X_left, Hydro.BC_X_right,
+                   Hydro.BC_Y_left, Hydro.BC_Y_right
+                  )
+
+    # Also advect scalars (using stored density in ρ_save):
+    ForwardEuler_Scalars!( Hydro.Scalars, Hydro.Scalars_old, Hydro.ρ_save, Hydro.F_ρ_X, Hydro.F_ρ_Y,
+                           inv_ΔV, A_X, A_Y, Δt )
+
+    # Combine to get U^(n+1) = (1/3) U^(n)  +  (2/3)[ U^(**) + L^(**) Δt ]:
+    @. Hydro.ρ       =  OneThird * Hydro.ρ_stage       +  TwoThirds * Hydro.ρ
+    @. Hydro.ρu_X    =  OneThird * Hydro.ρu_X_stage    +  TwoThirds * Hydro.ρu_X
+    @. Hydro.ρu_Y    =  OneThird * Hydro.ρu_Y_stage    +  TwoThirds * Hydro.ρu_Y
+    @. Hydro.E       =  OneThird * Hydro.E_stage       +  TwoThirds * Hydro.E
+    @. Hydro.e_dual  =  OneThird * Hydro.e_dual_stage  +  TwoThirds * Hydro.e_dual
+    @. Hydro.ρd      =  OneThird * Hydro.ρd_stage      +  TwoThirds * Hydro.ρd
+    @. Hydro.ρdud_X  =  OneThird * Hydro.ρdud_X_stage  +  TwoThirds * Hydro.ρdud_X
+    @. Hydro.ρdud_Y  =  OneThird * Hydro.ρdud_Y_stage  +  TwoThirds * Hydro.ρdud_Y
+    @. Hydro.Scalars =  OneThird * Hydro.Scalars_stage +  TwoThirds * Hydro.Scalars 
+    
+    # Sync e_dual:
+    SyncDualInternalEnergy!( Hydro )
+
+    # Update shock indicators:
+    UpdateShockFinder!( Hydro.Shock, Hydro.P, Hydro.ρ, Hydro.ρd )
+
+    # Update total dust density (useful for e.g. the gravity solve):
+    UpdateTotalDustDensity!( Hydro )
+
+    # This completes the time-step update n → n + 1. ✓
+
+    return nothing 
+end
+
+
+""" This function performs a full RK3 time-step update of 
+    hydrodynamical and dust-dynamical variables (ignoring stiff 
+    interaction terms, e.g. dust drag & gas cooling, as well as gravity).
+    
+    Passive scalars are also advected. """
+function UpdateHydro!( Δt::Float64, 
+                    Hydro::HydrodynamicsState, 
+                GhostGrid::GhostPaddedGrid, 
+                 Geometry::Union{GeometryCylindrical, GeometryCartesian}
+                      )
+
+    if Geometry isa GeometryCylindrical
+        # Coordinate system: 
+        CoordSys   = Val(:Cylindrical)
+
+        # Some geometry stuff (interface areas, inverse volumes etc):
+        inv_ΔV     = Geometry.inv_ΔV
+        A_X        = Geometry.A_r
+        A_Y        = Geometry.A_Z
+        inv_r_cell = Geometry.inv_r_cell
+
+        # Weights for converting between cell center & cell-average values of 
+        # conservatives & primitives:
+        w_i_m1_X    = Geometry.w_i_m1_r;     w_j_m1_Y     = Geometry.w_j_m1_Z
+        w_i_0_X     = Geometry.w_i_0_r;      w_j_0_Y      = Geometry.w_j_0_Z
+        w_i_p1_X    = Geometry.w_i_p1_r;     w_j_p1_Y     = Geometry.w_j_p1_Z
+
+        q_i_m1_X    = Geometry.q_i_m1_r;     q_j_m1_Y     = Geometry.q_j_m1_Z
+        q_i_0_X     = Geometry.q_i_0_r;      q_j_0_Y      = Geometry.q_j_0_Z
+        q_i_p1_X    = Geometry.q_i_p1_r;     q_j_p1_Y     = Geometry.q_j_p1_Z
+
+        # WENO3 weights for interface reconstruction:
+        w_plus_i_p1 = Geometry.w_plus_i_p1;  w_minus_i_p1 = Geometry.w_minus_i_p1   
+        w_plus_j_p1 = Geometry.w_plus_j_p1;  w_minus_j_p1 = Geometry.w_minus_j_p1
+
+    else
+        # Coordinate system: 
+        CoordSys   = Val(:Cartesian)
+
+        # Some geometry stuff (interface areas, inverse volumes etc):
+        inv_ΔV     = Geometry.inv_ΔV
+        A_X        = Geometry.A_X
+        A_Y        = Geometry.A_Y
+        inv_r_cell = Geometry.inv_r_cell   # Not used in practice in Cartesian coordinates, but needed in arguments
+
+        # Weights for converting between cell center & cell-average values of 
+        # conservatives & primitives:
+        w_i_m1_X    = Geometry.w_i_m1_X;     w_j_m1_Y     = Geometry.w_j_m1_Y
+        w_i_0_X     = Geometry.w_i_0_X;      w_j_0_Y      = Geometry.w_j_0_Y
+        w_i_p1_X    = Geometry.w_i_p1_X;     w_j_p1_Y     = Geometry.w_j_p1_Y
+
+        q_i_m1_X    = Geometry.q_i_m1_X;     q_j_m1_Y     = Geometry.q_j_m1_Y
+        q_i_0_X     = Geometry.q_i_0_X;      q_j_0_Y      = Geometry.q_j_0_Y
+        q_i_p1_X    = Geometry.q_i_p1_X;     q_j_p1_Y     = Geometry.q_j_p1_Y
+
+        # WENO3 weights for interface reconstruction:
+        w_plus_i_p1 = Geometry.w_plus_i_p1;  w_minus_i_p1 = Geometry.w_minus_i_p1   
+        w_plus_j_p1 = Geometry.w_plus_j_p1;  w_minus_j_p1 = Geometry.w_minus_j_p1
+
+    end
+
+    # Update hydro & dust:
+    UpdateHydro!( Δt, Hydro, GhostGrid, inv_ΔV, A_X, A_Y,
+
+                  # Weights to convert between cell-averages and cell-centers: 
+                 w_i_m1_X, 
+                  w_i_0_X,
+                 w_i_p1_X,  
+                 w_j_m1_Y, 
+                  w_j_0_Y, 
+                 w_j_p1_Y, 
+                 q_i_m1_X, 
+                  q_i_0_X, 
+                 q_i_p1_X,  
+                 q_j_m1_Y, 
+                  q_j_0_Y, 
+                 q_j_p1_Y,  
+
+                   # Weights for WENO3 interface reconstruction:
+              w_plus_i_p1,  # WENO3 weights w⁺_{i,1}
+             w_minus_i_p1,  # WENO3 weights w⁻_{i,1} 
+              w_plus_j_p1,  # WENO3 weights w⁺_{j,1}
+             w_minus_j_p1,  # WENO3 weights w⁻_{j,1}
 
                  CoordSys,
-                 inv_r_cell,
-                 Xfirst,
+               inv_r_cell )
 
-                 # Shock indicator:
-                 HydroState.Shock,
-
-                 # Arrays for advection of passive scalars:
-                 HydroState.Scalars,
-                 HydroState.Scalars_old,
-                 HydroState.Scalars_stage,
-                 HydroState.ρ_save, 
-
-                 # BCs:
-                 HydroState.BC_X_left, HydroState.BC_X_right,
-                 HydroState.BC_Y_left, HydroState.BC_Y_right 
-                   )
 
     return nothing 
 end
@@ -5221,11 +4876,14 @@ function GravitySolveAndKick!( Δt::Float64,
                        HydroState::HydrodynamicsState,
                         GravState::GravityState,
                        GravCoeffs::GravityCoeffs,
-                               ΔV::AbstractArray{Float64, 2},
-                                X::AbstractArray{Float64, 1},
-                                Y::AbstractArray{Float64, 1},
-                             XCoM::AbstractArray{Float64, 1}, 
-                             YCoM::AbstractArray{Float64, 1} )
+                         Geometry::GeometryCylindrical )
+
+    # Unpack (cylindrical) geometry arrays:
+    ΔV       = Geometry.ΔV
+    X        = Geometry.r
+    Y        = Geometry.Z
+    XCoM     = Geometry.rCoM
+    YCoM     = Geometry.ZCoM
 
     # Unpack some hydro & dust variables for convenience:
     ρu_X     = HydroState.ρu_X
@@ -5235,7 +4893,7 @@ function GravitySolveAndKick!( Δt::Float64,
     ρdud_X   = HydroState.ρdud_X
     ρdud_Y   = HydroState.ρdud_Y
     ρd       = HydroState.ρd
-    ρd0      = HydroState.ρd0
+    ρdtot    = HydroState.ρdtot   # Total dust density (sum over bins)
     BC_Z_bot = HydroState.BC_Y_left
 
     # Unpack non-gas gravitating mass density:
@@ -5244,12 +4902,14 @@ function GravitySolveAndKick!( Δt::Float64,
 
     # Grid size & intervals: 
     N_X, N_Y   = size( ρ )
+    N_dust     = size( ρd, 1 )
     dN_X       = 1:N_X
     dN_Y       = 1:N_Y 
+    dN_dust    = 1:N_dust 
 
     # Check whether we should update Φ or not:
     ShouldWeUpdate = ShouldWeUpdateΦ( GravState.Φ, 
-                                      ρ, ρd, ρ_bg,
+                                      ρ, ρdtot, ρ_bg,
                                       GravCoeffs.RPoiss_ijp, GravCoeffs.RPoiss_ij, GravCoeffs.RPoiss_ijm,
                                       GravCoeffs.ZPoiss_ijp, GravCoeffs.ZPoiss_ij, GravCoeffs.ZPoiss_ijm,
                                       BC_Z_bot )
@@ -5258,7 +4918,7 @@ function GravitySolveAndKick!( Δt::Float64,
     # potential Φ, and the updated gravitational acceleration:
     if ShouldWeUpdate 
         Update_Φ!( GravState.Φ, GravState.Φ_half, GravState.Φ_old, GravState.Φ_snapshot, 
-                   ρtot, ρ, ρd, ρ_bg,
+                   ρtot, ρ, ρdtot, ρ_bg,
                    GravCoeffs.RPoiss_ijp, GravCoeffs.RPoiss_ij, GravCoeffs.RPoiss_ijm,
                    GravCoeffs.ZPoiss_ijp, GravCoeffs.ZPoiss_ij, GravCoeffs.ZPoiss_ijm, 
                    GravCoeffs.Δτ_max, GravCoeffs.Δτ_min,
@@ -5277,21 +4937,23 @@ function GravitySolveAndKick!( Δt::Float64,
             Inv_2ρ       = 1 / (2 * ρ[i,j]) # Repeated quantity below
 
             # Get internal energy from after the advection step:
-            e_adv        =  E[i,j]  -  (ρu_X[i,j]^2  +  ρu_Y[i,j]^2) * Inv_2ρ 
+            e_adv        =  E[i,j]  -  (ρu_X[i,j] * ρu_X[i,j]  +  ρu_Y[i,j] * ρu_Y[i,j]) * Inv_2ρ 
 
-            # Update momenta to second-order accuracy, using ρ0 = ρ^(n+1/2): 
+            # Update momenta: 
             ρu_X[i,j]   -=  ρ[i,j] * GravState.∂Φ∂r[i,j] * Δt 
             ρu_Y[i,j]   -=  ρ[i,j] * GravState.∂Φ∂Z[i,j] * Δt 
 
             # Update gas energy, ensuring the internal energy remains unchanged:
-            E[i,j]       =  e_adv  +  (ρu_X[i,j]^2  +  ρu_Y[i,j]^2) * Inv_2ρ  
+            E[i,j]       =  e_adv  +  (ρu_X[i,j] * ρu_X[i,j]  +  ρu_Y[i,j] * ρu_Y[i,j]) * Inv_2ρ  
             
             # Update dust momenta:
-            ρdud_X[i,j] -=  ρd0[i,j] * GravState.∂Φ∂r[i,j] * Δt 
-            ρdud_Y[i,j] -=  ρd0[i,j] * GravState.∂Φ∂Z[i,j] * Δt 
+            for bin in dN_dust 
+                ρdud_X[bin,i,j] -=  ρd[bin,i,j] * GravState.∂Φ∂r[i,j] * Δt 
+                ρdud_Y[bin,i,j] -=  ρd[bin,i,j] * GravState.∂Φ∂Z[i,j] * Δt 
+            end
 
-        end
-    end
+        end # End of j-loop 
+    end # End of i-loop 
 
     return nothing 
 end
@@ -5307,7 +4969,6 @@ function GravityKick!( Δt::Float64,
                      ρu_X::AbstractMatrix{Float64}, 
                      ρu_Y::AbstractMatrix{Float64},
                         ρ::AbstractMatrix{Float64}, # Latest densities from after hydro advecton step 
-                       ρ0::AbstractMatrix{Float64}, # Old densities from *before* hydro advecton step 
                         E::AbstractMatrix{Float64},
 
                      ∂Φ∂X::AbstractMatrix{Float64},
@@ -5319,9 +4980,6 @@ function GravityKick!( Δt::Float64,
     dN_X     = 1:N_X
     dN_Y     = 1:N_Y 
 
-    # Fill ρ0 with the estimated ρ^(n+1/2):
-    @. ρ0    = 0.5 * ( ρ0 + ρ )
-
     # Finally, we perform a second-order in time gravity kick to the
     # hydro variables:
     @threads for j in dN_Y 
@@ -5329,17 +4987,17 @@ function GravityKick!( Δt::Float64,
             Inv_2ρ       = 1 / (2 * ρ[i,j]) # Repeated quantity below
 
             # Get internal energy from after the advection step:
-            e_adv        =  E[i,j]  -  (ρu_X[i,j]^2  +  ρu_Y[i,j]^2) * Inv_2ρ
+            e_adv        =  E[i,j]  -  (ρu_X[i,j] * ρu_X[i,j]  +  ρu_Y[i,j] * ρu_Y[i,j]) * Inv_2ρ
 
             # Update momenta to second-order accuracy, using ρ0 = ρ^(n+1/2): 
-            ρu_X[i,j]   -=  ρ0[i,j] * ∂Φ∂X[i,j] * Δt 
-            ρu_Y[i,j]   -=  ρ0[i,j] * ∂Φ∂Y[i,j] * Δt 
+            ρu_X[i,j]   -=  ρ[i,j] * ∂Φ∂X[i,j] * Δt 
+            ρu_Y[i,j]   -=  ρ[i,j] * ∂Φ∂Y[i,j] * Δt 
 
             # Update gas energy, ensuring the internal energy remains unchanged:
-            E[i,j]       =  e_adv  +  (ρu_X[i,j]^2  +  ρu_Y[i,j]^2) * Inv_2ρ  
+            E[i,j]       =  e_adv  +  (ρu_X[i,j] * ρu_X[i,j]  +  ρu_Y[i,j] * ρu_Y[i,j]) * Inv_2ρ  
 
-        end
-    end
+        end # End of i-loop 
+    end # End of j-loop 
 
     return nothing 
 end
@@ -5356,24 +5014,32 @@ end
 
 
 @inline function UpdateTotalMass!( HydroState::HydrodynamicsState,
-                                           ΔV::AbstractMatrix{Float64}
+                                     Geometry::Union{GeometryCylindrical, GeometryCartesian}
                                   )
     
     # Initialize total gas & dust mass to zero before we compute it:
     M  = 0.0
     Md = 0.0
 
+    # Cell volumes:
+    ΔV = Geometry.ΔV
+
     # Grid size & intervals: 
-    N_r, N_Z = size( ΔV )
-    dN_r     = 1:N_r 
-    dN_Z     = 1:N_Z 
+    N_X, N_Y = size( ΔV )
+    N_dust   = size( HydroState.ρd, 1 )
+    dN_X     = 1:N_X 
+    dN_Y     = 1:N_Y 
+    dN_dust  = 1:N_dust
 
     # Add mass from all cells:
-    for j in dN_Z 
-        @inbounds @simd for i in dN_r 
+    for j in dN_Y
+        @inbounds @simd for i in dN_X 
             # Add mass contribution from cell:
             M  += ΔV[i,j] * HydroState.ρ[i,j]
-            Md += ΔV[i,j] * HydroState.ρd[i,j]
+            
+            for bin in dN_dust 
+                Md += ΔV[i,j] * HydroState.ρd[bin,i,j]
+            end
         end
     end
 
@@ -5388,11 +5054,12 @@ end
 """ A function for computing the mass-weighted gas velocity dispersion σ.
     Good for tracking growth/decay of turbulence. """
 @inline function UpdateGasVelocityDispersion!( HydroState::HydrodynamicsState,
-                                                       ΔV::AbstractMatrix{Float64} )
+                                                 Geometry::Union{GeometryCylindrical, GeometryCartesian} )
 
     ρ   = HydroState.ρ
     u_X = HydroState.u_X
     u_Y = HydroState.u_Y
+    ΔV  = Geometry.ΔV
 
     # Grid size & intervals:
     N_X, N_Y = size( ρ )
@@ -5454,6 +5121,7 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
                               Y::AbstractVector{Float64},   
                            YCoM::AbstractVector{Float64},
                               γ::Float64 = γmon,
+                         N_dust::Int     = 2,
                       N_Scalars::Int     = 6,
                       BC_X_left::Symbol  = :Reflect,
                      BC_X_right::Symbol  = :Outflow,
@@ -5473,29 +5141,24 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
     ρu_X       = zeros(Float64, N_X,   N_Y)
     ρu_Y       = zeros(Float64, N_X,   N_Y)
     E          = zeros(Float64, N_X,   N_Y)
+    e_dual     = zeros(Float64, N_X,   N_Y)
     ρ_new      = zeros(Float64, N_X,   N_Y)
     ρu_X_new   = zeros(Float64, N_X,   N_Y)
     ρu_Y_new   = zeros(Float64, N_X,   N_Y)
     E_new      = zeros(Float64, N_X,   N_Y)
-    ρ0         = zeros(Float64, N_X,   N_Y)
-    ρu_X0      = zeros(Float64, N_X,   N_Y)
-    ρu_Y0      = zeros(Float64, N_X,   N_Y)
-    E0         = zeros(Float64, N_X,   N_Y)
+    e_dual_new = zeros(Float64, N_X,   N_Y)
     P          = zeros(Float64, N_X,   N_Y)
     u_X        = zeros(Float64, N_X,   N_Y)
     u_Y        = zeros(Float64, N_X,   N_Y)
 
-    ρd         = zeros(Float64, N_X,   N_Y)
-    ρdud_X     = zeros(Float64, N_X,   N_Y)
-    ρdud_Y     = zeros(Float64, N_X,   N_Y)
-    ρd_new     = zeros(Float64, N_X,   N_Y)
-    ρdud_X_new = zeros(Float64, N_X,   N_Y)
-    ρdud_Y_new = zeros(Float64, N_X,   N_Y)
-    ρd0        = zeros(Float64, N_X,   N_Y)
-    ρdud_X0    = zeros(Float64, N_X,   N_Y)
-    ρdud_Y0    = zeros(Float64, N_X,   N_Y)
-    ud_X       = zeros(Float64, N_X,   N_Y)
-    ud_Y       = zeros(Float64, N_X,   N_Y)
+    ρd         = zeros(Float64, N_dust,   N_X,   N_Y)
+    ρdud_X     = zeros(Float64, N_dust,   N_X,   N_Y)
+    ρdud_Y     = zeros(Float64, N_dust,   N_X,   N_Y)
+    ρd_new     = zeros(Float64, N_dust,   N_X,   N_Y)
+    ρdud_X_new = zeros(Float64, N_dust,   N_X,   N_Y)
+    ρdud_Y_new = zeros(Float64, N_dust,   N_X,   N_Y)
+    ud_X       = zeros(Float64, N_dust,   N_X,   N_Y)
+    ud_Y       = zeros(Float64, N_dust,   N_X,   N_Y)
 
     # Cell-centered primitives:
     ρc         = zeros(Float64, N_X,   N_Y)
@@ -5506,21 +5169,22 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
     u_Yc       = zeros(Float64, N_X,   N_Y) 
     Pc         = zeros(Float64, N_X,   N_Y) 
 
-    ρdc        = zeros(Float64, N_X,   N_Y)
-    ρdud_Xc    = zeros(Float64, N_X,   N_Y)
-    ρdud_Yc    = zeros(Float64, N_X,   N_Y) 
-    ud_Xc      = zeros(Float64, N_X,   N_Y)
-    ud_Yc      = zeros(Float64, N_X,   N_Y) 
+    ρdc        = zeros(Float64, N_dust,   N_X,   N_Y)
+    ρdud_Xc    = zeros(Float64, N_dust,   N_X,   N_Y)
+    ρdud_Yc    = zeros(Float64, N_dust,   N_X,   N_Y) 
+    ud_Xc      = zeros(Float64, N_dust,   N_X,   N_Y)
+    ud_Yc      = zeros(Float64, N_dust,   N_X,   N_Y) 
 
     # Arrays for storing pre-RK update state:
     ρ_stage      = zeros(Float64, N_X,   N_Y)
     ρu_X_stage   = zeros(Float64, N_X,   N_Y)
     ρu_Y_stage   = zeros(Float64, N_X,   N_Y)
     E_stage      = zeros(Float64, N_X,   N_Y)
+    e_dual_stage = zeros(Float64, N_X,   N_Y)
 
-    ρd_stage     = zeros(Float64, N_X,   N_Y)
-    ρdud_X_stage = zeros(Float64, N_X,   N_Y)
-    ρdud_Y_stage = zeros(Float64, N_X,   N_Y)
+    ρd_stage     = zeros(Float64, N_dust,   N_X,   N_Y)
+    ρdud_X_stage = zeros(Float64, N_dust,   N_X,   N_Y)
+    ρdud_Y_stage = zeros(Float64, N_dust,   N_X,   N_Y)
 
     # Adiabatic index:
     γad        = fill(γ, size(ρ))
@@ -5651,14 +5315,15 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
     end
 
     # Ghost-padded arrays:
-    ρg_old     = zeros(Float64, N_X + 2*ng,   N_Y + 2*ng)
-    Pg_old     = zeros(Float64, N_X + 2*ng,   N_Y + 2*ng)
-    u_Xg_old   = zeros(Float64, N_X + 2*ng,   N_Y + 2*ng)
-    u_Yg_old   = zeros(Float64, N_X + 2*ng,   N_Y + 2*ng)
+    ρg_old      = zeros(Float64, N_X + 2*ng,   N_Y + 2*ng)
+    Pg_old      = zeros(Float64, N_X + 2*ng,   N_Y + 2*ng)
+    e_dualg_old = zeros(Float64, N_X + 2*ng,   N_Y + 2*ng)
+    u_Xg_old    = zeros(Float64, N_X + 2*ng,   N_Y + 2*ng)
+    u_Yg_old    = zeros(Float64, N_X + 2*ng,   N_Y + 2*ng)
 
-    ρdg_old    = zeros(Float64, N_X + 2*ng,   N_Y + 2*ng)
-    ud_Xg_old  = zeros(Float64, N_X + 2*ng,   N_Y + 2*ng)
-    ud_Yg_old  = zeros(Float64, N_X + 2*ng,   N_Y + 2*ng)
+    ρdg_old     = zeros(Float64, N_dust,   N_X + 2*ng,   N_Y + 2*ng)
+    ud_Xg_old   = zeros(Float64, N_dust,   N_X + 2*ng,   N_Y + 2*ng)
+    ud_Yg_old   = zeros(Float64, N_dust,   N_X + 2*ng,   N_Y + 2*ng)
 
     # X-direction interface values (N_X + 1 × N_Y)
     ρ_L_X      = zeros(Float64, N_X+1, N_Y)
@@ -5669,23 +5334,26 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
     u_Y_R_X    = zeros(Float64, N_X+1, N_Y)
     P_L_X      = zeros(Float64, N_X+1, N_Y)
     P_R_X      = zeros(Float64, N_X+1, N_Y)
+    e_dual_L_X = zeros(Float64, N_X+1, N_Y)
+    e_dual_R_X = zeros(Float64, N_X+1, N_Y)
 
-    ρd_L_X     = zeros(Float64, N_X+1, N_Y)
-    ρd_R_X     = zeros(Float64, N_X+1, N_Y)
-    ud_X_L_X   = zeros(Float64, N_X+1, N_Y)
-    ud_X_R_X   = zeros(Float64, N_X+1, N_Y)
-    ud_Y_L_X   = zeros(Float64, N_X+1, N_Y)
-    ud_Y_R_X   = zeros(Float64, N_X+1, N_Y)
+    ρd_L_X     = zeros(Float64, N_dust,   N_X+1, N_Y)
+    ρd_R_X     = zeros(Float64, N_dust,   N_X+1, N_Y)
+    ud_X_L_X   = zeros(Float64, N_dust,   N_X+1, N_Y)
+    ud_X_R_X   = zeros(Float64, N_dust,   N_X+1, N_Y)
+    ud_Y_L_X   = zeros(Float64, N_dust,   N_X+1, N_Y)
+    ud_Y_R_X   = zeros(Float64, N_dust,   N_X+1, N_Y)
 
     # X-direction fluxes (N_X+1 × N_Y)
     F_ρ_X      = zeros(Float64, N_X+1, N_Y)
     F_ρu_X_X   = zeros(Float64, N_X+1, N_Y)
     F_ρu_Y_X   = zeros(Float64, N_X+1, N_Y)
     F_E_X      = zeros(Float64, N_X+1, N_Y)
+    F_e_dual_X = zeros(Float64, N_X+1, N_Y)
 
-    F_ρd_X     = zeros(Float64, N_X+1, N_Y)
-    F_ρdud_X_X = zeros(Float64, N_X+1, N_Y)
-    F_ρdud_Y_X = zeros(Float64, N_X+1, N_Y)
+    F_ρd_X     = zeros(Float64, N_dust,   N_X+1, N_Y)
+    F_ρdud_X_X = zeros(Float64, N_dust,   N_X+1, N_Y)
+    F_ρdud_Y_X = zeros(Float64, N_dust,   N_X+1, N_Y)
 
     # Y-direction interface values (N_X × N_Y + 1)
     ρ_L_Y      = zeros(Float64, N_X, N_Y+1)
@@ -5696,23 +5364,26 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
     u_X_R_Y    = zeros(Float64, N_X, N_Y+1)
     P_L_Y      = zeros(Float64, N_X, N_Y+1)
     P_R_Y      = zeros(Float64, N_X, N_Y+1)
+    e_dual_L_Y = zeros(Float64, N_X, N_Y+1)
+    e_dual_R_Y = zeros(Float64, N_X, N_Y+1)
 
-    ρd_L_Y     = zeros(Float64, N_X, N_Y+1)
-    ρd_R_Y     = zeros(Float64, N_X, N_Y+1)
-    ud_Y_L_Y   = zeros(Float64, N_X, N_Y+1)
-    ud_Y_R_Y   = zeros(Float64, N_X, N_Y+1)
-    ud_X_L_Y   = zeros(Float64, N_X, N_Y+1)
-    ud_X_R_Y   = zeros(Float64, N_X, N_Y+1)
+    ρd_L_Y     = zeros(Float64, N_dust,   N_X, N_Y+1)
+    ρd_R_Y     = zeros(Float64, N_dust,   N_X, N_Y+1)
+    ud_Y_L_Y   = zeros(Float64, N_dust,   N_X, N_Y+1)
+    ud_Y_R_Y   = zeros(Float64, N_dust,   N_X, N_Y+1)
+    ud_X_L_Y   = zeros(Float64, N_dust,   N_X, N_Y+1)
+    ud_X_R_Y   = zeros(Float64, N_dust,   N_X, N_Y+1)
 
     # Y-direction fluxes (N_X × N_Y + 1)
     F_ρ_Y      = zeros(Float64, N_X, N_Y+1)
     F_ρu_X_Y   = zeros(Float64, N_X, N_Y+1)
     F_ρu_Y_Y   = zeros(Float64, N_X, N_Y+1)
     F_E_Y      = zeros(Float64, N_X, N_Y+1)
+    F_e_dual_Y = zeros(Float64, N_X, N_Y+1)
 
-    F_ρd_Y     = zeros(Float64, N_X, N_Y+1)
-    F_ρdud_X_Y = zeros(Float64, N_X, N_Y+1)
-    F_ρdud_Y_Y = zeros(Float64, N_X, N_Y+1)
+    F_ρd_Y     = zeros(Float64, N_dust,   N_X, N_Y+1)
+    F_ρdud_X_Y = zeros(Float64, N_dust,   N_X, N_Y+1)
+    F_ρdud_Y_Y = zeros(Float64, N_dust,   N_X, N_Y+1)
 
     # Contact velocities (N_X + 1 × N_Y and N_X × N_Y + 1)
     u_X_star_X = zeros(Float64, N_X+1, N_Y)
@@ -5730,9 +5401,6 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
     e          = zeros(Float64, N_X, N_Y)
     T          = zeros(Float64, N_X, N_Y)
 
-    # Strang split order:
-    rfirst_Hydro = true 
-
     # Total gas & dust mass in simulation volume:
     M_simvol  = 0.0
     Md_simvol = 0.0
@@ -5748,23 +5416,31 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
     Scalars_stage = zeros(Float64, N_X, N_Y, N_Scalars)
     ρ_save        = zeros(Float64, N_X, N_Y)
 
+    # Total dust density:
+    ρdtot = zeros(Float64, N_X, N_Y)
+
     # Create structs:
-    hydrostate = HydrodynamicsState( ρ_new, ρu_X_new, ρu_Y_new, E_new, ρ, ρu_X, ρu_Y, E, 
-                                     ρ0, ρu_X0, ρu_Y0, E0, ρ_stage, ρu_X_stage, ρu_Y_stage, E_stage,
-                                     γad, u_X, u_Y, ρ_L_X, ρ_R_X,
-                                     u_X_L_X, u_X_R_X, u_Y_L_X, u_Y_R_X, P_L_X, P_R_X,
-                                     F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X, ρ_L_Y, ρ_R_Y, u_Y_L_Y,
-                                     u_Y_R_Y, u_X_L_Y, u_X_R_Y, P_L_Y, P_R_Y, F_ρ_Y, F_ρu_X_Y, 
-                                     F_ρu_Y_Y, F_E_Y, 
+    hydrostate = HydrodynamicsState( N_dust, 
+                                     ρ_new, ρu_X_new, ρu_Y_new, E_new, e_dual_new, ρ, ρu_X, ρu_Y, E, e_dual, 
+                                     ρ_stage, ρu_X_stage, ρu_Y_stage, E_stage, e_dual_stage,
+                                     γad, 
+                                     
+                                     u_X, u_Y, 
+                                     ρ_L_X, ρ_R_X, u_X_L_X, u_X_R_X, u_Y_L_X, u_Y_R_X, P_L_X, P_R_X, e_dual_L_X, e_dual_R_X,
+                                     F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X, F_e_dual_X,
+                                     
+                                     ρ_L_Y, ρ_R_Y, u_Y_L_Y, u_Y_R_Y, u_X_L_Y, u_X_R_Y, P_L_Y, P_R_Y, e_dual_L_Y, e_dual_R_Y, 
+                                     F_ρ_Y, F_ρu_X_Y, F_ρu_Y_Y, F_E_Y, F_e_dual_Y,
+
                                      u_X_star_X, u_Y_star_Y,
                                      ∂u_X_∂X, ∂u_X_∂Y, ∂u_Y_∂X, ∂u_Y_∂Y, u_r_over_r,
-                                     P, e, T, ρg_old, u_Xg_old, u_Yg_old, Pg_old,
+                                     P, e, T, ρg_old, u_Xg_old, u_Yg_old, Pg_old, e_dualg_old,
                                      ρc, ρu_Xc, ρu_Yc, Ec, u_Xc, u_Yc, Pc,
                                      Shock,
                                      BC_X_left, BC_X_right, BC_Y_left, BC_Y_right,
 
                                      ρd_new, ρdud_X_new, ρdud_Y_new, ρd, ρdud_X, ρdud_Y, 
-                                     ρd0, ρdud_X0, ρdud_Y0, ρd_stage, ρdud_X_stage, ρdud_Y_stage, 
+                                     ρd_stage, ρdud_X_stage, ρdud_Y_stage, 
                                      ud_X, ud_Y, 
                                      ρd_L_X, ρd_R_X, ud_X_L_X, ud_X_R_X, ud_Y_L_X, ud_Y_R_X, 
                                      F_ρd_X, F_ρdud_X_X, F_ρdud_Y_X, 
@@ -5774,9 +5450,10 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
                                      ρdc, ρdud_Xc, ρdud_Yc, ud_Xc, ud_Yc, 
 
                                      Scalars, Scalars_old, Scalars_stage, ρ_save,
-                                     rfirst_Hydro, M_simvol, Md_simvol,
+                                     ρdtot,
+                                     M_simvol, Md_simvol,
                                      
-                                     σ_X, σ_Y, σ)
+                                     σ_X, σ_Y, σ )
 
     ghostgrid  = GhostPaddedGrid( Xg, XCoMg, Yg, YCoMg )
   

@@ -1,0 +1,13 @@
+# Dust opacities for species: Graphite (a ≥ 0.001 μm, PAH optical data for a < 0.010000000000000002 μm)
+# Computed by ComputeDustOpacities.jl (LYDION)
+# Grain size distribution: Weingartner & Draine (2001), R_V = 5.5, b_C = 3e-5
+# BB temperature: Teff = 48000.0 K
+# Columns: Band  E_low (eV)  E_high (eV)  κ_abs (cm² g⁻¹)  κ_F (cm² g⁻¹)
+#
+opt         1.0000      5.8000    2.090978e+04    2.606154e+04
+FUV         5.8000     11.2000    2.285579e+04    2.573171e+04
+LW         11.2000     13.6000    3.876240e+04    4.475295e+04
+EUV1       13.6000     24.6000    5.602766e+04    6.221423e+04
+EUV2       24.6000     54.4000    1.896910e+04    2.115640e+04
+EUV3       54.4000   1000.0000    1.040093e+04    1.091495e+04
+Lya        10.1900     10.2100    2.480582e+04    2.838785e+04

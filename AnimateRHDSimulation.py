@@ -19,7 +19,7 @@ import cmastro
 
 
 # ---------------- user inputs ----------------
-filename = "RHDSim_NoLya_128x128_2026-02-10.h5"       
+filename = "RHDSim_NoLya_128x128_2026-04-03.h5"    
 frameskip = 1                 
 save_mp4 = True               
 outname = "density_T.mp4"
@@ -37,8 +37,11 @@ pc  = 3.085677581e18
 with h5py.File(filename, "r") as f:
     t             = f["Times"][:]                          # (Nt,)
     rho_hist      = f["GasDensity_History"][:]             # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    rhod_hist     = f["DustDensity_History"][:]            # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    rhod_Sil_hist = f["DustDensity_Sil_History"][:]        # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    rhod_C_hist   = f["DustDensity_C_History"][:]          # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    rhod_PAH_hist = f["DustDensity_PAH_History"][:]        # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     T_hist        = f["T_History"][:]                      # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    Trad_hist     = f["Trad_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xH2_hist      = f["xH2_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xHII_hist     = f["xHII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xCI_hist      = f["xCI_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
@@ -46,14 +49,18 @@ with h5py.File(filename, "r") as f:
     xCO_hist      = f["xCO_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xOI_hist      = f["xOI_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xOII_hist     = f["xOII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    Zgr_sil_hist  = f["Zgr_sil_History"][:]                # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    Zgr_Sil_hist  = f["Zgr_Sil_History"][:]                # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     Zgr_C_hist    = f["Zgr_C_History"][:]                  # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    Zgr_PAH_hist  = f["Zgr_PAH_History"][:]                # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     r             = f["r"][:]                              # edges, (Nr+1,)
     Z             = f["Z"][:]                              # edges, (Nz+1,)
 
 
 xHI_hist  = 1.0 - 2.0 * xH2_hist - xHII_hist
+rhod_hist = rhod_Sil_hist + rhod_C_hist + rhod_PAH_hist 
+#rhod_hist = rhod_Sil_hist 
 
+Trad_hist = np.maximum(Trad_hist, 1.0)   # Use gas temperature for plotting if Trad is not available (e.g. in early stages when dust is negligible)
 
 # shapes (needed by ensure_NtNrNz)
 Nt_raw, a1_rho, a2_rho = rho_hist.shape
@@ -159,10 +166,9 @@ ax3.tick_params(labelbottom=False)
 ax1.set_ylabel("Z (pc)", labelpad=12)
 im_nH = ax1.pcolormesh(R, ZZ, nH_hist[0].T, norm=norm_nH, shading='auto', cmap='cma:laguna')
 cb1 = fig.colorbar(im_nH, ax=ax1, pad=0.02)
-#cb1.set_ticks([10, 1e3, 1e5, 1e7, 1e9])
 #cb1.set_ticks([1e3, 1e5, 1e7, 1e9])
 cb1.set_ticks([10, 1e3, 1e5])
-#cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$', '10$^{7}$', '10$^{9}$'])
+#cb1.set_ticklabels(['10$^{3}$', '10$^{5}$', '10$^{7}$', '10$^{9}$'])
 #cb1.set_ticklabels(['10$^{4}$', '10$^{6}$', '10$^{8}$'])
 cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$'])
 panel_label_style = dict(ha='right', va='top', color='black',
@@ -175,7 +181,7 @@ ax1.set_ylim( Z[0]/pc, Z[-1]/pc )
 # --- temperature ---
 ax2.set_xlabel("r (pc)", labelpad=12)
 ax2.set_ylabel("Z (pc)", labelpad=12)
-im_T = ax2.pcolormesh(R, ZZ, T_hist[0].T, norm=norm_T, shading='auto', cmap='coolwarm')
+im_T = ax2.pcolormesh(R, ZZ, Trad_hist[0].T, norm=norm_T, shading='auto', cmap='coolwarm')
 cb2 = fig.colorbar(im_T, ax=ax2, pad=0.02)
 cb2.set_ticks([1, 10, 100, 1e3, 1e4, 1e5])
 cb2.set_ticklabels(['1', '10', '10$^{2}$', '10$^{3}$', '10$^{4}$', '10$^{5}$'])
@@ -184,7 +190,7 @@ ax2.text(0.9, 0.9, "T (K)", transform=ax2.transAxes, **panel_label_style)
 # --- Dust-to-gas ratio ---
 ax3.tick_params(labelleft=False)
 im_xH2 = ax3.pcolormesh(R, ZZ, np.clip(DG_hist[0].T, vmin_DG, vmax_DG),
-                        norm=norm_DG, shading='auto', cmap='cma:emph')
+                        norm=norm_DG, shading='auto', cmap='cma:lacerta')
 
 cb3 = fig.colorbar(im_xH2, ax=ax3, pad=0.02)
 cb3.set_ticks([0.1, 1, 10])
@@ -215,7 +221,7 @@ frames = saved_idx[::frameskip]
 def init():
     k0 = frames[0]
     im_nH.set_array(nH_hist[k0].T.ravel())
-    im_T.set_array(T_hist[k0].T.ravel())
+    im_T.set_array(Trad_hist[k0].T.ravel())
     im_xH2.set_array(np.clip(DG_hist[k0].T, vmin_DG, vmax_DG).ravel())
     im_xHII.set_array(np.clip(xHII_hist[k0].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k0]/kyr:.2f} kyr")
@@ -223,7 +229,7 @@ def init():
 
 def update(k):
     im_nH.set_array(nH_hist[k].T.ravel())
-    im_T.set_array(T_hist[k].T.ravel())
+    im_T.set_array(Trad_hist[k].T.ravel())
     im_xH2.set_array(np.clip(DG_hist[k].T, vmin_DG, vmax_DG).ravel())
     im_xHII.set_array(np.clip(xHII_hist[k].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k]/kyr:.2f} kyr")

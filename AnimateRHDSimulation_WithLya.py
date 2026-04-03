@@ -17,11 +17,12 @@ sys.path.insert(0, str(cmastro_src))
 import cmastro
 
 # ---------------- user inputs ----------------
-#filename  = "RHDSim_Lya_64x64_2025-12-25.h5"
-filename  = "Aaron_RHDSimGC_Lya_256.h5"    
+#filename  = "Aaron_RHDSim_Lya_n4_Z2_128x128.h5"
+filename  = "RHDSim_Lya_64x64_2026-03-20.h5"
+#filename  = "Aaron_RHDSimGC_Lya_256.h5"    
 frameskip = 1                  # use >1 to skip frames
 save_mp4  = True               # True to save mp4 instead of interactive show
-outname   = "density_T_withLyaSpec.mp4"
+outname   = "Animation_LyaRHD_withspectra.mp4"
 fps       = 20
 
 # which Lyα edge spectra to plot (indices along J_Lya_EdgeSpectra axis 0)
@@ -30,7 +31,7 @@ edge_indices = [50]            # e.g. [0, 5, 10]
 # ν-window settings for the spectrum panel
 use_nu_window       = True
 nu_Lya              = 2.466e15             # Hz
-nu_window_fraction  = 0.015                # total width, e.g. 0.02 = 2% of ν_Lya 
+nu_window_fraction  = 0.01                # total width, e.g. 0.02 = 2% of ν_Lya 
 # ---------------------------------------------
 
 # constants
@@ -282,8 +283,8 @@ cb1.set_ticks([10, 1e3, 1e5])
 cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$'])
 ax1.text(0.9, 0.2, "n$_{H}$ (cm$^{-3}$)", transform=ax1.transAxes, **panel_label_style)
 
-ax1.set_xlim(r[0]/pc, 0.8 * r[-1]/pc)
-ax1.set_ylim(0.1 * Z[-1]/pc, 0.9 * Z[-1]/pc)
+ax1.set_xlim(r[0]/pc, r[-1]/pc)
+ax1.set_ylim( Z[0]/pc, Z[-1]/pc)
 
 # --- temperature ---
 ax2.set_xlabel("r (pc)", labelpad=12)
@@ -320,7 +321,7 @@ cb4.set_ticklabels(['10$^{-8}$', '10$^{-6}$', '10$^{-4}$', '0.01', '1'])
 ax4.text(0.9, 0.9, "x$_{HI}$", transform=ax4.transAxes, **panel_label_style)
 
 # --- spectrum panel ---
-ax_spec.set_ylim(0.0, 1.75e-16)
+ax_spec.set_ylim(0.0, 1e-15)
 ax_spec.set_xlabel(r"$\nu$ (Hz)", labelpad=12)
 ax_spec.set_ylabel(r"$J_{Ly\alpha}$", labelpad=12)
 ax_spec.set_xlim(nuC_plot.min(), nuC_plot.max())

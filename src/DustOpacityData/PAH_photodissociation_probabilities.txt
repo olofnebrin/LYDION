@@ -1,0 +1,11 @@
+# PAH C₂H₂ photodissociation probabilities per absorbed photon, ignoring photoelectric emission (1 - Ya_C).
+# Computed in DustPhysics.jl at startup.
+#
+# Columns:
+# Band   Photon energy (eV)   Dissociation probability
+FUV     8.45000000e+00  8.57196017e-22
+LW      1.22600000e+01  2.84801729e-14
+EUV1    1.80100000e+01  6.40016436e-09
+EUV2    2.98900000e+01  7.99000677e-04
+EUV3    5.68500000e+01  5.71069917e-01
+Lyα     1.01988330e+01  1.36913474e-17

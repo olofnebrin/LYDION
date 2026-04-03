@@ -9,13 +9,28 @@ using SpecialFunctions
 const ρgr_Sil::Float64 = 3.5 
 const ρgr_C::Float64   = 2.24  
 
-
+# bC = 3e-5, R_V = 5.5, model B:
 const bC::Float64    = 3e-5 
 const a_01::Float64  = 3.5 * Ang
 const a_02::Float64  = 30  * Ang
 const σ::Float64     = 0.4 
 const b_C1::Float64  = 0.75 * bC 
 const b_C2::Float64  = 0.25 * bC 
+
+# Parameters for carbonaceous grain size distribution:
+const a_tg::Float64  = 0.0120 * μm 
+const a_cg::Float64  = 7.28   * μm
+const αg::Float64    = - 1.90
+const βg::Float64    = - 0.0517
+const Cg::Float64    = 2.86e-12 
+
+# Parameters for silicate grain size distribution:
+const a_ts::Float64  = 0.211 * μm 
+const a_cs::Float64  = 0.1   * μm
+const αs::Float64    = - 1.13
+const βs::Float64    = - 0.109
+const Cs::Float64    = 1.04e-13
+
 
 const B1 = ( ( (3 / (2*π)^(3/2)) * exp( - 4.5 * σ^2) / (ρgr_C * (a_01^3) * σ) )
            * b_C1 * mC / ( 1 + erf( 3*σ/sqrt(2) + log(a_01 / (3.5 * Ang))/(σ * sqrt(2)) ) ) ) 
@@ -48,13 +63,14 @@ function F( a::Float64, β::Float64, a_t::Float64 )
 end
 
 
-const a_tg::Float64  = 0.0120 * μm 
-const a_cg::Float64  = 7.28   * μm
-const αg::Float64    = - 1.90
-const βg::Float64    = - 0.0517
-const Cg::Float64    = 2.86e-12 
+const a_min::Float64 = 3.5 * Ang 
+const a_max::Float64 = 10.0 * μm 
 
 function ∂ngr_∂a_C( a::Float64 )
+
+    if a ≤ a_min || a ≥ a_max
+        return 0.0
+    end
 
     if a > 3.5 * Ang && a < a_tg
         f = 1.0
@@ -65,14 +81,11 @@ function ∂ngr_∂a_C( a::Float64 )
     return D(a) + (Cg / a) * ((a/a_tg)^αg) * F(a, βg, a_tg) * f
 end
 
-
-const a_ts::Float64  = 0.211 * μm 
-const a_cs::Float64  = 0.1   * μm
-const αs::Float64    = - 1.13
-const βs::Float64    = - 0.109
-const Cs::Float64    = 1.04e-13
-
 function ∂ngr_∂a_Sil( a::Float64 )
+
+    if a ≤ a_min || a ≥ a_max
+        return 0.0
+    end
 
     if a > 3.5 * Ang && a < a_ts 
         f = 1.0
@@ -84,16 +97,13 @@ function ∂ngr_∂a_Sil( a::Float64 )
 end
 
 
-const a_min::Float64 = 3.5 * Ang 
-const a_max::Float64 = 10.0 * μm 
-
 """ Computes ⟨aⁿ⟩^(1/n) (in μm) for silicate dust. """
 function Compute_a_n_sil( n::Float64 )
     # Compute ∫da ∂ngr_∂a_Sil aⁿ:
-    num,   _ = quadgk( a -> ∂ngr_∂a_Sil(a) * a^n, a_min, a_max; rtol = 1e-8 )
+    num,   _ = quadgk( a -> ∂ngr_∂a_Sil(a) * a^n, a_min, a_max; rtol = 1e-9 )
 
     # Compute ∫da ∂ngr_∂a_Sil:
-    denom, _ = quadgk( a -> ∂ngr_∂a_Sil(a),       a_min, a_max; rtol = 1e-8 )
+    denom, _ = quadgk( a -> ∂ngr_∂a_Sil(a),       a_min, a_max; rtol = 1e-9 )
 
     return ( (num / denom)^(1/n) ) / μm
 end
@@ -102,10 +112,10 @@ end
 """ Computes ⟨aⁿ⟩^(1/n) (in μm) for graphite/carbonaceous dust. """
 function Compute_a_n_C( n::Float64 )
     # Compute ∫da ∂ngr_∂a_C aⁿ:
-    num,   _ = quadgk( a -> ∂ngr_∂a_C(a) * a^n, a_min, a_max; rtol = 1e-8 )
+    num,   _ = quadgk( a -> ∂ngr_∂a_C(a) * a^n, a_min, a_max; rtol = 1e-9 )
 
     # Compute ∫da ∂ngr_∂a_C:
-    denom, _ = quadgk( a -> ∂ngr_∂a_C(a),       a_min, a_max; rtol = 1e-8 )
+    denom, _ = quadgk( a -> ∂ngr_∂a_C(a),       a_min, a_max; rtol = 1e-9 )
 
     return ( (num / denom)^(1/n) ) / μm
 end
@@ -115,13 +125,13 @@ end
 function Compute_Sil_to_tot_ratio()
 
     # Compute ∫da ∂ngr_∂a_Sil a^3:
-    Int_Sil,   _ = quadgk( a -> ∂ngr_∂a_Sil(a) * a^3, a_min, a_max; rtol = 1e-8 )
+    Int_Sil,   _ = quadgk( a -> ∂ngr_∂a_Sil(a) * a^3, a_min, a_max; rtol = 1e-9 )
 
     # Non-normalized silicate dust density:
     ρd_Sil =  ρgr_Sil * Int_Sil
 
     # Compute ∫da ∂ngr_∂a_C a^3:
-    Int_C,   _ = quadgk( a -> ∂ngr_∂a_C(a) * a^3, a_min, a_max; rtol = 1e-8 )
+    Int_C,   _ = quadgk( a -> ∂ngr_∂a_C(a) * a^3, a_min, a_max; rtol = 1e-9 )
 
     # Non-normalized graphite dust density:
     ρd_C =  ρgr_C * Int_C

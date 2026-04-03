@@ -141,10 +141,10 @@ function SetupTurbulence!( u_RMSturb::Float64,
                 rCoM_m1 = r[1] - (rCoM[1] - r[1])    # Mirror to get rCoM[0]
                 rCoM_p1 = rCoM[i+1] 
 
-                χ_im1   = - χ[1,j]      # Mirror BC at r = 0 
+                χ_im1   = χ[1,j]      # Even parity at at r = 0 (gives δu_r = 0), since it is a scalar
                 χ_ip1   = χ[i+1,j]
 
-                χm_im1  = - χ_m[1,j]    # Mirror BC at r = 0 
+                χm_im1  = χ_m[1,j]    # Even partiy at r = 0 (gives δu_r = 0), since it is a scalar
                 χm_ip1  = χ_m[i+1,j]
             elseif i == N_r 
                 rCoM_m1 = rCoM[i-1]

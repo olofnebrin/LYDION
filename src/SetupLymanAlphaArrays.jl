@@ -20,9 +20,6 @@ function GenerateLyαArrays( c_Lyα::Float64,
                                 T::AbstractArray{Float64, 2}, # Array of gas temperatures (only sets initial Hvoigt values)
                            Recoil::Bool    = true,            # Atomic recoil (on if true, off if false)
                    LyαDestruction::Bool    = true,            # Lyα destruction, pd > 0 (on if true, off if false)
-                          Ncoarse::Int     = 200,             # Number of coarse bins (far from line center), default = 200
-                            Nfine::Int     = 100,             # Number of fine bins (near line center), default = 100
-                    Δν_coarseband::Float64 = 1 * νLyα,        # Width of coarse grid in blue/red directions 
                              Tmin::Float64 = 30.0             # Temperature which sets Doppler width resolution near line center (default = 30 K)
                              )
 
@@ -35,52 +32,85 @@ function GenerateLyαArrays( c_Lyα::Float64,
     ###############################################################
     # The code below sets up the frequency bins/grid for Lyα
 
-    # Convenient variables:
-    Ncoarse_div2 = div(Ncoarse, 2)
-    Nfine_div2   = div(Nfine, 2)
-    # Get fine grid resolution (= Doppler width @ temperature Tmin):
-    Δν_min       = (Compute_b(Tmin) / c) * νLyα
+    q_fine          = 1.1           # Fine bins grow by a factor q_fine going to larger x 
+    q_wing          = 1.1           # Coarse bins in the wings grow by a factor q_wing going to larger x 
+    x_fine_max_3e4  = 5.0           # Fine region near core extends out to ν = x_fine_max × ΔνD(3 × 10⁴ K)
+    x_max           = 1e5           # Bins extend out to |ν - νLyα| = x_max × ΔνD(Tmin)
 
-    # Get other needed factors:
-    ν_fine_L     = νLyα - Nfine_div2 * Δν_min 
-    ν_fine_R     = νLyα + Nfine_div2 * Δν_min
-    ν_max        = ν_fine_R + Δν_coarseband              # Maximum frequency
-    ν_min        = max( ν_fine_L - Δν_coarseband, 0.0 )  # Minimum frequency 
+    # Finest resolution is set to Doppler width at T = Tmin:
+    Δν_min          = (Compute_b(Tmin) / c) * νLyα
 
-    # Find geometric factor ϵ_L for the left
-    f_L(ϵ) = Δν_min * (ϵ^Ncoarse_div2 - 1)/(ϵ - 1) - (ν_fine_L - ν_min)
-    ϵ_L    = find_zero(f_L, 1.01 )
+    # Limit x_max to ensure positive frequencies:
+    x_max           = min( x_max, 0.99 * νLyα / Δν_min )
 
-    # Find geometric factor ϵ_R for the right:
-    f_R(ϵ) = Δν_min * (ϵ^Ncoarse_div2 - 1)/(ϵ - 1) - (ν_max - ν_fine_R)
-    ϵ_R    = find_zero(f_R, 1.01 )
-    # Use minimum of the two, to ensure all ν > 0:
-    ϵ      = min( ϵ_L, ϵ_R )
+    # Also limit x_max to ν < νLyC, since higher energy photons will be absorbed by H I:
+    x_max           = min( x_max, (νLyC - νLyα) / Δν_min )
 
-    # Generate fine grid near line center:
-    ν_fine     = collect( ν_fine_L:Δν_min:ν_fine_R )
-    # Generate left coarse grid:
-    ν_coarse_L = reverse( [ ν_fine_L - Δν_min * (ϵ^n - 1) / (ϵ - 1) for n in 0:(Ncoarse_div2 - 1) ] )
-    # Generate right coarse grid:
-    ν_coarse_R = [ ν_fine_R + Δν_min * (ϵ^n - 1) / (ϵ - 1) for n in 0:(Ncoarse_div2 - 1) ]
-    # Combine coarse & fine grids to get full bin interface grid:
-    ν = vcat( ν_coarse_L[1:end-1], ν_fine, ν_coarse_R[2:end] )
+    # Extent of fine-region in Tmin Doppler units:
+    x_fine_max_Tmin = x_fine_max_3e4 * Compute_b(3e4) / Compute_b(Tmin)
 
-    # Get Δν
-    N_ν = length(ν) - 1
-    Δν  = diff(ν)
+    x_pos  = Float64[0.0] # Just for tracking x > 0 values below 
+    Δx     = 1.0          # Start with a bin width = 1 Doppler width at Tmin
+    while x_pos[end] < x_max
 
-    # Get bin centers νC:
-    νC  = ν[1:end-1] .+ (Δν ./ 2)
+        # Current maximum value of x (in Tmin Doppler units):
+        x = x_pos[end]
+
+        # Interpolate the q:
+        y = (x - x_fine_max_Tmin) / ( 0.1 * x_fine_max_Tmin )  # Width of transition region 
+
+        if y < 0.0 
+            S = 0.0
+        elseif y > 1.0
+            S = 1.0
+        else
+            S = y 
+        end
+
+        q = q_fine + ( q_wing - q_fine ) * S 
+
+        # Update x:
+        push!( x_pos, x_pos[end]  +  Δx )
+
+        # Increase bin width by factor q:
+        Δx *= q
+    end
+
+    # Ensure the grid cuts off exactly at x_max:
+    if x_pos[end] > x_max
+        x_pos[end] = x_max
+    elseif x_pos[end] < x_max
+        push!(x_pos, x_max)
+    end
+
+    # Get negative x < 0 side by mirroring:
+    x_neg = - reverse( x_pos[2:end] )   # Start at 2, so we don't duplicate the x = 0
+
+    # Collect all interfaces in x, evaluated with Tmin Doppler widths 
+    x_all = vcat( x_neg, x_pos )  
+
+    # Get physical grid by converting to ν:
+    ν     = νLyα  .+  x_all .* Δν_min
+
+    @assert all( ν .> 0.0 ) "Frequency interfaces ν must be positive. Can't have negative frequencies."
+    @assert issorted(ν) 
+    @assert all(diff(ν) .> 0.0)
+
+    # Get bin widths and bin centers:
+    Δν    = diff(ν)
+    νC    = ν[1:end-1]  .+  0.5 .* Δν  # Bin centers are at the geometric center
 
     # Store δν ≡ ν - νLyα and δνC ≡ νC - νLyα, which are needed in the Voigt parameter 
     # calculations:
-    δν  = ν  .- νLyα
-    δνC = νC .- νLyα
+    δν     = ν  .- νLyα
+    δνC    = νC .- νLyα
 
     # Store 1 / Δν and 1 / νC, since it is used in frequency factor calculations:
     inv_Δν = 1 ./ Δν
     inv_νC = 1 ./ νC
+
+    # Number of bins:
+    N_ν    = length(ν) - 1
 
     # Voigt parameter and Doppler widths, and its inverse, for each cell:
     a        = zeros( Float64, N_r, N_Z )
@@ -181,9 +211,6 @@ function GenerateLyαArrays( c_Lyα::Float64,
     f_Lyα_r        = zeros( Float64, N_r, N_Z )
     f_Lyα_Z        = zeros( Float64, N_r, N_Z )
 
-    # Strang-split order for M1 advection:
-    rfirst_Lyα     = true 
-
     # Force multiplier, Lyα luminosity, Lyα escape fraction:
     M_F::Float64             = 0.0
     M_F_antigravity::Float64 = 0.0
@@ -199,7 +226,6 @@ function GenerateLyαArrays( c_Lyα::Float64,
                       a, ΔνD, inv_ΔνD,
                       kcore_min, kcore_max,
                       Recoil, LyαDestruction, α_Lyα_floor, Δρu_Lyα_r, Δρu_Lyα_Z, f_Lyα_r, f_Lyα_Z,
-                      rfirst_Lyα,
                       M_F, M_F_antigravity, L_Lyα, f_esc_Lyα,
                       N_ν, dN_ν, dN_ν_int )
 end
@@ -328,9 +354,6 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
     f_Lyα_r        = zeros( Float64, N_r, N_Z )
     f_Lyα_Z        = zeros( Float64, N_r, N_Z )
 
-    # Strang-split order for M1 advection:
-    rfirst_Lyα     = true 
-
     # Force multiplier, Lyα luminosity, and Lyα escape fraction:
     M_F::Float64             = 0.0
     M_F_antigravity::Float64 = 0.0
@@ -344,7 +367,6 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
                       α_Lyα, α_F_Lyα, αc_Lyα, pd, ∫dν_js_Lyα, Hvoigt, ϕ_ν, Fij_kp, Fij_k, Fij_km, 
                       ν, νC, Δν, kcore_min, kcore_max,
                       Recoil, LyαDestruction, α_Lyα_floor, Δρu_Lyα_r, Δρu_Lyα_Z, f_Lyα_r, f_Lyα_Z,
-                      rfirst_Lyα,
                       M_F, M_F_antigravity, L_Lyα, f_esc_Lyα )
 
 end

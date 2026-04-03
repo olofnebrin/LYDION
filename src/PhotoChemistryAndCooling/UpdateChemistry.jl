@@ -3,16 +3,7 @@
 
     PURPOSE:     Contains the basic time-update of the chemical
                  abundances of H I, H II, H₂, D I, D II, HD, He I, He II, 
-                 He III. 
-
-    REFERENCES:  The semi-implicit time-update scheme employed here is 
-                 mostly based on the following references:
-
-                 (1) Nickerson et al. (2018) 'A simple model for molecular hydrogen
-                 chemistry coupled to radiation hydrodynamics', MNRAS, 479, 3, 3206-3226
-
-                 (2) Rosdahl et al. (2013) 'RAMSES-RT: radiation hydrodynamics in the
-                 cosmological context', MNRAS, 436, 3, 2188-2231
+                 He III, C I, C II, CHₓ, CO, O I, O II, and OHₓ. 
 
 """
 
@@ -22,8 +13,10 @@ using  StaticArrays, LinearAlgebra         # For taking inverse etc
 export UpdateChemistrySubStep
 
 
-const ϵneg::Float64 = 1e-12   # If any abundance has x < - ϵneg (default: ϵneg = 10⁻¹²), reject the update. If not, clamp to positive.
 
+const xTINY::Float64 = 1e-20          # To avoid division by zero 
+
+""" Update of the carbon and oxygen species over the sub-step Δtsub. """
 function CarbonOxygenChemistry( xOI_old::Float64, 
                                xOII_old::Float64,
                                 xCI_old::Float64,
@@ -45,6 +38,10 @@ function CarbonOxygenChemistry( xOI_old::Float64,
                                   Δtsub::Float64 
                                 )
 
+    nH          = nHI_new + nHII_new + 2 * nH2_new
+    C_over_O    = nC / max(nO,  xTINY * nH)
+    xCO_max     = min( 1 / C_over_O, 1.0 )    # Maximum value of xCO = nCO / nC 
+
     # Get old CHₓ fraction (for nCHx_old):
     xCHx_old    = max( 1 - xCI_old - xCII_old - xCO_old, 0.0 )
 
@@ -54,8 +51,7 @@ function CarbonOxygenChemistry( xOI_old::Float64,
     nOI_old     = xOI_old  * nO    
     
     # Limit nH₃⁺ in extreme cases:
-    nH          = nHI_new + nHII_new + 2 * nH2_new
-    nH3plus_max = nH / 3
+    nH3plus_max = OneThird * nH
 
     # Needed rates:
     KOIe      = kOIe(T)
@@ -128,7 +124,12 @@ function CarbonOxygenChemistry( xOI_old::Float64,
 
     # Get predictor O I, O II, CO fractions:
     xOI_star, xOII_star, xCO_star = xO_new
-    
+
+    # Clamp for safety:
+    xOI_star  = max( xOI_star,  0.0 )
+    xOII_star = max( xOII_star, 0.0 )
+    xCO_star  = clamp( xCO_star, 0.0, xCO_max )
+
     # Get OHₓ from conservation:
     xOHx_star = min( max( 1 - xOI_star - xOII_star - C_over_O * xCO_star, 0.0 ), 1.0 )
     nOHx_star = xOHx_star * nO 
@@ -185,59 +186,62 @@ function CarbonOxygenChemistry( xOI_old::Float64,
     # Get corrector/final C I, C II, CO fractions:
     xCI_new, xCII_new, xCO_new = xC_new 
 
-    # Renormalize oxygen species to make it consistent with corrector update for CO:
-    f_renorm = (1 - C_over_O * xCO_new) / (1 - C_over_O * xCO_star)
-    xOI_new  = f_renorm * xOI_star
-    xOII_new = f_renorm * xOII_star
+    # Clamp xCO to its physical range:
+    xCO_new     = clamp( xCO_new, 0.0, xCO_max )
 
-    # Get new values of OHₓ and CHₓ:
-    xOHx_new = max( 1 - xOI_new - xOII_new - C_over_O * xCO_new, 0.0 )
-    xCHx_new = max( 1 - xCI_new - xCII_new - xCO_new, 0.0 )
+    ###############################################################
+    #######                                                 #######
+    #######       R E N O R M A L I Z E  O X Y G E N        #######
+    #######                                                 #######
+    ###############################################################
 
-    # Check consistency/convergence - corrector updates of O I, O II, and OHₓ
-    # should not differ much from the original O-solve:
-    ΔOI_star   = abs( xOI_new   - xOI_star )   / max( xOI_star,  xmin )
-    ΔOII_star  = abs( xOII_new  - xOII_star )  / max( xOII_star, xmin )
-    ΔOHx_star  = abs( xOHx_new  - xOHx_star )  / max( xOHx_star, xmin )
+    # Renormalize oxygen species to make it consistent with corrector update for CO.
+    # We do this by multiplying xOI_star, xOII_star, and xOHx_star by the factor:
+    # 
+    # f_renorm = (1 - C_over_O * xCO_new) / (xOI_star + xOII_star + xOHx_star)
 
-    ΔCarbOxy   = maximum( (ΔOI_star, ΔOII_star, ΔOHx_star) )
+    f_renorm = max( 1.0 - C_over_O * xCO_new,  0.0 ) / max( xOI_star + xOII_star + xOHx_star,  xTINY )
 
-    # Check that all abundances are positive (or at least very nearly so):
-    Positivity = ( xOI_new ≥ - ϵneg && xOII_new ≥ - ϵneg && xOHx_new ≥ - ϵneg &&
-                   xCI_new ≥ - ϵneg && xCII_new ≥ - ϵneg && xCHx_new ≥ - ϵneg
-                   && xCO_new ≥ - ϵneg )
+    xOI_new  = max( f_renorm * xOI_star,  0.0 )
+    xOII_new = max( f_renorm * xOII_star, 0.0 )
+    # We also have xOHx_new = f_renorm * xOHx_star, but there is no need to return it, since 
+    # we always compute xOHx by remainder when needed. 
 
-    if ΔCarbOxy < tol_Chem && Positivity
-        # If all updated abundances changed by < 10% and have positive or at most 
-        # tiny negative values (x ≥ - ϵneg) we accept the update, and clamp away the 
-        # tiny negative values:
-        xOI_new   = max( xOI_new,  0.0 )
-        xOII_new  = max( xOII_new, 0.0 )
-        xCI_new   = max( xCI_new,  0.0 )
-        xCII_new  = max( xCII_new, 0.0 )
-        xCO_new   = max( xCO_new,  0.0 )
+    # Enforce positivity:
+    xCI_new  = max( xCI_new,  0.0 )
+    xCII_new = max( xCII_new, 0.0 )
+    xCO_new  = clamp( xCO_new, 0.0, xCO_max )
 
-        Converged = true 
+    # Renormalize so they add up to 1 exactly:
+    ∑xC = xCI_new + xCII_new + xCO_new   # Sum of all C species except CHₓ
+
+    if ∑xC > 1.0
+        inv_∑xC   = 1.0 / ∑xC
+        xCI_new  *= inv_∑xC
+        xCII_new *= inv_∑xC
+        xCO_new  *= inv_∑xC
+        xCHx_new  = 0.0      # If ∑xC > 1 initially, there should be no CHₓ
     else 
-        Converged = false 
+        xCHx_new  = 1.0 - ∑xC
     end
 
-    return xOI_new, xOII_new, xCI_new, xCII_new, xCO_new, Converged
+    return xOI_new, xOII_new, xCI_new, xCII_new, xCO_new
 end
+
 
 
 """ This function computes updated abundances of 
     the species H₂, H I, H II, HD, D I, D II, He I, He II, He III, e⁻,
-    over a sub-cycle time-step Δtsub. Uses method of refs. (1)-(2).
+    O I, O II, C I, C II, and CO over a sub-cycle time-step Δtsub. 
 
     (Note that not all species enters the arguments below, because 
-    we can get the H I, D I, He I, and e⁻ abundances from particle and 
+    we can e.g. get the H I, D I, He I, and e⁻ abundances from particle and 
     charge conservation.) """
 function UpdateChemistrySubStep( Δtsub::Float64,
                                  Tnorm::Float64,
-                                    Td::Float64, # Dust temperature (K)
+                                    Td::NTuple{3, Float64}, # Dust temperatures (Td_Sil, Td_C, Td_PAH) (K)
                                      ρ::Float64,
-                                    ρd::Float64,
+                                    ρd::NTuple{3, Float64}, # Dust densities (ρd_Sil, ρd_C, ρd_PAH)
                                     nH::Float64,
                                     nC::Float64,
                                     nO::Float64,
@@ -256,7 +260,9 @@ function UpdateChemistrySubStep( Δtsub::Float64,
                                xCI_old::Float64,
                               xCII_old::Float64, 
                                xCO_old::Float64,
-                             Zgas_Zsun::Float64,
+                                    ZC::Float64,  # Carbon gas metallicity
+                                  ZSil::Float64,  # Si gas metallicity
+                              Zgasrest::Float64,  # Non-C/Si gas metallicity
                                 ΓionHI::Float64 = 0.0,
                                 ΓionH2::Float64 = 0.0,
                                 ΓionDI::Float64 = 0.0,
@@ -366,7 +372,7 @@ function UpdateChemistrySubStep( Δtsub::Float64,
     # Update the electron number density:
     ne_new1 = GetElectronDensityFromFracs( xHII_new, xHeII_old, xHeIII_old, 
                                            xDII_old, xCII_old,  xOII_old, 
-                                           ρ, Zgas_Zsun, HydrogenAndHelium )
+                                           ρ, ZC, ZSil, Zgasrest, HydrogenAndHelium )
 
     # Get change in ne during the H update (for accuracy checking):
     Δne_H   = abs( ne_new1 - ne_old )
@@ -437,7 +443,7 @@ function UpdateChemistrySubStep( Δtsub::Float64,
     # Get updated electron number density:
     ne_new2     = GetElectronDensityFromFracs( xHII_new, xHeII_new, xHeIII_new, 
                                                xDII_old, xCII_old,  xOII_old, 
-                                               ρ, Zgas_Zsun, HydrogenAndHelium )
+                                               ρ, ZC, ZSil, Zgasrest, HydrogenAndHelium )
 
     # Get change in ne during the He update (for accuracy checking):
     Δne_He      = abs( ne_new2 - ne_new1 )
@@ -512,18 +518,19 @@ function UpdateChemistrySubStep( Δtsub::Float64,
     # Get updated electron number density:
     ne_new3 = GetElectronDensityFromFracs( xHII_new, xHeII_new, xHeIII_new, 
                                            xDII_new, xCII_old,  xOII_old, 
-                                           ρ, Zgas_Zsun, HydrogenAndHelium )
+                                           ρ, ZC, ZSil, Zgasrest, HydrogenAndHelium )
 
     # Get change in ne during the D update (for accuracy checking):
     Δne_D   = abs( ne_new3 - ne_new2 )
 
     ########################################################################                      
-    ######  STEP 4: UPDATE O I, O II, O III, OHₓ, CO, C I, C II, CHₓ  ######
+    #########  STEP 4: UPDATE O I, O II, OHₓ, CO, C I, C II, CHₓ  ##########
     ########################################################################
     # Next we update the carbon & oxygen chemistry. 
 
-    if nC > 0.0 && nO > 0.0
-        xOI_new, xOII_new, xCI_new, xCII_new, xCO_new, ConvergedCarbonOxygen = 
+    nTINY = @fastmath xTINY * nH
+    if nC > nTINY  &&  nO > nTINY
+        xOI_new, xOII_new, xCI_new, xCII_new, xCO_new = 
         CarbonOxygenChemistry( xOI_old, xOII_old, xCI_old, xCII_old,
                                xCO_old, nC, nO, nHI_new, nHII_new,
                                nH2_new, ne_new3, ΓionH2, ΓionOI, ΓionCI,
@@ -537,13 +544,12 @@ function UpdateChemistrySubStep( Δtsub::Float64,
         xCI_new  = xCI_old
         xCII_new = xCII_old
         xCO_new  = xCO_old
-        ConvergedCarbonOxygen = true
     end
 
     # Get final electron number density:
     ne_final    = GetElectronDensityFromFracs( xHII_new, xHeII_new, xHeIII_new, 
                                                xDII_new, xCII_new,  xOII_new, 
-                                               ρ, Zgas_Zsun, HydrogenAndHelium )
+                                               ρ, ZC, ZSil, Zgasrest, HydrogenAndHelium )
 
     # Get change in ne during the C/O update (for accuracy checking):
     Δne_CarbOxy = abs( ne_final - ne_new3 )
@@ -558,7 +564,7 @@ function UpdateChemistrySubStep( Δtsub::Float64,
 
     return xH2_new, xHI_new, xHII_new, xHD_new, xDI_new, xDII_new,
            xHeI_new, xHeII_new, xHeIII_new, 
-           xOI_new, xOII_new, xCI_new, xCII_new, xCO_new, ConvergedCarbonOxygen,
+           xOI_new, xOII_new, xCI_new, xCII_new, xCO_new, 
            ne_final, Δne
 end
 
