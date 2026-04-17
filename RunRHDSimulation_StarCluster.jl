@@ -1,42 +1,44 @@
 
 
-include( "src/RHDSolver_Idealized.jl" )
-using .RHDSolver_Idealized                         # The full RHD solver module
-using .RHDSolver_Idealized.ConstantsAndFunctions   # For constants (e.g. unit conversions)
-using  Dates                                       # To have date in the file name for convenience
+include( "src/RHDSolver_StarCluster.jl" )
+using .RHDSolver_StarCluster                         # The full RHD solver module
+using .RHDSolver_StarCluster.ConstantsAndFunctions   # For constants (e.g. unit conversions)
+using  Dates                                         # To have date in the file name for convenience
 
 
-# HDF5 file name where the data will be saved:
-FileName  = "DTypeTest.h5"
-
-
-tmax::Float64                      =  5e8 * yr     # Stop simulation at t = tmax (unless it stops automatically earlier)
-Nsaved::Int                        =  300          # Target number of saved time-steps (if saving is turned on -- see below)
-Nminsteps::Int                     =  300          # Minimum number of time-steps taken in simulation 
-Nmaxsteps::Int                     =  100000       # Maximum number of time-steps taken in simulation 
+tmax::Float64                      =  1e5 * yr      # Stop simulation at t = tmax (unless it stops automatically earlier)
+Nsaved::Int                        =  600           # Target number of saved time-steps (if saving is turned on -- see below)
+Nminsteps::Int                     =  300           # Minimum number of time-steps taken in simulation 
+Nmaxsteps::Int                     =  100000        # Maximum number of time-steps taken in simulation 
 
 #########################################################################
 #################  S T E L L A R  P R O P E R T I E S  ##################
 #########################################################################
 
-dNdt_EUV1::Float64                 =  5e48
-dNdt_EUV2::Float64                 =  0.0
-dNdt_EUV3::Float64                 =  0.0
-σstar_cell::Float64                =  4             # Gaussian size of stellar emission region in cell size units (≳ 4 for approximately spherical H II regions)
+M_StarCluster::Float64             =  1e4           # Mass of star cluster (M⊙)
+Zstar_Zsun::Float64                =  0.01          # Metallicity of the star in Solar units 
+Rhalf_StarCluster::Float64         =  0.05 * pc     # Half-mass radius of star cluster (in cm)
 
 #########################################################################
 ######  C L O U D  P R O P E R T I E S  &  S P A T I A L  G R I D  ######
 #########################################################################
 
+# If POWER_LAW_ENVELOPE = true, the density outside Rcore falls off as ρ ∝ r^(-p_ENVELOPE),
+# up until nH = nH_ext. If POWER_LAW_ENVELOPE = false, there is a much sharper cut-off
+# in the density outside Rcl:
+POWER_LAW_ENVELOPE::Bool           =  false
+p_ENVELOPE::Float64                =  2.0
+
 z::Float64                         =  0.0           # Redshift 
-DG₀::Float64                       =  0.0 * DGsun   # Dust-to-gas ratio (NOTE: *not* normalized to Solar value. To get e.g. Solar, set DG₀ = DGsun)
-Zgas_Zsun::Float64                 =  0.0           # Gas metallicity in Solar units 
-nH₀::Float64                       =  1e-3          # Initial cloud density (cm⁻³)
-nH_ext::Float64                    =  1e-5 * nH₀    # Initial density far outside the cloud (cm⁻³)
-T₀::Float64                        =  100           # Initial cloud temperature (K)
-T_ext::Float64                     =  100           # Temperature outside the cloud 
-Rcl::Float64                       =  30 * kpc      # Radius of cloud (i.e. 'high'-density region)
-u_RMSturb::Float64                 =  0 * kms       # Initial RMS turbulence velocity 
+DG₀::Float64                       =  0.01 * DGsun  # Dust-to-gas ratio (NOTE: *not* normalized to Solar value. To get e.g. Solar, set DG₀ = DGsun)
+Zgas_Zsun₀::Float64                =  Zstar_Zsun    # Initial gas metallicity in Solar units (metals can be depleted onto dust, and dust can be returned to gas)
+nH_core::Float64                   =  1e5           # Initial core density (cm⁻³)
+nH_ext::Float64                    =  1.0           # Initial density far outside the cloud (cm⁻³)
+T₀::Float64                        =  500           # Initial cloud temperature (K)
+T_ext::Float64                     =  500           # Temperature outside the cloud 
+Rcore::Float64                     =  0.5 * pc 
+Rcl::Float64                       =  0.5 * pc      # Radius of cloud (i.e. high-density region)
+u_RMSturb::Float64                 =  3 * kms       # Initial RMS turbulence velocity 
 
 # Grid settings below. If BC_Z_bot = :Reflect (Case 1), there is assumed symmetry at Z = 0. If 
 # BC_Z_bot = :Outflow, there is no assumed symmetry, and the star + cloud is instead centered at Z = Zmax / 2.
@@ -45,10 +47,10 @@ u_RMSturb::Float64                 =  0 * kms       # Initial RMS turbulence vel
 # for the r-logarithmic grid (if used), but the Z-logarithmic grid (if used) stretches in both directions, with 
 # N_Z_log_side cells per side (upper logarithmic region, and lower logarithmic region).
 
-Rmax_lin::Float64                  =  15 * kpc      # Uniform/linear grid out to cylindrical r = Rmax_lin 
-LZ_uniform::Float64                =  15 * kpc      # Total extent of uniform grid along the Z-axis.  
-Rmax::Float64                      =  15 * kpc      # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
-Zmax::Float64                      =  15 * kpc      # Maximum extent along Z-axis. Should be ≥ LZ_uniform.
+Rmax_lin::Float64                  =  1.2 * pc      # Uniform/linear grid out to cylindrical r = Rmax_lin 
+LZ_uniform::Float64                =  1.2 * pc      # Total extent of uniform grid along the Z-axis.  
+Rmax::Float64                      =  1.2 * pc      # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
+Zmax::Float64                      =  1.2 * pc      # Maximum extent along Z-axis. Should be ≥ LZ_uniform.
 N_r_lin::Int                       =  128           # Number of cells along r-direction in the uniform grid section 
 N_Z_lin::Int                       =  128           # Number of cells along Z-direction in the uniform grid section 
 N_r_log::Int                       =  0             # Number of cells along r-direction in the logarithmic grid section 
@@ -66,11 +68,8 @@ BC_Z_top::Symbol                   =  :Outflow      # BCs at upper Z-boundary (:
 # e.g. xHII ≡ nHII / nH, xHeII ≡ nHeII / nHe, etc. NOTE: For a given species, 
 # they must all add up to 1, e.g. xHI + xHII + 2 * xH2 = 1 (xHI is determined by conservation below).
 
-HydrogenAndHelium::Bool            =  false        # If false, the (non-metal) gas is purely hydrogen, i.e. ignoring helium & deuterium.
-                                                   # In that case, the non-hydrogen and non-metal abundances below are arbitrary.
-
-xHII₀::Float64                     =  0.0          # Initial H II fraction inside cloud               (≤ 1)
-xH2₀::Float64                      =  0.0          # Initial H₂ fraction inside cloud                 (≤ 0.5)
+xHII₀::Float64                     =  1e-4         # Initial H II fraction inside cloud               (≤ 1)
+xH2₀::Float64                      =  0.1          # Initial H₂ fraction inside cloud                 (≤ 0.5)
 xHeII₀::Float64                    =  0.0          # Initial He II fraction (nHeII/nHe) inside cloud  (≤ 1)
 xHeIII₀::Float64                   =  0.0          # Initial He III fraction inside cloud             (≤ 1)
 xDII₀::Float64                     =  0.0          # Initial D II fraction (nDII/nD) inside cloud     (≤ 1)
@@ -81,7 +80,7 @@ xCO₀::Float64                      =  0.0          # Initial CO fraction insid
 xOI₀::Float64                      =  1.0          # Initial O I fraction (nOI/nO) inside cloud       (≤ 1)
 xOII₀::Float64                     =  0.0          # Initial O II fraction inside cloud               (≤ 1)
 
-xHII_ext::Float64                  =  1.0          # Initial H II fraction outside cloud 
+xHII_ext::Float64                  =  1e-4         # Initial H II fraction outside cloud 
 xH2_ext::Float64                   =  0.0          # Initial H₂ fraction outside cloud 
 xHeII_ext::Float64                 =  0.0          # Initial He II fraction outside cloud 
 xHeIII_ext::Float64                =  0.0          # Initial He III fraction outside cloud 
@@ -98,8 +97,13 @@ xOII_ext::Float64                  =  0.0
 ######################################################################
 
 Hydro::Bool                        =  true       # Hydrodynamics                    (on if true, off if false)
-RadPressure::Bool                  =  false      # Radiation pressure feedback      (on if true, off if false)
+Gravity::Bool                      =  true       # Self-gravity                     (on if true, off if false)
+Lyα::Bool                          =  true       # Lyα RT/RHD                       (on if true, off if false)
+Recoil::Bool                       =  true       # Atomic recoil for Lyα RT         (on if true, off if false)
+LyαDestruction::Bool               =  true       # Lyα destruction (pd > 0)         (on if true, off if false)
+RadPressure::Bool                  =  true       # Radiation pressure feedback      (on if true, off if false - NOTE: Lyα feedback is only on if Lyα RT is on)
 IRfeedback::Bool                   =  true       # IR radiation pressure feedback   (on if true, off if false - NOTE: Is only on if also RadPressure = true)
+DustGrowthDestruction::Bool        =  true       # Dust growth & destruction        (on if true, off if false)
 OTS::Bool                          =  false      # On-the-spot/Case B approximation (on if true, off if false - NOTE: If off, recombination radiation is modelled self-consistently)
 
 ######################################################################
@@ -120,7 +124,17 @@ else
     N_Z = N_Z_lin + N_Z_log_side + N_Z_log_side
 end
 
-FileDescription  = "Idealized RHD test, with dNdt_EUV1 = $(dNdt_EUV1), dNdt_EUV2 = $(dNdt_EUV2),  dNdt_EUV3 = $(dNdt_EUV3). Spatial resolution: $(N_r)x$(N_Z)."
+if Lyα
+    if RadPressure
+        FileDescription  = "RHD simulation of a $(M_StarCluster) Msun star cluster of half-mass radius $(Rhalf_StarCluster/pc) pc, with Lya RT & feedback. Spatial resolution: $(N_r)x$(N_Z)."
+    else
+        FileDescription  = "RHD simulation of a $(M_StarCluster) Msun star cluster of half-mass radius $(Rhalf_StarCluster/pc) pc, with Lya RT, but not radiation pressure feedback. Spatial resolution: $(N_r)x$(N_Z)."
+    end
+    FileName         = "RHDSim_StarCluster_Lya_$(N_r)x$(N_Z)_" * date * ".h5"
+else
+    FileDescription  = "RHD simulation of a $(M_StarCluster) Msun star cluster of half-mass radius $(Rhalf_StarCluster/pc) pc, ignoring Lya feedback. Spatial resolution: $(N_r)x$(N_Z)."
+    FileName         = "RHDSim_StarCluster_NoLya_$(N_r)x$(N_Z)_" * date * ".h5"
+end
 
 
 ###############################################################
@@ -134,15 +148,17 @@ FileDescription  = "Idealized RHD test, with dNdt_EUV1 = $(dNdt_EUV1), dNdt_EUV2
 
 print_info = true 
 
-SetupRHDsimulation( dNdt_EUV1, dNdt_EUV2, dNdt_EUV3, DG₀, nH₀, nH_ext, Rcl, 
-                    σstar_cell, Rmax_lin, LZ_uniform, Rmax, Zmax,
-                    T₀, T_ext, tmax, 
-                    xHII₀, xH2₀, xHeII₀, xHeIII₀, xDII₀, xHD₀, xCI₀, xCII₀, xCO₀, xOI₀, xOII₀,
-                    xHII_ext, xH2_ext, xHeII_ext, xHeIII_ext, xDII_ext, xHD_ext, 
-                    xCI_ext, xCII_ext, xCO_ext, xOI_ext, xOII_ext, Zgas_Zsun,
-                    z, Hydro, 
-                    RadPressure, IRfeedback, OTS, HydrogenAndHelium,
-                    u_RMSturb, N_r_lin, N_Z_lin, N_r_log, N_Z_log_side,
-                    BC_r_right, BC_Z_bot, BC_Z_top,
-                    SaveData, Nminsteps, Nmaxsteps, Nsaved,
-                    print_info, FileName, FileDescription )
+SetupRHDsimulation_StarCluster( M_StarCluster, Zstar_Zsun, DG₀, nH_core, nH_ext, 
+                                Rcore, Rcl, 
+                                Rhalf_StarCluster, Rmax_lin, LZ_uniform, Rmax, Zmax,
+                                T₀, T_ext, POWER_LAW_ENVELOPE, p_ENVELOPE,
+                                tmax, 
+                                xHII₀, xH2₀, xHeII₀, xHeIII₀, xDII₀, xHD₀, xCI₀, xCII₀, xCO₀, xOI₀, xOII₀,
+                                xHII_ext, xH2_ext, xHeII_ext, xHeIII_ext, xDII_ext, xHD_ext, 
+                                xCI_ext, xCII_ext, xCO_ext, xOI_ext, xOII_ext, Zgas_Zsun₀,
+                                z, Hydro, Lyα, Recoil, LyαDestruction, Gravity,
+                                RadPressure, IRfeedback, DustGrowthDestruction, OTS, 
+                                u_RMSturb, N_r_lin, N_Z_lin, N_r_log, N_Z_log_side,
+                                BC_r_right, BC_Z_bot, BC_Z_top,
+                                SaveData, Nminsteps, Nmaxsteps, Nsaved,
+                                print_info, FileName, FileDescription )

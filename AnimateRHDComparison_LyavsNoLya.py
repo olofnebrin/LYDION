@@ -5,7 +5,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.colors import LogNorm
 from matplotlib.gridspec import GridSpec
 import matplotlib.patheffects as pe
-from matplotlib.ticker import MultipleLocator  # kept (unused, but you had it)
+from matplotlib.ticker import MultipleLocator 
 from pathlib import Path
 import sys
 
@@ -17,13 +17,19 @@ sys.path.insert(0, str(cmastro_src))
 import cmastro
 
 # ---------------- user inputs ----------------
-filename_noLya = "Aaron_RHDSimGC_NoLya_128.h5"     # Run ignoring Lyα feedback
-filename_Lya   = "Aaron_RHDSimGC_Lya_128.h5"       # Run with Lyα feedback
+filename_noLya = "RHDSim_StarCluster_NoLya_128x128_2026-04-16.h5"    # Run ignoring Lyα feedback
+filename_Lya   = "RHDSim_StarCluster_Lya_128x128_2026-04-16.h5"      # Run with Lyα feedback
 
 frameskip = 1                  # use >1 to skip frames
 save_mp4  = True               # True to save mp4 instead of interactive show
 outname   = "compare_noLya_vs_Lya_density_T.mp4"
 fps       = 20
+
+save_snapshot     = True
+snapshot_time_kyr = 40.0
+snapshot_outname  = "NoLya_vs_Lya_density_T_snapshot_40.0kyr.png"   # or .pdf
+snapshot_dpi      = 600
+
 # ---------------------------------------------
 
 # constants
@@ -138,7 +144,7 @@ Z = runL["Z"]
 R, ZZ = np.meshgrid(r/pc, Z/pc, indexing='ij')
 
 # -------------------------------------------------------------------
-# PLOT COSMETICS  (kept identical)
+# PLOT COSMETICS 
 # -------------------------------------------------------------------
 plt.rc('font', **{'sans-serif': ['AVHershey Complex'], 'size': 37})
 params = {'mathtext.default': 'regular'}
@@ -163,8 +169,8 @@ plt.rcParams['xtick.major.pad'] = '15'
 plt.rcParams['ytick.major.pad'] = '15'
 
 plt.rcParams['legend.frameon'] = False
-plt.rcParams['axes.linewidth'] = 2.5
-plt.rcParams['grid.linewidth'] = 2.5
+plt.rcParams['axes.linewidth'] = 3.0
+plt.rcParams['grid.linewidth'] = 3.0
 plt.rcParams['grid.linestyle'] = '--'
 
 plt.rcParams['xtick.top'] = True
@@ -175,10 +181,45 @@ plt.rcParams['xtick.direction'] = 'in'
 plt.rcParams['ytick.direction'] = 'in'
 
 # -------------------------------------------------------------------
-# display ranges (kept same as your density/temperature panels)
+# display ranges 
 # -------------------------------------------------------------------
-vmin_nH, vmax_nH = 10, 1e5
+# --- automatic density range ---
+# Use the initial snapshot to define a characteristic initial cloud density,
+# then center the plotted range on that value with ±2 dex.
+
+nH0_L = runL["nH_hist"][0]
+nH0_R = runR["nH_hist"][0]
+
+nH0_L_pos = nH0_L[nH0_L > 0.0]
+nH0_R_pos = nH0_R[nH0_R > 0.0]
+
+if (nH0_L_pos.size == 0) or (nH0_R_pos.size == 0):
+    raise ValueError("Initial nH field has no positive values in one of the runs.")
+
+nH0_char = max(np.max(nH0_L_pos), np.max(nH0_R_pos))
+
+# Density range: 2 dex below and above the initial cloud density
+vmin_nH = 10.0**(np.log10(nH0_char) - 2.0)
+vmax_nH = 10.0**(np.log10(nH0_char) + 2.0)
 norm_nH = LogNorm(vmin=vmin_nH, vmax=vmax_nH)
+
+# Nice colorbar ticks at integer dex within the plotted range
+logmin_nH = int(np.ceil(np.log10(vmin_nH)))
+logmax_nH = int(np.floor(np.log10(vmax_nH)))
+ticks_nH  = 10.0**np.arange(logmin_nH, logmax_nH + 1)
+
+def fmt_log_tick(val):
+    exp = int(np.round(np.log10(val)))
+    if exp == -1:
+        return '0.1'
+    elif exp == 0:
+        return '1'
+    elif exp == 1:
+        return '10'
+    else:
+        return f'10$^{{{exp}}}$'
+
+ticklabels_nH = [fmt_log_tick(v) for v in ticks_nH]
 
 vmin_T, vmax_T = 10.0, 1e5
 norm_T = LogNorm(vmin=vmin_T, vmax=vmax_T)
@@ -188,7 +229,7 @@ norm_T = LogNorm(vmin=vmin_T, vmax=vmax_T)
 # left: no Lyα, right: with Lyα
 # top: density, bottom: temperature
 # -------------------------------------------------------------------
-fig = plt.figure(figsize=(14, 12), constrained_layout=True)
+fig = plt.figure(figsize=(1.2*14, 1.2*12), constrained_layout=True)
 gs  = GridSpec(2, 2, figure=fig, width_ratios=[1, 1], height_ratios=[1, 1])
 
 ax11 = fig.add_subplot(gs[0, 0])                         # noLyα density
@@ -206,16 +247,17 @@ panel_label_style = dict(
     path_effects=[pe.withStroke(linewidth=3, foreground='white')]
 )
 
-# Titles (kept lightweight; feel free to remove if you prefer zero extras)
+# Titles 
 ax11.set_title("No Lyα feedback", pad = 20)
 ax21.set_title("With Lyα feedback", pad = 20)
 
 # --- density (no Lyα) ---
 ax11.set_ylabel("Z (pc)", labelpad=12)
-im_nH_L = ax11.pcolormesh(R, ZZ, runL["nH_hist"][0].T, norm=norm_nH, shading='auto', cmap='cma:laguna')
+im_nH_L = ax11.pcolormesh(R, ZZ, np.clip(runL["nH_hist"][0].T, vmin_nH, vmax_nH),
+                          norm=norm_nH, shading='auto', cmap='cma:laguna')
 cb1 = fig.colorbar(im_nH_L, ax=ax11, pad=0.02)
-cb1.set_ticks([10, 1e3, 1e5])
-cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$'])
+cb1.set_ticks(ticks_nH)
+cb1.set_ticklabels(ticklabels_nH)
 ax11.text(0.9, 0.2, "n$_{H}$ (cm$^{-3}$)", transform=ax11.transAxes, **panel_label_style)
 
 # --- temperature (no Lyα) ---
@@ -229,10 +271,11 @@ ax12.text(0.9, 0.9, "T (K)", transform=ax12.transAxes, **panel_label_style)
 
 # --- density (with Lyα) ---
 ax21.tick_params(labelleft=False)
-im_nH_R = ax21.pcolormesh(R, ZZ, runR["nH_hist"][0].T, norm=norm_nH, shading='auto', cmap='cma:laguna')
+im_nH_R = ax21.pcolormesh(R, ZZ, np.clip(runR["nH_hist"][0].T, vmin_nH, vmax_nH),
+                          norm=norm_nH, shading='auto', cmap='cma:laguna')
 cb3 = fig.colorbar(im_nH_R, ax=ax21, pad=0.02)
-cb3.set_ticks([10, 1e3, 1e5])
-cb3.set_ticklabels(['10', '10$^{3}$', '10$^{5}$'])
+cb3.set_ticks(ticks_nH)
+cb3.set_ticklabels(ticklabels_nH)
 ax21.text(0.9, 0.2, "n$_{H}$ (cm$^{-3}$)", transform=ax21.transAxes, **panel_label_style)
 
 # --- temperature (with Lyα) ---
@@ -246,11 +289,11 @@ ax22.text(0.9, 0.9, "T (K)", transform=ax22.transAxes, **panel_label_style)
 
 # shared limits
 for ax in (ax11, ax12, ax21, ax22):
-    ax.set_xlim(r[0]/pc, 0.8 * r[-1]/pc)
-    ax.set_ylim(0.1 * Z[-1]/pc, 0.9 * Z[-1]/pc)
+    ax.set_xlim(r[0]/pc, r[-1]/pc)
+    ax.set_ylim(Z[0]/pc, Z[-1]/pc)
     ax.set_aspect('equal', adjustable='box') # Ensure correct aspect ratio of panels 
 
-# --- time label (put in top-left like your original; same style) ---
+# --- time label  ---
 time_style = dict(
     ha='left', va='top', color='white',
     path_effects=[pe.withStroke(linewidth=3, foreground='black')]
@@ -274,10 +317,10 @@ def init():
     kL = savedL[p]
     kR = savedR[p]
 
-    im_nH_L.set_array(runL["nH_hist"][kL].T.ravel())
+    im_nH_L.set_array(np.clip(runL["nH_hist"][kL].T, vmin_nH, vmax_nH).ravel())
     im_T_L.set_array(runL["T_hist"][kL].T.ravel())
 
-    im_nH_R.set_array(runR["nH_hist"][kR].T.ravel())
+    im_nH_R.set_array(np.clip(runR["nH_hist"][kR].T, vmin_nH, vmax_nH).ravel())
     im_T_R.set_array(runR["T_hist"][kR].T.ravel())
 
     # show both times (in case they differ)
@@ -290,10 +333,10 @@ def update(p):
     kL = savedL[p]
     kR = savedR[p]
 
-    im_nH_L.set_array(runL["nH_hist"][kL].T.ravel())
+    im_nH_L.set_array(np.clip(runL["nH_hist"][kL].T, vmin_nH, vmax_nH).ravel())
     im_T_L.set_array(runL["T_hist"][kL].T.ravel())
 
-    im_nH_R.set_array(runR["nH_hist"][kR].T.ravel())
+    im_nH_R.set_array(np.clip(runR["nH_hist"][kR].T, vmin_nH, vmax_nH).ravel())
     im_T_R.set_array(runR["T_hist"][kR].T.ravel())
 
     txtL.set_text(f"t = {tL[kL]/kyr:.2f} kyr")
@@ -301,7 +344,110 @@ def update(p):
 
     return (im_nH_L, im_T_L, im_nH_R, im_T_R, txtL, txtR)
 
+def find_nearest_frame_pair(target_time_kyr):
+    target_time = target_time_kyr * kyr
+
+    pair_times = 0.5 * (tL[savedL[frames]] + tR[savedR[frames]])
+    idx_local = np.abs(pair_times - target_time).argmin()
+
+    p = frames[idx_local]
+    return p, pair_times[idx_local]
+
+def save_snapshot_at_time(target_time_kyr, outname, dpi=600):
+    p, tpair = find_nearest_frame_pair(target_time_kyr)
+
+    kL = savedL[p]
+    kR = savedR[p]
+
+    # Make a completely separate static figure for the snapshot
+    figS = plt.figure(figsize=(1.2*14, 1.2*12), constrained_layout=True)
+    gsS  = GridSpec(2, 2, figure=figS, width_ratios=[1, 1], height_ratios=[1, 1])
+
+    ax11S = figS.add_subplot(gsS[0, 0])
+    ax12S = figS.add_subplot(gsS[1, 0], sharex=ax11S, sharey=ax11S)
+    ax21S = figS.add_subplot(gsS[0, 1], sharex=ax11S, sharey=ax11S)
+    ax22S = figS.add_subplot(gsS[1, 1], sharex=ax11S, sharey=ax11S)
+
+    ax11S.tick_params(labelbottom=False)
+    ax21S.tick_params(labelbottom=False)
+
+    ax11S.set_title("No Lyα feedback", pad=20)
+    ax21S.set_title("With Lyα feedback", pad=20)
+
+    # --- density (no Lyα) ---
+    ax11S.set_ylabel("Z (pc)", labelpad=12)
+    im_nH_LS = ax11S.pcolormesh(
+        R, ZZ, np.clip(runL["nH_hist"][kL].T, vmin_nH, vmax_nH),
+        norm=norm_nH, shading='auto', cmap='cma:laguna'
+    )
+    cb1S = figS.colorbar(im_nH_LS, ax=ax11S, pad=0.02)
+    cb1S.set_ticks(ticks_nH)
+    cb1S.set_ticklabels(ticklabels_nH)
+    ax11S.text(0.9, 0.2, "n$_{H}$ (cm$^{-3}$)", transform=ax11S.transAxes, **panel_label_style)
+
+    # --- temperature (no Lyα) ---
+    ax12S.set_xlabel("r (pc)", labelpad=12)
+    ax12S.set_ylabel("Z (pc)", labelpad=12)
+    im_T_LS = ax12S.pcolormesh(
+        R, ZZ, runL["T_hist"][kL].T,
+        norm=norm_T, shading='auto', cmap='coolwarm'
+    )
+    cb2S = figS.colorbar(im_T_LS, ax=ax12S, pad=0.02)
+    cb2S.set_ticks([10, 100, 1e3, 1e4, 1e5])
+    cb2S.set_ticklabels(['10', '10$^{2}$', '10$^{3}$', '10$^{4}$', '10$^{5}$'])
+    ax12S.text(0.9, 0.9, "T (K)", transform=ax12S.transAxes, **panel_label_style)
+
+    # --- density (with Lyα) ---
+    ax21S.tick_params(labelleft=False)
+    im_nH_RS = ax21S.pcolormesh(
+        R, ZZ, np.clip(runR["nH_hist"][kR].T, vmin_nH, vmax_nH),
+        norm=norm_nH, shading='auto', cmap='cma:laguna'
+    )
+    cb3S = figS.colorbar(im_nH_RS, ax=ax21S, pad=0.02)
+    cb3S.set_ticks(ticks_nH)
+    cb3S.set_ticklabels(ticklabels_nH)
+    ax21S.text(0.9, 0.2, "n$_{H}$ (cm$^{-3}$)", transform=ax21S.transAxes, **panel_label_style)
+
+    # --- temperature (with Lyα) ---
+    ax22S.set_xlabel("r (pc)", labelpad=12)
+    ax22S.tick_params(labelleft=False)
+    im_T_RS = ax22S.pcolormesh(
+        R, ZZ, runR["T_hist"][kR].T,
+        norm=norm_T, shading='auto', cmap='coolwarm'
+    )
+    cb4S = figS.colorbar(im_T_RS, ax=ax22S, pad=0.02)
+    cb4S.set_ticks([10, 100, 1e3, 1e4, 1e5])
+    cb4S.set_ticklabels(['10', '10$^{2}$', '10$^{3}$', '10$^{4}$', '10$^{5}$'])
+    ax22S.text(0.9, 0.9, "T (K)", transform=ax22S.transAxes, **panel_label_style)
+
+    for ax in (ax11S, ax12S, ax21S, ax22S):
+        ax.set_xlim(r[0]/pc, r[-1]/pc)
+        ax.set_ylim(Z[0]/pc, Z[-1]/pc)
+        ax.set_aspect('equal', adjustable='box')
+
+    time_style = dict(
+        ha='left', va='top', color='white',
+        path_effects=[pe.withStroke(linewidth=3, foreground='black')]
+    )
+
+    ax11S.text(0.05, 0.95, f"t = {tL[kL]/kyr:.2f} kyr",
+               fontsize=26, transform=ax11S.transAxes, **time_style)
+    ax21S.text(0.05, 0.95, f"t = {tR[kR]/kyr:.2f} kyr",
+               fontsize=26, transform=ax21S.transAxes, **time_style)
+
+    figS.savefig(outname, dpi=dpi, bbox_inches='tight')
+    plt.close(figS)
+
+    print(f"Saved snapshot to {outname}")
+    print(f"  Requested time: {target_time_kyr:.3f} kyr")
+    print(f"  Nearest average pair time: {tpair/kyr:.3f} kyr")
+    print(f"  No-Lyα frame time: {tL[kL]/kyr:.3f} kyr")
+    print(f"  With-Lyα frame time: {tR[kR]/kyr:.3f} kyr")
+
 ani = FuncAnimation(fig, update, frames=frames, init_func=init, blit=True)
+
+if save_snapshot:
+    save_snapshot_at_time(snapshot_time_kyr, snapshot_outname, dpi=snapshot_dpi)
 
 if save_mp4:
     ani.save(outname, writer="ffmpeg", fps=fps, dpi=600)

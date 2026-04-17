@@ -31,7 +31,7 @@ export LyαArrays, GenerateLyαArrays, H, Htophat,
        GetCarbonDensities, GetOxygenDensities, GetElectronDensity,
        GetElectronDensityFromFracs, GetTotalNumberDensity,
        GetAllNumberDensities, Get_ρ_From_nH, Compute_nC_over_nO,
-       MinMod, SphericalAverageProfile!,
+       MinMod, FreeFallTime, SphericalAverageProfile!,
        GetBlackBodyIonizingEmission, PrintLYDIONLogo
 
 
@@ -192,7 +192,7 @@ export c, h, G, kB, e, q_e, q_HII, q_HeII, q_HeIII,
        X, Y, X_D, Zsun, DGsun, TCMB0, inv_Zsun,
 
        fCarbon, fNitrogen, fOxygen, fNeon, fMagnesium, fSilicon, fSulfur, fIron, 
-       mH, mH2, mD, me, mHe, mC, mCO, mSi,
+       mH, mH2, mD, me, mHe, mC, mO, mCO, mSi,
        inv_mH2, inv_mD, inv_mN, inv_mNe, inv_mMg, inv_mSi, inv_mS, inv_mFe,
 
        Lsun, Msun, AU, pc, kpc, Mpc, Gpc, kms, inv_kms, day, yr, Myr, Gyr, eV, Ang, nm, μm, F_Habing,
@@ -553,14 +553,25 @@ end
 """ This function updates the Lyα radiation pressure force per unit volume components 
     f_Lyα = (f_Lyα_r, f_Lyα_Z) from the accumulated change in momentum over time-step Δt. 
     
-    The function also computes the Lyα force multiplier M_F. """
+    The function also computes the Lyα force multiplier M_F of various kinds:
+        
+    M_F            = ∫dV |f_Lyα| / (L_Lyα/c)
+    M_F_radial_net = ∫dV ( f_Lyα ⋅ r̂_out ) / (L_Lyα/c) 
+    M_F_radial_out = ∫dV max( f_Lyα ⋅ r̂_out, 0.0 ) / (L_Lyα/c) 
+    
+    The two M_F_radial_net/out measure the force directed radially from 
+    the star or cloud center, with the "out" version only including the 
+    outward-directed components. """
 @inline function Update_f_Lyα_MF_L_Lyα!( f_Lyα_r::AbstractArray{Float64, 2}, 
                                          f_Lyα_Z::AbstractArray{Float64, 2},
                                        Δρu_Lyα_r::AbstractArray{Float64, 2},
                                        Δρu_Lyα_Z::AbstractArray{Float64, 2},
                                           ∫dν_js::AbstractArray{Float64, 2},
                                               ΔV::AbstractArray{Float64, 2},
+                                            rCoM::AbstractArray{Float64, 1},
+                                            ZCoM::AbstractArray{Float64, 1},
                                               Δt::Float64,
+                                        Z_center::Float64,
                                         BC_Z_bot::Symbol = :Reflect
                                         )
 
@@ -578,7 +589,7 @@ end
         end
     end
 
-    # Compute force multiplier M_F = ∫dV f_Lyα / (L_Lyα/c) & Lyα luminosity L_Lyα = 4π ∫dV (∫dν js):
+    # Compute force multiplier M_F = ∫dV |f_Lyα| / (L_Lyα/c) & Lyα luminosity L_Lyα = 4π ∫dV (∫dν js):
     M_F   = 0.0
     L_Lyα = 0.0
     for j in dN_Z
@@ -588,11 +599,43 @@ end
         end
     end
 
-    # Normalize M_F:
+    # Compute radial force multipliers relative to star/cloud center:
+    M_F_radial_net = 0.0 
+    M_F_radial_out = 0.0 
+    for j in dN_Z 
+        @inbounds @simd for i in dN_r
+            # Distance from star/cloud center:
+            Δr       = rCoM[i]
+            ΔZ       = ZCoM[j] - Z_center
+            distance = @fastmath sqrt( Δr * Δr  +  ΔZ * ΔZ )
+
+            if distance > 0.0
+                inv_d   = @fastmath 1.0 / distance
+                e_out_r = Δr * inv_d
+                e_out_Z = ΔZ * inv_d
+
+                f_Lyα_radial = f_Lyα_r[i,j] * e_out_r  +  f_Lyα_Z[i,j] * e_out_Z
+            else
+                # At the stellar position the outward direction is undefined:
+                f_Lyα_radial = 0.0
+            end
+
+            # Add contributions to M_F_radial_net and M_F_radial_out:
+            M_F_radial_net += ΔV[i,j] * f_Lyα_radial
+            M_F_radial_out += ΔV[i,j] * max( f_Lyα_radial, 0.0 )
+        end
+    end
+
+    # Normalize force multipliers:
     if L_Lyα > 0.0
-        M_F = M_F / (L_Lyα / c)
+        inv_L_over_c   = 1.0 / (L_Lyα / c)
+        M_F            = M_F * inv_L_over_c
+        M_F_radial_net = M_F_radial_net * inv_L_over_c
+        M_F_radial_out = M_F_radial_out * inv_L_over_c
     else
-        M_F = 0.0
+        M_F            = 0.0
+        M_F_radial_net = 0.0
+        M_F_radial_out = 0.0
     end
 
     # Compute the total Lyα luminosity in the cloud, *taking into account reflective BCs*:
@@ -604,24 +647,36 @@ end
         L_Lyα_tot = L_Lyα
     end
 
-    return M_F, L_Lyα_tot
+    return M_F, M_F_radial_net, M_F_radial_out, L_Lyα_tot
 end
 
 
 """ This function updates the Lyα radiation pressure force per unit volume components 
     f_Lyα = (f_Lyα_r, f_Lyα_Z) from the accumulated change in momentum over time-step Δt. 
     
-    The function also computes the Lyα force multiplier M_F, and the force multiplier 
-    *anti-parallel* to gravity, which is a better measure of its feedback strength. """
+    The function also computes the Lyα force multiplier M_F of various kinds:
+        
+    M_F             = ∫dV |f_Lyα| / (L_Lyα/c)
+    M_F_antigravity = ∫dV ( - f_Lyα ⋅ â_grav ) / (L_Lyα/c)
+    M_F_radial_net  = ∫dV ( f_Lyα ⋅ r̂_out ) / (L_Lyα/c) 
+    M_F_radial_out  = ∫dV max( f_Lyα ⋅ r̂_out, 0.0 ) / (L_Lyα/c) 
+    
+    M_F_antigravity is the force multiplier *anti-parallel* to gravity, which is a 
+    better measure of its feedback strength. Related, the two M_F_radial_net/out measure 
+    the force directed radially from the star or cloud center, with the "out" version 
+    only including the outward-directed components. """
 @inline function Update_f_Lyα_MF_L_Lyα!( f_Lyα_r::AbstractArray{Float64, 2}, 
                                          f_Lyα_Z::AbstractArray{Float64, 2},
                                        Δρu_Lyα_r::AbstractArray{Float64, 2},
                                        Δρu_Lyα_Z::AbstractArray{Float64, 2},
                                           ∫dν_js::AbstractArray{Float64, 2},
                                               ΔV::AbstractArray{Float64, 2},
+                                            rCoM::AbstractArray{Float64, 1},
+                                            ZCoM::AbstractArray{Float64, 1},
                                               Δt::Float64,
                                         f_grav_r::AbstractArray{Float64, 2}, 
                                         f_grav_Z::AbstractArray{Float64, 2}, 
+                                        Z_center::Float64,
                                         BC_Z_bot::Symbol = :Reflect
                                         )
 
@@ -651,11 +706,16 @@ end
 
     # Compute force multiplier anti-parallel to gravity, 
     # M_F_antigravity = ∫dV ( - f_Lyα ⋅ â_grav ) / (L_Lyα/c)
-    # NOTE: Negative values mean that radiation pressure is 'helping' gravity 
+    # as well as radially outward force multipliers.
+    # NOTE: Negative values for M_F_antigravity mean that radiation pressure is 'helping' gravity 
 
     M_F_antigravity = 0.0
+    M_F_radial_net  = 0.0 
+    M_F_radial_out  = 0.0 
     for j in dN_Z 
         @inbounds @simd for i in dN_r
+
+            # ------ Compute force multiplier anti-parallel to gravity: --------
 
             # Magnitude of gravitatonal force:
             f_grav_mag = sqrt( f_grav_r[i,j] * f_grav_r[i,j]  +  f_grav_Z[i,j] * f_grav_Z[i,j] )
@@ -669,17 +729,43 @@ end
 
             # Get contribution to M_F_antigravity from this cell:
             M_F_antigravity += ΔV[i,j] * f_Lyα_antiparallel
+
+            # ------ Compute radially outward force multipliers: ------------
+
+            # Distance from star/cloud center:
+            Δr       = rCoM[i]
+            ΔZ       = ZCoM[j] - Z_center
+            distance = @fastmath sqrt( Δr * Δr  +  ΔZ * ΔZ )
+
+            if distance > 0.0
+                inv_d   = @fastmath 1.0 / distance
+                e_out_r = Δr * inv_d
+                e_out_Z = ΔZ * inv_d
+
+                f_Lyα_radial = f_Lyα_r[i,j] * e_out_r  +  f_Lyα_Z[i,j] * e_out_Z
+            else
+                # At the stellar position the outward direction is undefined:
+                f_Lyα_radial = 0.0
+            end
+
+            # Add contributions to M_F_radial_net and M_F_radial_out:
+            M_F_radial_net += ΔV[i,j] * f_Lyα_radial
+            M_F_radial_out += ΔV[i,j] * max( f_Lyα_radial, 0.0 )
         end
     end
 
-    # Normalize M_F & M_F_antigravity:
+    # Normalize force multipliers:
     if L_Lyα > 0.0
-        inv_Loverc      = 1 / (L_Lyα / c)
-        M_F             = M_F * inv_Loverc
-        M_F_antigravity = M_F_antigravity * inv_Loverc
+        inv_L_over_c    = 1.0 / (L_Lyα / c)
+        M_F             = M_F * inv_L_over_c
+        M_F_antigravity = M_F_antigravity * inv_L_over_c
+        M_F_radial_net  = M_F_radial_net * inv_L_over_c
+        M_F_radial_out  = M_F_radial_out * inv_L_over_c
     else
         M_F             = 0.0
         M_F_antigravity = 0.0
+        M_F_radial_net  = 0.0
+        M_F_radial_out  = 0.0
     end
 
     # Compute the total Lyα luminosity in the cloud, *taking into account reflective BCs*:
@@ -691,7 +777,7 @@ end
         L_Lyα_tot = L_Lyα
     end
 
-    return M_F, M_F_antigravity, L_Lyα_tot
+    return M_F, M_F_antigravity, M_F_radial_net, M_F_radial_out, L_Lyα_tot
 end
 
 
@@ -1389,6 +1475,19 @@ end
         # return B:
         return ifelse( abs(A) < abs(B), A, B )
     end
+end
+
+
+""" The free-fall time, useful for setting up some simulation tests. """
+@inline function FreeFallTime( nH::Float64, Zgas_Zsun )
+
+    # Get the gas density from nH:
+    ρ = Get_ρ_From_nH( nH, Zgas_Zsun, true )
+
+    # Free-fall time: 
+    tff = sqrt( 3 * π / (32 * G * ρ) )
+
+    return tff 
 end
 
 

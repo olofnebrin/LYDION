@@ -15,6 +15,7 @@ function CreateHDF5File( FileName::String,                # File name
                         dNdt_EUV1::Float64,               # EUV1 photon emission rate 
                         dNdt_EUV2::Float64,               # EUV2 photon emission rate 
                         dNdt_EUV3::Float64,               # EUV3 photon emission rate 
+                            L_bol::Float64,               # Bolometric luminosity (erg s⁻¹)
                               N_r::Int,                   # Number of cells along r-axis  
                               N_Z::Int,                   # Number of cells along Z-axis 
                         Nminsteps::Int,                   # Minimum number of time-steps in the simulation (sets largest Δt)
@@ -73,9 +74,10 @@ function CreateHDF5File( FileName::String,                # File name
         attrs(settings)["FileDescription"] = FileDescription
 
         # Save desired tmax & stellar emission rates and properties:
-        attrs(settings)["dNdt_EUV1"]   = string(dNdt_EUV1)
-        attrs(settings)["dNdt_EUV2"]   = string(dNdt_EUV2)
-        attrs(settings)["dNdt_EUV3"]   = string(dNdt_EUV3)
+        attrs(settings)["dNdt_EUV1"]   = dNdt_EUV1
+        attrs(settings)["dNdt_EUV2"]   = dNdt_EUV2
+        attrs(settings)["dNdt_EUV3"]   = dNdt_EUV3
+        attrs(settings)["L_bol"]       = L_bol       # Bolometric luminosity 
         attrs(settings)["tmax"]        = string(tmax)
         attrs(settings)["σ_star_cell"] = string(σ_star_cell)
         attrs(settings)["Z_pos"]       = string(Z_pos)
@@ -370,6 +372,12 @@ function CreateHDF5File( FileName::String,                # File name
                        chunk = (N_r, N_Z, 1),
                        filters = Filters.Deflate(3))
 
+        # Create a 3D dataset (r, Z, time) for the FUV intensity:
+        create_dataset(file, "J_FUV_History", Float32,
+               (N_r, N_Z, Nsaved);
+               chunk = (N_r, N_Z, 1),
+               filters = Filters.Deflate(3))
+
         # Create a 3D dataset (r, Z, time) for the LW intensity:
         create_dataset(file, "J_LW_History", Float32,
                        (N_r, N_Z, Nsaved);
@@ -416,6 +424,16 @@ function CreateHDF5File( FileName::String,                # File name
                        (Nsaved,),
                        chunk = (1,))
 
+        # Global net radial stellar radiation 'force multiplier' F_rad / (L/c) per saved time:
+        create_dataset(file, "M_F_dir_radial_net_History", Float64,
+                       (Nsaved,),
+                       chunk = (1,))
+
+        # Global outward radial stellar radiation 'force multiplier' F_rad / (L/c) per saved time:
+        create_dataset(file, "M_F_dir_radial_out_History", Float64,
+                       (Nsaved,),
+                       chunk = (1,))
+
         # Global stellar radiation 'force multiplier' F_rad / (L/c) *anti-parallel to gravity*
         # per saved time:
         create_dataset(file, "M_F_dir_antigrav_direction_History", Float64,
@@ -434,6 +452,16 @@ function CreateHDF5File( FileName::String,                # File name
 
         # Global IR force multiplier per saved time:
         create_dataset(file, "M_F_IR_History", Float64,
+                       (Nsaved,),
+                       chunk = (1,))
+
+        # Global net radial IR force multiplier per saved time:
+        create_dataset(file, "M_F_IR_radial_net_History", Float64,
+                       (Nsaved,),
+                       chunk = (1,))
+
+        # Global outward radial IR force multiplier per saved time:
+        create_dataset(file, "M_F_IR_radial_out_History", Float64,
                        (Nsaved,),
                        chunk = (1,))
 
@@ -471,6 +499,21 @@ function CreateHDF5File( FileName::String,                # File name
         create_dataset(file, "TotalDustMass_History", Float64,
                       (Nsaved,),
                       chunk = (1,))
+
+        # Total gas pressure force magnitude per saved time:
+        create_dataset(file, "IntegratedPressureForce_History", Float64,
+                       (Nsaved,),
+                       chunk = (1,))
+
+        # Net radial total gas pressure force per saved time:
+        create_dataset(file, "IntegratedPressureForce_radial_net_History", Float64,
+                       (Nsaved,),
+                       chunk = (1,))
+
+        # Outward radial total gas pressure force per saved time:
+        create_dataset(file, "IntegratedPressureForce_radial_out_History", Float64,
+                       (Nsaved,),
+                       chunk = (1,))
 
 
     end # End of h5open
@@ -678,12 +721,24 @@ function SaveRHDTimeStepHDF5( FileName::String,
         dset_M_F_dir                  = file["M_F_dir_History"]
         dset_M_F_dir[step]            = RT.M_F_dir
 
+        dset_M_F_dir_radial_net       = file["M_F_dir_radial_net_History"]
+        dset_M_F_dir_radial_net[step] = RT.M_F_dir_radial_net
+
+        dset_M_F_dir_radial_out       = file["M_F_dir_radial_out_History"]
+        dset_M_F_dir_radial_out[step] = RT.M_F_dir_radial_out
+
         dset_M_F_dir_antigrav         = file["M_F_dir_antigrav_direction_History"]
         dset_M_F_dir_antigrav[step]   = RT.M_F_dir_antigravity
 
-        # Save IR force multiplier:
+        # Save IR force multipliers:
         dset_M_F_IR                   = file["M_F_IR_History"]
         dset_M_F_IR[step]             = RT.M_F_IR
+
+        dset_M_F_IR_radial_net        = file["M_F_IR_radial_net_History"]
+        dset_M_F_IR_radial_net[step]  = RT.M_F_IR_radial_net
+
+        dset_M_F_IR_radial_out        = file["M_F_IR_radial_out_History"]
+        dset_M_F_IR_radial_out[step]  = RT.M_F_IR_radial_out
         
         dset_M_F_IR_antigrav          = file["M_F_IR_History_antigrav_direction"]
         dset_M_F_IR_antigrav[step]    = RT.M_F_IR_antigravity
@@ -709,6 +764,16 @@ function SaveRHDTimeStepHDF5( FileName::String,
 
         dset_Md_simvol                = file["TotalDustMass_History"]
         dset_Md_simvol[step]          = hydrostate.Md_simvol
+
+        # Save total gas pressure force measures: 
+        dset_IntegratedPressureForce                  = file["IntegratedPressureForce_History"]
+        dset_IntegratedPressureForce[step]            = hydrostate.IntegratedPressureForce
+
+        dset_IntegratedPressureForce_radial_net       = file["IntegratedPressureForce_radial_net_History"]
+        dset_IntegratedPressureForce_radial_net[step] = hydrostate.IntegratedPressureForce_radial_net
+
+        dset_IntegratedPressureForce_radial_out       = file["IntegratedPressureForce_radial_out_History"]
+        dset_IntegratedPressureForce_radial_out[step] = hydrostate.IntegratedPressureForce_radial_out
 
         ###############################################################
         #######                                                 #######

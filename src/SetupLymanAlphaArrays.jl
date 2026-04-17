@@ -213,6 +213,8 @@ function GenerateLyαArrays( c_Lyα::Float64,
 
     # Force multiplier, Lyα luminosity, Lyα escape fraction:
     M_F::Float64             = 0.0
+    M_F_radial_net::Float64  = 0.0
+    M_F_radial_out::Float64  = 0.0
     M_F_antigravity::Float64 = 0.0
     L_Lyα::Float64           = 0.0
     f_esc_Lyα::Float64       = 0.0
@@ -226,7 +228,8 @@ function GenerateLyαArrays( c_Lyα::Float64,
                       a, ΔνD, inv_ΔνD,
                       kcore_min, kcore_max,
                       Recoil, LyαDestruction, α_Lyα_floor, Δρu_Lyα_r, Δρu_Lyα_Z, f_Lyα_r, f_Lyα_Z,
-                      M_F, M_F_antigravity, L_Lyα, f_esc_Lyα,
+                      M_F, M_F_radial_net, M_F_radial_out, M_F_antigravity, 
+                      L_Lyα, f_esc_Lyα,
                       N_ν, dN_ν, dN_ν_int )
 end
 
@@ -259,6 +262,10 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
     δν  = ν  .- νLyα
     δνC = νC .- νLyα
 
+    # Store 1 / Δν and 1 / νC, since it is used in frequency factor calculations:
+    inv_Δν = 1 ./ Δν
+    inv_νC = 1 ./ νC
+
     # Voigt parameter and Doppler widths, and its inverse, for each cell:
     a        = zeros( Float64, N_r, N_Z )
     ΔνD      = zeros( Float64, N_r, N_Z )
@@ -270,13 +277,17 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
 
     # Get Voigt profile for each cell:
     Hvoigt = zeros( N_r, N_Z, N_ν )                 # Initialize Hvoigt
-    Update_Hvoigt!( Hvoigt, δν, δνC, a, inv_Δν_D )  # Compute & fill the array with values
+    Update_Hvoigt!( Hvoigt, δν, δνC, a, inv_ΔνD )   # Compute & fill the array with values
 
     # Save ~ core region for 3 × 10⁴ K, for fall-back use in advection,
     # where only "active" bins are advected:
     Δν_D3e4   = (Compute_b(3e4) / c) * νLyα 
     kcore_min = findfirst( ≥(νLyα - 4 * Δν_D3e4), νC )
     kcore_max = findlast( ≤(νLyα + 4 * Δν_D3e4), νC )
+
+    # Save dN_ν = 1:N_ν and dN_ν_int = 2:(N_ν-1) that are often called:
+    dN_ν      = 1:N_ν
+    dN_ν_int  = 2:(N_ν-1)
 
     ###############################################################
     #######                                                 #######
@@ -356,6 +367,8 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
 
     # Force multiplier, Lyα luminosity, and Lyα escape fraction:
     M_F::Float64             = 0.0
+    M_F_radial_net::Float64  = 0.0
+    M_F_radial_out::Float64  = 0.0
     M_F_antigravity::Float64 = 0.0
     L_Lyα::Float64           = 0.0
     f_esc_Lyα::Float64       = 0.0
@@ -365,8 +378,11 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
                       D_rr_Lyα, D_ZZ_Lyα, D_rZ_Lyα, K_ϕϕ_iphalf_Lyα, K_ϕϕ_imhalf_Lyα, 
                       F_r_Lyα, F_Z_Lyα, F_r_Hr_Lyα, F_Z_Hr_Lyα, F_r_HZ_Lyα, F_Z_HZ_Lyα, 
                       α_Lyα, α_F_Lyα, αc_Lyα, pd, ∫dν_js_Lyα, Hvoigt, ϕ_ν, Fij_kp, Fij_k, Fij_km, 
-                      ν, νC, Δν, kcore_min, kcore_max,
+                      ν, νC, Δν, δν, δνC, inv_Δν, inv_νC, 
+                      a, ΔνD, inv_ΔνD,
+                      kcore_min, kcore_max,
                       Recoil, LyαDestruction, α_Lyα_floor, Δρu_Lyα_r, Δρu_Lyα_Z, f_Lyα_r, f_Lyα_Z,
-                      M_F, M_F_antigravity, L_Lyα, f_esc_Lyα )
-
+                      M_F, M_F_radial_net, M_F_radial_out, M_F_antigravity, 
+                      L_Lyα, f_esc_Lyα,
+                      N_ν, dN_ν, dN_ν_int )
 end

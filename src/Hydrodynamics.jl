@@ -21,7 +21,8 @@
     """
 
 
-using .Structs: HydrodynamicsState, GhostPaddedGrid, GravityState, GravityCoeffs
+using .Structs: HydrodynamicsState, GhostPaddedGrid, 
+                GravityState, GravityCoeffs, GeometryCylindrical
 
 using .ConstantsAndFunctions # Needed constants 
 using Base.Threads           # For CPU acceleration
@@ -31,7 +32,7 @@ using Printf
 export GetPrimitive, GetCFLTimeStep, UpdateTotalDustDensity!,
        GetGravityTimeStep, GetRadPressureTimeStep, Getγad, Getμ, UpdateHydro!, 
        GravitySolveAndKick!, GravityKick!, UpdateTotalMass!, UpdateGasVelocityDispersion!, 
-       GenerateHydroArrays
+       UpdateIntegratedPressureForces!, GenerateHydroArrays
 
 ###############################################################
 #######                                                 #######
@@ -56,7 +57,7 @@ const P_floor::Float64      =  1e-30                 # Gas pressure floor       
 const e_dual_floor::Float64 =  P_floor / (γmon - 1)  # Floor for the dual internal energy density
 const DEBUG_Hydro::Bool     =  false                 # Checks for non-physical values & errors, on if true      (default: true)
 
-export CFL, C_Grav, C_RP, ρ_floor, ρd_floor, ρd_IGNORE, DG_th, P_floor, γmon, γdia  
+export CFL, C_Grav, ρ_floor, ρd_floor, ρd_IGNORE, DG_th, P_floor, γmon, γdia  
 
 
 ###############################################################
@@ -2990,7 +2991,9 @@ end
     - F_ρv (transverse momentum)
     - F_E  (energy) 
 
-    Also returns the contact speed, and wave speeds. """
+    Also returns the contact speed, wave speeds, and 
+    interface pressure (i.e. consistent with the 
+    HLL Riemann solver). """
 function GetFlux_HLL( ρ_L::Float64, 
                       ρ_R::Float64, 
                       u_L::Float64, 
@@ -3048,12 +3051,18 @@ function GetFlux_HLL( ρ_L::Float64,
         F_ρu = F_ρu_L 
         F_ρv = F_ρv_L
         F_E  = F_E_L
+
+        # Interface pressure that the Riemann solver sees is just P_L:
+        P_interface = P_L 
     elseif S_R ≤ 0.0
         # In this case, all waves move left, so use right state fluxes:
         F_ρ  = F_ρ_R
         F_ρu = F_ρu_R 
         F_ρv = F_ρv_R
         F_E  = F_E_R 
+
+        # Interface pressure that the Riemann solver sees is just P_R:
+        P_interface = P_R 
     else
         # In this case we have a mixed case, and use the HLL formula:
         inv_denom = 1 / ( S_R  -  S_L )
@@ -3061,6 +3070,12 @@ function GetFlux_HLL( ρ_L::Float64,
         F_ρu      = ( S_R * F_ρu_L - S_L * F_ρu_R + S_L * S_R * (ρu_R - ρu_L) ) * inv_denom
         F_ρv      = ( S_R * F_ρv_L - S_L * F_ρv_R + S_L * S_R * (ρv_R - ρv_L) ) * inv_denom
         F_E       = ( S_R * F_E_L  - S_L * F_E_R  + S_L * S_R * (E_R - E_L)   ) * inv_denom
+
+        # Interface pressure associated with the intermediate/middle HLL state:
+        ρ_M         = ( S_R * ρ_R   -  S_L * ρ_L   -  (F_ρ_R - F_ρ_L)   ) * inv_denom
+        ρu_M        = ( S_R * ρu_R  -  S_L * ρu_L  -  (F_ρu_R - F_ρu_L) ) * inv_denom
+        u_M         = ρu_M / ρ_M
+        P_interface = F_ρu  -  F_ρ * u_M 
     end
 
     # Estimate wave speed in star region (contact speed). This is not needed in 
@@ -3079,7 +3094,7 @@ function GetFlux_HLL( ρ_L::Float64,
 
     S_star = clamp( S_star, S_L, S_R ) 
 
-    return F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R
+    return F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R, P_interface
 end
 
 
@@ -3091,7 +3106,9 @@ end
     - F_ρv (transverse momentum)
     - F_E  (energy) 
 
-    Also returns the contact speed, and wave speeds. """
+    Also returns the contact speed, wave speeds, and 
+    interface pressure (i.e. consistent with the HLLC 
+    Riemann solver). """
 function GetFlux_HLLC( ρ_L::Float64, 
                        ρ_R::Float64, 
                        u_L::Float64, 
@@ -3170,12 +3187,18 @@ function GetFlux_HLLC( ρ_L::Float64,
         F_ρv = F_ρv_L
         F_E  = F_E_L
 
+        # Interface pressure that the Riemann solver sees is just P_L:
+        P_interface = P_L 
+
     elseif S_R ≤ 0.0
         # In this case, all waves move left, so use right state fluxes:
         F_ρ  = F_ρ_R
         F_ρu = F_ρu_R 
         F_ρv = F_ρv_R
         F_E  = F_E_R 
+
+        # Interface pressure that the Riemann solver sees is just P_R:
+        P_interface = P_R
 
     elseif S_L ≤ 0.0 && S_star ≥ 0.0
         # Get relevant quantities in the left star state:
@@ -3191,6 +3214,9 @@ function GetFlux_HLLC( ρ_L::Float64,
         F_ρv      = S_L * ( ρv_L_star - ρv_L)   +  F_ρv_L
         F_E       = S_L * ( E_L_star  - E_L )   +  F_E_L
 
+        # Interface pressure in the star region that the Riemann solver sees:
+        P_interface = P_L  +  ρ_L * (S_L - u_L) * (S_star - u_L)
+
     else # (In this case we have the F_star_R fluxes)
         # Get relevant quantities in the right star state:
         α_star_R  = ρ_R * ( S_R - u_R ) / ( S_R - S_star )
@@ -3204,6 +3230,9 @@ function GetFlux_HLLC( ρ_L::Float64,
         F_ρu      = S_R * ( ρu_R_star - ρu_R )  +  F_ρu_R
         F_ρv      = S_R * ( ρv_R_star - ρv_R )  +  F_ρv_R
         F_E       = S_R * ( E_R_star - E_R )    +  F_E_R 
+
+        # Interface pressure in the star region that the Riemann solver sees:
+        P_interface = P_R  +  ρ_R * (S_R - u_R) * (S_star - u_R)
     end
 
     # Make a final check that the fluxes are finite. If not, fall back 
@@ -3212,7 +3241,7 @@ function GetFlux_HLLC( ρ_L::Float64,
         return GetFlux_HLL( ρ_L, ρ_R, u_L, u_R, v_L, v_R, P_L, P_R, γad_L, γad_R )
     end
 
-    return F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R
+    return F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R, P_interface
 end
 
 
@@ -3382,16 +3411,16 @@ end
     if max( Shock_L, Shock_R ) ≥ Shock_HLL 
         # In this case we have a significant shock, and revert to the HLL 
         # flux function to avoid e.g. the carbuncle instability:
-        F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R = GetFlux_HLL( ρ_L, ρ_R, u_L, u_R, v_L, v_R, P_L, P_R, γad_L, γad_R )
+        F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R, P_interface = GetFlux_HLL( ρ_L, ρ_R, u_L, u_R, v_L, v_R, P_L, P_R, γad_L, γad_R )
     else
         # If we don't have a significant shock, we stick to the HLLC flux function: 
-        F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R = GetFlux_HLLC( ρ_L, ρ_R, u_L, u_R, v_L, v_R, P_L, P_R, γad_L, γad_R )
+        F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R, P_interface = GetFlux_HLLC( ρ_L, ρ_R, u_L, u_R, v_L, v_R, P_L, P_R, γad_L, γad_R )
     end
 
     # Flux for dual energy:
     F_e_dual = GetUpwindFlux_e_dual(e_dual_L, e_dual_R, S_star)
 
-    return F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R, F_e_dual
+    return F_ρ, F_ρu, F_ρv, F_E, S_star, S_L, S_R, F_e_dual, P_interface
 end
 
 
@@ -3459,6 +3488,7 @@ function ComputeFlux_X!( F_ρ_X::AbstractMatrix{Float64},
                          P_R_X::AbstractMatrix{Float64},
                     e_dual_L_X::AbstractMatrix{Float64}, 
                     e_dual_R_X::AbstractMatrix{Float64},
+                 P_interface_X::AbstractMatrix{Float64},
 
                         F_ρd_X::AbstractArray{Float64, 3}, 
                     F_ρdud_X_X::AbstractArray{Float64, 3}, 
@@ -3505,8 +3535,9 @@ function ComputeFlux_X!( F_ρ_X::AbstractMatrix{Float64},
 
                 # Get gas interface fluxes & wave speeds:
                 F_ρ_X[i,j], F_ρu_X_X[i,j], F_ρu_Y_X[i,j], F_E_X[i,j],
-                u_X_star_X[i,j], S_L, S_R, F_e_dual_X[i,j] = GetFlux_Gas( ρL, ρR, uXL, uXR, vL, vR, PL, PR, γL, γR,
-                                                                          eL, eR, Shock_L, Shock_R )
+                u_X_star_X[i,j], S_L, S_R, F_e_dual_X[i,j], 
+                P_interface_X[i,j] = GetFlux_Gas( ρL, ρR, uXL, uXR, vL, vR, PL, PR, γL, γR,
+                                                  eL, eR, Shock_L, Shock_R )
 
                 ##########################################
                 #######                            #######
@@ -3549,6 +3580,7 @@ function ComputeFlux_Y!( F_ρ_Y::AbstractMatrix{Float64},
                          P_R_Y::AbstractMatrix{Float64},
                     e_dual_L_Y::AbstractMatrix{Float64}, 
                     e_dual_R_Y::AbstractMatrix{Float64},
+                 P_interface_Y::AbstractMatrix{Float64},
 
                         F_ρd_Y::AbstractArray{Float64, 3}, 
                     F_ρdud_X_Y::AbstractArray{Float64, 3}, 
@@ -3596,8 +3628,9 @@ function ComputeFlux_Y!( F_ρ_Y::AbstractMatrix{Float64},
                 # Get gas interface fluxes & wave speeds:
                 F_ρ_Y[i,j], F_ρu_Y_Y[i,j], F_ρu_X_Y[i,j], F_E_Y[i,j], 
                 u_Y_star_Y[i,j], S_L, S_R, 
-                F_e_dual_Y[i,j] = GetFlux_Gas( ρL, ρR, uL, uR, vL, vR, PL, PR, γL, γR, eL, eR, 
-                                               Shock_L, Shock_R )
+                F_e_dual_Y[i,j], 
+                P_interface_Y[i,j] = GetFlux_Gas( ρL, ρR, uL, uR, vL, vR, PL, PR, γL, γR, eL, eR, 
+                                                  Shock_L, Shock_R )
 
                 ##########################################
                 #######                            #######
@@ -3953,7 +3986,7 @@ function UpdateConserved!( ρ::AbstractMatrix{Float64},
                 S_ρu_Y    = 0.0 
                 # Momentum source term in the X-direction (i.e. r-direction) in cylindrical coordinates: 
                 P_imhalf  = P_R_X[i,j]   # P_{i-1/2} from right, i.e. cell i 
-                P_iphalf  = P_L_X[i+1,j] # P_{i+1/2} from left, i.e. cell i 
+                P_iphalf  = P_L_X[i+1,j] # P_{i+1/2} from left, i.e. cell i  
                 S_ρu_X    = ( γ̂_minus * P_imhalf  +  γ̂ * Pc[i,j]  +  γ̂_plus * P_iphalf ) * inv_r_cell[i]
 
                 S_ρdud_X  = 0.0  # No dust pressure, hence no geometric source term
@@ -4165,6 +4198,11 @@ function ForwardEuler!( ρ_new::AbstractMatrix{Float64},
 
                         # Gas pressure (cell-averaged):
                             P::AbstractMatrix{Float64},
+
+                        # Gas pressure at interfaces 
+                        # obtained from Riemann solver:
+                P_interface_X::AbstractMatrix{Float64},
+                P_interface_Y::AbstractMatrix{Float64},
                                        
                         # Ghost‐padded primitives & grid:
                        ρg_old::AbstractMatrix{Float64}, 
@@ -4265,7 +4303,7 @@ function ForwardEuler!( ρ_new::AbstractMatrix{Float64},
     ComputeFlux_X!( F_ρ_X, F_ρu_X_X, F_ρu_Y_X, F_E_X, F_e_dual_X,
                     ρ_L_X, ρ_R_X, u_X_L_X, u_X_R_X,
                     u_Y_L_X, u_Y_R_X, P_L_X, P_R_X,
-                    e_dual_L_X, e_dual_R_X,
+                    e_dual_L_X, e_dual_R_X, P_interface_X,
 
                     F_ρd_X, F_ρdud_X_X, F_ρdud_Y_X, 
                     ρd_L_X, ρd_R_X, ud_X_L_X, ud_X_R_X,
@@ -4340,7 +4378,7 @@ function ForwardEuler!( ρ_new::AbstractMatrix{Float64},
                     F_e_dual_Y,
                     ρ_L_Y, ρ_R_Y, u_Y_L_Y, u_Y_R_Y,
                     u_X_L_Y, u_X_R_Y, P_L_Y, P_R_Y,
-                    e_dual_L_Y, e_dual_R_Y,
+                    e_dual_L_Y, e_dual_R_Y, P_interface_Y,
 
                     F_ρd_Y, F_ρdud_X_Y, F_ρdud_Y_Y, 
                     ρd_L_Y, ρd_R_Y, ud_Y_L_Y, ud_Y_R_Y,
@@ -4565,6 +4603,9 @@ function UpdateHydro!( Δt::Float64,
 
                    # Gas pressure (cell-averaged):
                    Hydro.P,
+
+                   # Gas pressure at interfaces obtained from Riemann solver:
+                   Hydro.P_interface_X, Hydro.P_interface_Y,
                                        
                    # Ghost‐padded primitives & grid:
                    Hydro.ρg_old, Hydro.u_Xg_old, Hydro.u_Yg_old, Hydro.Pg_old, Hydro.e_dualg_old,
@@ -4589,6 +4630,14 @@ function UpdateHydro!( Δt::Float64,
 
     @. Hydro.ρ_save      = Hydro.ρ        # Save density from after step 1 (before we update ρ), needed for scalar advection
     @. Hydro.Scalars_old = Hydro.Scalars  # Also store updated old state for the next stage 
+
+    # Finally, save gas pressure at cell interfaces from Riemann solver, e.g. P_{i+1/2}, for 
+    # use in diagnostics of gas pressure forces:
+    @. Hydro.P_interface_X_snapshot = Hydro.P_interface_X
+    @. Hydro.P_interface_Y_snapshot = Hydro.P_interface_Y
+
+    # NOTE: We save the interface P here, because they represent interface P at step n, 
+    # whereas the later RK stages below are not physically relevant. 
 
     ###########################################################################################
     #######                                                                             #######
@@ -4641,6 +4690,9 @@ function UpdateHydro!( Δt::Float64,
 
                    # Gas pressure (cell-averaged):
                    Hydro.P,
+
+                   # Gas pressure at interfaces obtained from Riemann solver:
+                   Hydro.P_interface_X, Hydro.P_interface_Y,
                                        
                    # Ghost‐padded primitives & grid:
                    Hydro.ρg_old, Hydro.u_Xg_old, Hydro.u_Yg_old, Hydro.Pg_old, Hydro.e_dualg_old,
@@ -4727,6 +4779,9 @@ function UpdateHydro!( Δt::Float64,
 
                    # Gas pressure (cell-averaged):
                    Hydro.P,
+
+                   # Gas pressure at interfaces obtained from Riemann solver:
+                   Hydro.P_interface_X, Hydro.P_interface_Y,
                                        
                    # Ghost‐padded primitives & grid:
                    Hydro.ρg_old, Hydro.u_Xg_old, Hydro.u_Yg_old, Hydro.Pg_old, Hydro.e_dualg_old,
@@ -5113,6 +5168,189 @@ end
 end
 
 
+""" This function updates the estimates of the volume-integrated 
+    gas pressure force. This is useful to quantify the effect of 
+    photoionization feedback. This function computes & stores:
+
+    F_P            = ∫dV |- ∇P|
+    F_P_radial_net = ∫dV ( - ∇P ⋅ r̂_out )
+    F_P_radial_out = ∫dV max( - ∇P ⋅ r̂_out, 0.0 )
+    
+    The gradient of P is estimated using a finite difference formula. 
+    
+    NOTE: This function assumes cylindrical 
+    coordinates, since it is tailored for RHD simulations. """
+function UpdateIntegratedPressureForces!( HydroState::HydrodynamicsState, 
+                                                Geom::GeometryCylindrical,
+                                            Z_center::Float64 )
+
+    # Unpack needed arrays: 
+    P_interface_X = HydroState.P_interface_X_snapshot
+    P_interface_Y = HydroState.P_interface_Y_snapshot
+    r             = Geom.r
+    rCoM          = Geom.rCoM 
+    Z             = Geom.Z
+    ZCoM          = Geom.ZCoM
+    ΔV            = Geom.ΔV
+
+    # Grid size & intervals:
+    N_r, N_Z      = size( ΔV )
+    dN_r          = 1:N_r 
+    dN_Z          = 1:N_Z 
+
+    ∫dV_magnitude∇P        = 0.0  # Initialize ∫dV |- ∇P|
+    ∫dV_minus∇P_radial_net = 0.0  # Initialize ∫dV ( - ∇P ⋅ r̂_out )
+    ∫dV_minus∇P_radial_out = 0.0  # Initialize ∫dV max( - ∇P ⋅ r̂_out, 0.0 )
+    for j in dN_Z 
+        @inbounds @simd for i in dN_r
+
+            P_iphalf = P_interface_X[i+1,j]
+            P_imhalf = P_interface_X[i,j]
+            P_jphalf = P_interface_Y[i,j+1]
+            P_jmhalf = P_interface_Y[i,j]
+
+            ∂P∂r = ( P_iphalf - P_imhalf ) / ( r[i+1] - r[i] )
+            ∂P∂Z = ( P_jphalf - P_jmhalf ) / ( Z[j+1] - Z[j] )
+
+            # Distance from star/cloud center:
+            δr       = rCoM[i]
+            δZ       = ZCoM[j] - Z_center
+            distance = @fastmath sqrt( δr * δr  +  δZ * δZ )
+
+            # Radial unit vector pointing from star/cloud center:
+            if distance > 0.0
+                inv_d    = @fastmath 1.0 / distance
+                e_out_r  = @fastmath δr * inv_d
+                e_out_Z  = @fastmath δZ * inv_d
+            else
+                e_out_r  = 0.0
+                e_out_Z  = 0.0
+            end
+
+            # Add contribution to the total pressure forces from cell (i,j):
+            ∫dV_magnitude∇P        += @fastmath ΔV[i,j] * sqrt( ∂P∂r * ∂P∂r  +  ∂P∂Z * ∂P∂Z )
+            ∫dV_minus∇P_radial_net += @fastmath ΔV[i,j] * ( - ∂P∂r * e_out_r  - ∂P∂Z * e_out_Z )
+            ∫dV_minus∇P_radial_out += ΔV[i,j] * max( - ∂P∂r * e_out_r  - ∂P∂Z * e_out_Z, 0.0 )
+        end
+    end
+
+    # If mirror/reflective BCs are used at Z = 0, we need to multiply by 2 to get 
+    # the total force on the cloud:
+    if HydroState.BC_Y_left === :Reflect
+        ∫dV_magnitude∇P        *= 2.0
+        ∫dV_minus∇P_radial_net *= 2.0
+        ∫dV_minus∇P_radial_out *= 2.0
+    end
+
+    # Save result in hydro struct:
+    HydroState.IntegratedPressureForce            = ∫dV_magnitude∇P
+    HydroState.IntegratedPressureForce_radial_net = ∫dV_minus∇P_radial_net
+    HydroState.IntegratedPressureForce_radial_out = ∫dV_minus∇P_radial_out
+
+    return nothing 
+end
+
+
+""" This function updates the estimates of the volume-integrated 
+    gas pressure force. This is useful to quantify the effect of 
+    photoionization feedback. This function computes & stores:
+
+    F_P            = ∫dV |- ∇P|
+    F_P_radial_net = ∫dV ( - ∇P ⋅ r̂_out )
+    F_P_radial_out = ∫dV max( - ∇P ⋅ r̂_out, 0.0 )
+    F_P_antigrav   = ∫dV ( - ∇P) ⋅ (- â_grav)
+    
+    The gradient of P is estimated using a finite difference formula. 
+    
+    NOTE: This function assumes cylindrical 
+    coordinates, since it is tailored for RHD simulations. """
+function UpdateIntegratedPressureForces!( HydroState::HydrodynamicsState, 
+                                                Geom::GeometryCylindrical,
+                                           GravState::GravityState,
+                                            Z_center::Float64 )
+
+    # Unpack needed arrays: 
+    P_interface_X = HydroState.P_interface_X_snapshot
+    P_interface_Y = HydroState.P_interface_Y_snapshot
+    r             = Geom.r
+    rCoM          = Geom.rCoM 
+    Z             = Geom.Z
+    ZCoM          = Geom.ZCoM
+    ΔV            = Geom.ΔV
+    f_grav_r      = GravState.f_gravity_r
+    f_grav_Z      = GravState.f_gravity_Z
+
+    # Grid size & intervals:
+    N_r, N_Z      = size( ΔV )
+    dN_r          = 1:N_r 
+    dN_Z          = 1:N_Z 
+
+    ∫dV_magnitude∇P        = 0.0  # Initialize ∫dV |- ∇P|
+    ∫dV_minus∇P_radial_net = 0.0  # Initialize ∫dV ( - ∇P ⋅ r̂_out )
+    ∫dV_minus∇P_radial_out = 0.0  # Initialize ∫dV max( - ∇P ⋅ r̂_out, 0.0 )
+    ∫dV_minus∇P_antigrav   = 0.0  # Initialize ∫dV ( - ∇P) ⋅ (- â_grav)
+    for j in dN_Z 
+        @inbounds @simd for i in dN_r
+            P_iphalf = P_interface_X[i+1,j]
+            P_imhalf = P_interface_X[i,j]
+            P_jphalf = P_interface_Y[i,j+1]
+            P_jmhalf = P_interface_Y[i,j]
+
+            ∂P∂r = ( P_iphalf - P_imhalf ) / ( r[i+1] - r[i] )
+            ∂P∂Z = ( P_jphalf - P_jmhalf ) / ( Z[j+1] - Z[j] )
+
+            # Distance from star/cloud center:
+            δr       = rCoM[i]
+            δZ       = ZCoM[j] - Z_center
+            distance = @fastmath sqrt( δr * δr  +  δZ * δZ )
+
+            # Radial unit vector pointing from star/cloud center:
+            if distance > 0.0
+                inv_d    = @fastmath 1.0 / distance
+                e_out_r  = @fastmath δr * inv_d
+                e_out_Z  = @fastmath δZ * inv_d
+            else
+                e_out_r  = 0.0
+                e_out_Z  = 0.0
+            end
+
+            # Magnitude of gravitatonal force:
+            f_grav_mag = @fastmath sqrt( f_grav_r[i,j] * f_grav_r[i,j]  +  f_grav_Z[i,j] * f_grav_Z[i,j] )
+
+            if f_grav_mag > 0.0 
+                # Pressure force (per unit volume) anti-parallel to direction of gravity (note that 
+                # minus signs cancel):
+                f_P_antiparallel = @fastmath ( ∂P∂r * f_grav_r[i,j]  +  ∂P∂Z * f_grav_Z[i,j] ) / f_grav_mag
+            else
+                # In regions without gravity, just set the force component to zero: 
+                f_P_antiparallel = 0.0
+            end
+
+            # Add contribution to the total pressure forces from cell (i,j):
+            ∫dV_magnitude∇P        += @fastmath ΔV[i,j] * sqrt( ∂P∂r * ∂P∂r  +  ∂P∂Z * ∂P∂Z )
+            ∫dV_minus∇P_radial_net += @fastmath ΔV[i,j] * ( - ∂P∂r * e_out_r  - ∂P∂Z * e_out_Z )
+            ∫dV_minus∇P_radial_out += ΔV[i,j] * max( - ∂P∂r * e_out_r  - ∂P∂Z * e_out_Z, 0.0 )
+            ∫dV_minus∇P_antigrav   += @fastmath ΔV[i,j] * f_P_antiparallel
+        end
+    end
+
+    # If mirror/reflective BCs are used at Z = 0, we need to multiply by 2 to get 
+    # the total force on the cloud:
+    if HydroState.BC_Y_left === :Reflect
+        ∫dV_magnitude∇P        *= 2.0
+        ∫dV_minus∇P_radial_net *= 2.0
+        ∫dV_minus∇P_radial_out *= 2.0
+    end
+
+    # Save result in hydro struct:
+    HydroState.IntegratedPressureForce            = ∫dV_magnitude∇P
+    HydroState.IntegratedPressureForce_radial_net = ∫dV_minus∇P_radial_net
+    HydroState.IntegratedPressureForce_radial_out = ∫dV_minus∇P_radial_out
+    HydroState.IntegratedPressureForce_antigrav   = ∫dV_minus∇P_antigrav
+
+    return nothing 
+end
+
 
 """ Initialize all the hydro arrays (cell-centered, interface,
     slope and flux) for an (X, Y) grid.  """
@@ -5121,8 +5359,8 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
                               Y::AbstractVector{Float64},   
                            YCoM::AbstractVector{Float64},
                               γ::Float64 = γmon,
-                         N_dust::Int     = 2,
-                      N_Scalars::Int     = 6,
+                         N_dust::Int     = 3,
+                      N_Scalars::Int     = 18,
                       BC_X_left::Symbol  = :Reflect,
                      BC_X_right::Symbol  = :Outflow,
                       BC_Y_left::Symbol  = :Reflect, 
@@ -5410,6 +5648,12 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
     σ_Y = 0.0
     σ   = 0.0
 
+    # Gas pressure force diagnostics (only relevant for RHD simulations):
+    IntegratedPressureForce            = 0.0
+    IntegratedPressureForce_radial_net = 0.0
+    IntegratedPressureForce_radial_out = 0.0
+    IntegratedPressureForce_antigrav   = 0.0
+
     # Arrays needed for advection of passive scalars:
     Scalars       = zeros(Float64, N_X, N_Y, N_Scalars)
     Scalars_old   = zeros(Float64, N_X, N_Y, N_Scalars)
@@ -5418,6 +5662,12 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
 
     # Total dust density:
     ρdtot = zeros(Float64, N_X, N_Y)
+
+    # Pressure at interfaces obtained from Riemann solver (N_X + 1 × N_Y and N_X × N_Y + 1):
+    P_interface_X          = zeros(Float64, N_X+1, N_Y)
+    P_interface_Y          = zeros(Float64, N_X, N_Y+1)
+    P_interface_X_snapshot = zeros(Float64, N_X+1, N_Y)
+    P_interface_Y_snapshot = zeros(Float64, N_X, N_Y+1)
 
     # Create structs:
     hydrostate = HydrodynamicsState( N_dust, 
@@ -5453,7 +5703,15 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
                                      ρdtot,
                                      M_simvol, Md_simvol,
                                      
-                                     σ_X, σ_Y, σ )
+                                     σ_X, σ_Y, σ, 
+                                     
+                                     IntegratedPressureForce, 
+                                     IntegratedPressureForce_radial_net,
+                                     IntegratedPressureForce_radial_out,
+                                     IntegratedPressureForce_antigrav,
+                                     
+                                     P_interface_X, P_interface_Y,
+                                     P_interface_X_snapshot, P_interface_Y_snapshot )
 
     ghostgrid  = GhostPaddedGrid( Xg, XCoMg, Yg, YCoMg )
   

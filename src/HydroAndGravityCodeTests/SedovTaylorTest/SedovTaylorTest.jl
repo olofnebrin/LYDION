@@ -28,32 +28,6 @@ function UpdateSedovTest!( Δt_Hydro::Float64,
                           ghostgrid::GhostPaddedGrid{Float64}
                           )
 
-    # Geometry arrays:
-    inv_ΔV      = geometry.inv_ΔV
-    A_r         = geometry.A_r
-    A_Z         = geometry.A_Z
-    inv_r_cell  = geometry.inv_r_cell
-
-    # Weights for converting between cell center & cell-average values of 
-    # conservatives & primitives:
-    w_i_m1_r    = geometry.w_i_m1_r;     w_j_m1_Z     = geometry.w_j_m1_Z
-    w_i_0_r     = geometry.w_i_0_r;      w_j_0_Z      = geometry.w_j_0_Z
-    w_i_p1_r    = geometry.w_i_p1_r;     w_j_p1_Z     = geometry.w_j_p1_Z
-
-    q_i_m1_r    = geometry.q_i_m1_r;     q_j_m1_Z     = geometry.q_j_m1_Z
-    q_i_0_r     = geometry.q_i_0_r;      q_j_0_Z      = geometry.q_j_0_Z
-    q_i_p1_r    = geometry.q_i_p1_r;     q_j_p1_Z     = geometry.q_j_p1_Z
-
-    # WENO3 weights for interface reconstruction:
-    w_plus_i_p1 = geometry.w_plus_i_p1;  w_minus_i_p1 = geometry.w_minus_i_p1   
-    w_plus_j_p1 = geometry.w_plus_j_p1;  w_minus_j_p1 = geometry.w_minus_j_p1
-
-    # MonCen:
-    cF_r = geometry.cF_r 
-    cB_r = geometry.cB_r 
-    cF_Z = geometry.cF_Z 
-    cB_Z = geometry.cB_Z 
-
     # Hydro state arrays (cell-averaged):
     ρ           = hydrostate.ρ;        ρu_r        = hydrostate.ρu_X 
     ρu_Z        = hydrostate.ρu_Y;     E           = hydrostate.E
@@ -73,14 +47,7 @@ function UpdateSedovTest!( Δt_Hydro::Float64,
     ###############################################################
 
     # Update hydro variables by advection:
-    UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, inv_ΔV, A_r, A_Z, 
-
-                 w_i_m1_r, w_i_0_r, w_i_p1_r, w_j_m1_Z, w_j_0_Z, w_j_p1_Z, 
-                 q_i_m1_r, q_i_0_r, q_i_p1_r, q_j_m1_Z, q_j_0_Z, q_j_p1_Z,  
-
-                 w_plus_i_p1, w_minus_i_p1,  w_plus_j_p1, w_minus_j_p1,
-
-                 Val(:Cylindrical), inv_r_cell, cF_r, cB_r, cF_Z, cB_Z )  
+    UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, geometry )  
 
     # Update primitives to reflect latest conservatives,
     # so that we can set the CFL time-step for the scalar advection:
@@ -149,11 +116,14 @@ function SetupSedovTaylorTest( ρ₀::Float64,
         print("\r\033[KInitialising hydro arrays..."); flush(stdout)
     end 
 
-    # We have no passive scalars:
+    # We have no passive scalars, and we set # of dust bins to minimum 
+    # value (1):
     N_Scalars = 0
+    N_dust    = 1
 
     # Set up hydro state + ghost grid arrays:
-    hydrostate, ghostgrid = GenerateHydroArrays( r, rCoM, Z, ZCoM, γ, N_Scalars,
+    hydrostate, ghostgrid = GenerateHydroArrays( r, rCoM, Z, ZCoM, γ, 
+                                                 N_dust, N_Scalars,
                                                  :Reflect, :Reflect,
                                                  :Reflect, :Reflect )
 
@@ -191,11 +161,11 @@ function SetupSedovTaylorTest( ρ₀::Float64,
             @inbounds begin
 
                 # Initial gas density & adiabatic index:
-                ρ[i,j]   = ρ₀
-                γad[i,j] = γ
+                ρ[i,j]    = ρ₀
+                γad[i,j]  = γ
 
                 # Set dust density to arbitrary value (it's not coupled to gas):
-                ρd[i,j]  = max( 1e-5 * ρ₀, ρd_floor )
+                ρd[1,i,j] = max( 1e-5 * ρ₀, ρd_floor )
 
                 # Distance from cloud center at the edge of this cell:
                 R = sqrt( r[i+1] * r[i+1]  +   Z[j+1] * Z[j+1] )
@@ -247,7 +217,7 @@ function SetupSedovTaylorTest( ρ₀::Float64,
     while t < tmax
 
         # Hydro CFL time-step:
-        Δt_CFL = GetCFLTimeStep( r, Z, ρ, P, u_r, u_Z, ud_r, ud_Z, γad )  
+        Δt_CFL = GetCFLTimeStep( hydrostate, geometry )  
 
         # Set hydro time-step:
         Δt_Hydro = min( 1.25 * Δt_Hydro, Δt_CFL, Δt_Resolve, tmax - t )

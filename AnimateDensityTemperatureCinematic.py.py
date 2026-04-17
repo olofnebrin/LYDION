@@ -31,7 +31,7 @@ from PlotCosmetics import (
 
 # ---------------- user inputs ----------------
 #filename    = "RHDSim_NoLya_512x1024_2026-02-10.h5"
-filename    = "RHDSim_NoLya_64x64_2026-02-28.h5"
+filename    = "RHDSim_NoLya_256x512_2026-04-13.h5" 
 frameskip   = 1
 save_mp4    = True
 outname     = "density_temperature_cinematic_2panel.mp4"
@@ -39,29 +39,18 @@ fps         = 20
 dpi         = 300
 
 # view half-size (pc)
-half_pc     = 3
+half_pc     = 1.0
 
 # scale bar
-scalebar_pc = 1.0
+scalebar_pc = 0.5
 
 # dataset convention
-midplane_symmetry = True   # True => center at z=0 ; False => center at z=Zmax/2
+midplane_symmetry = False   # True => center at z=0 ; False => center at z=Zmax/2
 
 # pretty mirroring options
-mirror_r = False           # show ±r
-mirror_z = True            # show ±z
+mirror_r = False            # show ±r
+mirror_z = False            # show ±z
 
-# ---------------------------------------------
-
-# --- norms (set these the way you like) ---
-# Density:
-vmin_nH, vmax_nH = 1e1, 1e5
-norm_nH = LogNorm(vmin=vmin_nH, vmax=vmax_nH, clip=True)
-
-# Temperature (tweak!)
-T_vmin, T_vmax = 1.0, 1e5   # for HII-focused, try (1e3, 2e4) or (3e3, 3e4)
-norm_T = LogNorm(vmin=T_vmin, vmax=T_vmax, clip=True)
-# ------------------------------------------
 
 # constants
 mH  = 1.67e-24
@@ -130,6 +119,49 @@ frames = saved_idx[::frameskip]
 
 # number density (Nt, Nr, Nz)
 nH_hist = X * rho_hist / mH
+
+# ---------------------------------------------
+
+# Density:
+# --- automatic density range ---
+# Use the initial snapshot to define a characteristic initial cloud density,
+# then center the plotted range on that value with ±3 dex.
+
+nH0 = nH_hist[0]
+
+nH0_pos = nH0[nH0 > 0.0]
+if nH0_pos.size == 0:
+    raise ValueError("Initial nH field has no positive values.")
+
+nH0_char = np.max(nH0_pos)
+
+# Density range: 2 dex below and above the initial cloud density
+delta   = 0.4
+vmin_nH = 10.0**(np.log10(nH0_char) - 2.0 - delta)
+vmax_nH = 10.0**(np.log10(nH0_char) + 2.0 - delta)
+norm_nH = LogNorm(vmin=vmin_nH, vmax=vmax_nH)
+
+# Nice colorbar ticks at integer dex
+logmin_nH = int(np.ceil(np.log10(vmin_nH)))
+logmax_nH = int(np.floor(np.log10(vmax_nH)))
+ticks_nH  = 10.0**np.arange(logmin_nH, logmax_nH + 1)
+
+def fmt_log_tick(val):
+    exp = int(np.round(np.log10(val)))
+    if exp == -1:
+        return '0.1'
+    elif exp == 0:
+        return '1'
+    elif exp == 1:
+        return '10'
+    else:
+        return f'10$^{{{exp}}}$'
+
+ticklabels_nH = [fmt_log_tick(v) for v in ticks_nH]
+
+# Temperature:
+T_vmin, T_vmax = 1.0, 1e5   # for HII-focused, try (1e3, 2e4) or (3e3, 3e4)
+norm_T = LogNorm(vmin=T_vmin, vmax=T_vmax, clip=True)
 
 # edges in pc
 r_edges = r / pc

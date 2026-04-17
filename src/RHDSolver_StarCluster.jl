@@ -1,5 +1,5 @@
 
-module RHDSolver
+module RHDSolver_StarCluster
 
 __precompile__()
 
@@ -31,7 +31,7 @@ include( "PhotoChemistryAndCooling/StellarWinds.jl" )
 include( "./RHD_TimeStep.jl" )
 include( "./AdvectScalars.jl" )
 include( "./Turbulence.jl" )
-include( "./SaveHDF5Data_RHD.jl" )
+include( "./SaveHDF5Data_RHD_StarCluster.jl" )
 
 using  Base.Threads              # For CPU acceleration
 using  ProgressMeter             # To show time step progress
@@ -42,7 +42,7 @@ const N_dust::Int           = 3      # 3 dust bins (Sil, C, PAH)
 const N_passivescalars::Int = 19     # Number of passive scalars (for chemistry etc)
 const BENCHMARK_RHD::Bool   = false  # For benchmarking performance of the RHD update. Off by default.
 
-export SetupRHDsimulation, RestartRHDsimulation
+export SetupRHDsimulation_StarCluster, RestartRHDsimulation_StarCluster
 
 
 
@@ -55,10 +55,7 @@ export SetupRHDsimulation, RestartRHDsimulation
 
     (3) Gravity solver + kick over half-step Δt_Hydro / 2. (If gravity is on)
 
-    (4) Inject stellar wind momentum & mass over full step Δt_Hydro, 
-        if stellar wind feedback is on.
-
-    (5) Sub-cycle radiative transfer of stellar, IR, and Lyα photons (if on)
+    (4) Sub-cycle radiative transfer of stellar, IR, and Lyα photons (if on)
         over steps Δt_RT ≤ Δt_Hydro. And for each Δt_RT, sub-cycle photo-thermo
         chemistry and other stiff source terms (gas heating/cooling, chemistry, 
         dust-gas coupling, ...). 
@@ -76,9 +73,7 @@ function UpdateRHD!( Δt_Hydro::Float64,
                       Gravity::Bool    = true,
                   RadPressure::Bool    = true,
                    IRfeedback::Bool    = true,
-          StellarWindFeedback::Bool    = true,
                             z::Float64 = 0.0,
-                    mstarZAMS::Float64 = 35.0,
                    Zstar_Zsun::Float64 = 1.0,
                         Hydro::Bool    = true,
                CoolingHeating::Bool    = true
@@ -91,6 +86,8 @@ function UpdateRHD!( Δt_Hydro::Float64,
     inv_r_cell  = geometry.inv_r_cell
     r           = geometry.r 
     Z           = geometry.Z
+    rCoM        = geometry.rCoM
+    ZCoM        = geometry.ZCoM
 
     # Some hydro state arrays (cell-averaged):
     ρ           = hydrostate.ρ;        ρu_r        = hydrostate.ρu_X 
@@ -172,14 +169,10 @@ function UpdateRHD!( Δt_Hydro::Float64,
     end
 
     # Inject momentum and mass from stellar winds if turned on:
-    if StellarWindFeedback
-        # Position of star along Z-axis:
-        Zmid = 0.5 * ( Z[1] + Z[end] )
-        Zc   = ifelse( BC_Z_bot === :Reflect, 0.0, Zmid )
 
-        # Inject momentum & mass:
-        InjectStellarWind!( Δt_Hydro, mstarZAMS, Zstar_Zsun, hydrostate, geometry, RT.ρ_star, Zc )
-    end
+    # Position of star along Z-axis (also needed below for radial force multipliers):
+    Zmid = 0.5 * ( Z[1] + Z[end] )
+    Zc   = ifelse( BC_Z_bot === :Reflect, 0.0, Zmid )
 
     @threads for j in dN_Z
         @inbounds @simd for i in dN_r
@@ -302,15 +295,15 @@ function UpdateRHD!( Δt_Hydro::Float64,
     # Update LyC and Lyman-Werner escape fractions (just diagnostics):
     Update_fesc_LyC_and_LW_Cylindrical!( RT, A_r, A_Z, BC_Z_bot )
 
-    # Update IR luminsoity & force diagnostics (just useful for comparing forces after simulation):
+    # Update direct/stellar & IR luminsoity & force diagnostics 
+    # (just useful for comparing forces after simulation):
     if Gravity
-        Update_M_F_IR_L_IR!( RT, ΔV, gravstate, BC_Z_bot )
+        Update_M_F_dir!( RT, geometry, gravstate, Zc )
+        Update_M_F_IR_L_IR!( RT, geometry, gravstate, Zc, BC_Z_bot )
     else
-        Update_M_F_IR_L_IR!( RT, ΔV, BC_Z_bot )
+        Update_M_F_dir!( RT, geometry, Zc )
+        Update_M_F_IR_L_IR!( RT, geometry, Zc, BC_Z_bot )
     end
-
-    # Update direct radiation pressure force diagnostics (just for analyzing after simulation):
-    Update_M_F_dir!( RT, ΔV, BC_Z_bot )
 
     # Update Lyα forces f_Lyα, force multiplier M_F, luminosity L_Lyα, and Lyα escape fraction
     # (all of these mainly for diagnostics):
@@ -318,14 +311,19 @@ function UpdateRHD!( Δt_Hydro::Float64,
         if Gravity
             # If gravity is turned on, we also save force multiplier anti-parallel to gravity:
             LyaState.M_F, LyaState.M_F_antigravity, 
+            LyaState.M_F_radial_net, LyaState.M_F_radial_out,
             LyaState.L_Lyα = Update_f_Lyα_MF_L_Lyα!( LyaState.f_Lyα_r, LyaState.f_Lyα_Z, LyaState.Δρu_Lyα_r, LyaState.Δρu_Lyα_Z, 
-                                                     LyaState.∫dν_js_Lyα, ΔV, Δt_Hydro,
+                                                     LyaState.∫dν_js_Lyα, ΔV, rCoM, ZCoM, Δt_Hydro,
                                                      gravstate.f_gravity_r, gravstate.f_gravity_Z,
+                                                     Zc, # Z-position of star cluster
                                                      BC_Z_bot )
         else
-            LyaState.M_F, LyaState.L_Lyα = Update_f_Lyα_MF_L_Lyα!( LyaState.f_Lyα_r, LyaState.f_Lyα_Z, LyaState.Δρu_Lyα_r, LyaState.Δρu_Lyα_Z, 
-                                                                   LyaState.∫dν_js_Lyα, ΔV, Δt_Hydro,
-                                                                   BC_Z_bot )
+            LyaState.M_F, LyaState.M_F_radial_net, 
+            LyaState.M_F_radial_out, 
+            LyaState.L_Lyα = Update_f_Lyα_MF_L_Lyα!( LyaState.f_Lyα_r, LyaState.f_Lyα_Z, LyaState.Δρu_Lyα_r, LyaState.Δρu_Lyα_Z, 
+                                                     LyaState.∫dν_js_Lyα, ΔV, rCoM, ZCoM, Δt_Hydro,
+                                                     Zc, # Z-position of star cluster
+                                                     BC_Z_bot )
         end
 
         # Save Lyα escape fraction:
@@ -368,80 +366,93 @@ function UpdateRHD!( Δt_Hydro::Float64,
     # Update gas velocity dispersions (useful diagnostic):
     UpdateGasVelocityDispersion!( hydrostate, geometry )
 
+    # Update gas pressure force diagnostics, using the updated pressure
+    # (just useful for comparing forces after simulation):
+    if Gravity
+        UpdateIntegratedPressureForces!( hydrostate, geometry, gravstate, Zc )
+
+        # Update gravity force diagnostics too:
+        UpdateGravityForceDiagnostics!( gravstate, geometry, Zc )
+    else
+        UpdateIntegratedPressureForces!( hydrostate, geometry, Zc )
+    end
+
+    # Update the Lyα dust absorption cross-section per H nucleus for all cells (useful diagnostic):
+    UpdateDustCrossSectionsPerH!( duststate, hydrostate, chemstate )
+
     return nothing
 end
 
 
-""" This function sets up an RHD simulation in cylindrical coordinates, with a star of mass mstarZAMS (M⊙)
+""" This function sets up an RHD simulation in cylindrical coordinates, with a star cluster of mass M_StarCluster (M⊙)
     situated at the center of a cloud with a given initial properties (density, temperature, chemical abundances,
     turbulence, etc.).  """
-function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
-                            Zstar_Zsun::Float64,  # Stellar metallicity Z_star / Z⊙
-                                   DG₀::Float64,  # Dust-to-gas ratio (*not* normalized to Solar value)
-                               nH_core::Float64,  # H density (cm⁻³) inside cloud core 
-                                nH_ext::Float64,  # H density (cm⁻³) far outside cloud 
-                                 Rcore::Float64,  # Radius of 'cloud core', i.e. higher density region
-                                   Rcl::Float64,  # Radius of 'cloud'
-                            σstar_cell::Float64,  # Gaussian σ (in units of cell size) that determines extent of spatially smeared star
-                              Rmax_lin::Float64,
-                            LZ_uniform::Float64,
-                                  Rmax::Float64,
-                                  Zmax::Float64,
-                                    T₀::Float64,  # Temperature within cloud 
-                                 T_ext::Float64,  # Temperature outside cloud 
-                    POWER_LAW_ENVELOPE::Bool,     # Whether to use a power law envelope density profile outside
-                            p_ENVELOPE::Float64,  # Power law for envelope, ρ ∝ r^(-p_ENVELOPE), if used 
-                                  tmax::Float64,
-                                 xHII₀::Float64,  # H II fraction inside the cloud 
-                                  xH2₀::Float64,  # H₂ fraction inside the cloud 
-                                xHeII₀::Float64,  # He II fraction inside the cloud 
-                               xHeIII₀::Float64,  # He III fraction inside the cloud 
-                                 xDII₀::Float64,  # D II fraction inside the cloud 
-                                  xHD₀::Float64,  # HD fraction inside the cloud 
-                                  xCI₀::Float64,
-                                 xCII₀::Float64,
-                                  xCO₀::Float64,
-                                  xOI₀::Float64,
-                                 xOII₀::Float64,
-                              xHII_ext::Float64,  # H II fraction outside the cloud 
-                               xH2_ext::Float64,  # H₂ fraction outside the cloud 
-                             xHeII_ext::Float64,  # He II fraction outside the cloud 
-                            xHeIII_ext::Float64,  # He III fraction outside the cloud 
-                              xDII_ext::Float64,  # D II fraction outside the cloud 
-                               xHD_ext::Float64,  # HD fraction outside the cloud 
-                               xCI_ext::Float64,
-                              xCII_ext::Float64,
-                               xCO_ext::Float64,
-                               xOI_ext::Float64,
-                              xOII_ext::Float64,
-                            Zgas_Zsun₀::Float64,  # Initial gas metallicity in units of Solar metallicity 
-                                     z::Float64,
-                                 Hydro::Bool    = true,     # Hydrodynamics (on/off)
-                                   Lyα::Bool    = true,     # Lyα RT (on/off)
-                                Recoil::Bool    = true,
-                        LyαDestruction::Bool    = true,
-                               Gravity::Bool    = true,
-                           RadPressure::Bool    = true,
-                            IRfeedback::Bool    = true,
-                   StellarWindFeedback::Bool    = false,
-                 DustGrowthDestruction::Bool    = true,     # Dust growth & destruction (on if true, off if false)
-                                   OTS::Bool    = false,    # On-the-spot approximation (on if true, off if false)
-                             u_RMSturb::Float64 = 0.0,      # Initial turbulent RMS velocity 
-                               N_r_lin::Int     = 64,
-                               N_Z_lin::Int     = 64,
-                               N_r_log::Int     = 64,
-                          N_Z_log_side::Int     = 64,
-                            BC_r_right::Symbol  = :Outflow,
-                             BC_Z_left::Symbol  = :Reflect,
-                            BC_Z_right::Symbol  = :Outflow,
-                              SaveData::Bool    = true,
-                             Nminsteps::Int     = 300,
-                             Nmaxsteps::Int     = 100000,
-                                Nsaved::Int     = 300,
-                            print_info::Bool    = true,
-                              FileName::String  = "RHDSim.h5",
-                       FileDescription::String  = "RHD simulation test."
-                             )
+function SetupRHDsimulation_StarCluster( M_StarCluster::Float64,  # Stellar mass of star cluster (M⊙)
+                                            Zstar_Zsun::Float64,  # Stellar metallicity Z_star / Z⊙
+                                       DG₀::Float64,  # Dust-to-gas ratio (*not* normalized to Solar value)
+                                   nH_core::Float64,  # H density (cm⁻³) inside cloud core 
+                                    nH_ext::Float64,  # H density (cm⁻³) far outside cloud 
+                                     Rcore::Float64,  # Radius of 'cloud core', i.e. higher density region
+                                       Rcl::Float64,  # Radius of 'cloud'
+                         Rhalf_StarCluster::Float64,  # Half-mass radius of star cluster (in cm)
+                                  Rmax_lin::Float64,
+                                LZ_uniform::Float64,
+                                      Rmax::Float64,
+                                      Zmax::Float64,
+                                        T₀::Float64,  # Temperature within cloud 
+                                     T_ext::Float64,  # Temperature outside cloud 
+                        POWER_LAW_ENVELOPE::Bool,     # Whether to use a power law envelope density profile outside
+                                p_ENVELOPE::Float64,  # Power law for envelope, ρ ∝ r^(-p_ENVELOPE), if used 
+                                      tmax::Float64,
+                                     xHII₀::Float64,  # H II fraction inside the cloud 
+                                      xH2₀::Float64,  # H₂ fraction inside the cloud 
+                                    xHeII₀::Float64,  # He II fraction inside the cloud 
+                                   xHeIII₀::Float64,  # He III fraction inside the cloud 
+                                     xDII₀::Float64,  # D II fraction inside the cloud 
+                                      xHD₀::Float64,  # HD fraction inside the cloud 
+                                      xCI₀::Float64,
+                                     xCII₀::Float64,
+                                      xCO₀::Float64,
+                                      xOI₀::Float64,
+                                     xOII₀::Float64,
+                                  xHII_ext::Float64,  # H II fraction outside the cloud 
+                                   xH2_ext::Float64,  # H₂ fraction outside the cloud 
+                                 xHeII_ext::Float64,  # He II fraction outside the cloud 
+                                xHeIII_ext::Float64,  # He III fraction outside the cloud 
+                                  xDII_ext::Float64,  # D II fraction outside the cloud 
+                                   xHD_ext::Float64,  # HD fraction outside the cloud 
+                                   xCI_ext::Float64,
+                                  xCII_ext::Float64,
+                                   xCO_ext::Float64,
+                                   xOI_ext::Float64,
+                                  xOII_ext::Float64,
+                                Zgas_Zsun₀::Float64,  # Initial gas metallicity in units of Solar metallicity 
+                                         z::Float64,
+                                     Hydro::Bool    = true,     # Hydrodynamics (on/off)
+                                       Lyα::Bool    = true,     # Lyα RT (on/off)
+                                    Recoil::Bool    = true,
+                            LyαDestruction::Bool    = true,
+                                   Gravity::Bool    = true,
+                               RadPressure::Bool    = true,
+                                IRfeedback::Bool    = true,
+                     DustGrowthDestruction::Bool    = true,     # Dust growth & destruction (on if true, off if false)
+                                       OTS::Bool    = false,    # On-the-spot approximation (on if true, off if false)
+                                 u_RMSturb::Float64 = 0.0,      # Initial turbulent RMS velocity 
+                                   N_r_lin::Int     = 64,
+                                   N_Z_lin::Int     = 64,
+                                   N_r_log::Int     = 64,
+                              N_Z_log_side::Int     = 64,
+                                BC_r_right::Symbol  = :Outflow,
+                                 BC_Z_left::Symbol  = :Reflect,
+                                BC_Z_right::Symbol  = :Outflow,
+                                  SaveData::Bool    = true,
+                                 Nminsteps::Int     = 300,
+                                 Nmaxsteps::Int     = 100000,
+                                    Nsaved::Int     = 300,
+                                print_info::Bool    = true,
+                                  FileName::String  = "RHDSim.h5",
+                           FileDescription::String  = "RHD simulation test."
+                              )
 
     PrintLYDIONLogo()
 
@@ -492,8 +503,9 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
             println(" Data will be saved to HDF5 file: $(FileName). "); flush(stdout)
             println()
         end
-        print(""" Simulation setup: A $(mstarZAMS) M⊙ star in a cloud of 
-                  initial maximum density nH = $(nH_core) cm⁻³, initial metallicity Z/Z⊙ = $(Zgas_Zsun₀),
+        print(""" Simulation setup: A $(M_StarCluster) M⊙ star cluster with half-mass 
+                  radius $(Rhalf_StarCluster / pc) pc in a cloud of initial maximum density 
+                  nH = $(nH_core) cm⁻³, initial metallicity Z/Z⊙ = $(Zgas_Zsun₀),
                   dust-to-gas ratio D/D⊙ = $(DG₀/DGsun). Initial turbulent RMS velocity 
                   is $(u_RMSturb/1e5) km s⁻¹.
 
@@ -505,7 +517,6 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                   Gravity:                     $(Gravity)
                   Lyα RT:                      $(Lyα)
                   Radiation pressure feedback: $(RadPressure)
-                  Stellar wind feedback:       $(StellarWindFeedback)
                   Dust growth & destruction:   $(DustGrowthDestruction)
                   On-the-spot approximation:   $(OTS)
 
@@ -723,11 +734,16 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
 
     # Generate all stellar RT arrays, including J, H, inteface fluxes, 
     # emissivities, and luminosities, for all 7 stellar + IR RT bands:
-    RT = GenerateStellarRTArrays( mstarZAMS, Zstar_Zsun, ΔV, r, Z, 
-                                  Zstar_pos, σstar_cell, c̃, OTS )
+    RT = GenerateStarClusterRTArrays( M_StarCluster, Zstar_Zsun, ΔV, r, Z, 
+                                      Zstar_pos, Rhalf_StarCluster, c̃, OTS )
 
     # Add stellar mass to the non-gas mass (will also influence gravity):
     gravstate.ρ_bg .= RT.ρ_star
+
+    # Get total bolometric luminosity & ionizing photon emission rate
+    # of the star (for saving):
+    L_bol    = RT.Lum_bol
+    dNdt_LyC = RT.dN_dt_LyC
 
     ###############################################################
     #######                                                 #######
@@ -745,10 +761,9 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
         # Create save file:
         CreateHDF5File( FileName, N_r, N_Z, Nminsteps, Nmaxsteps, Nsaved, Gravity, 
                         Lyα, Recoil, LyαDestruction, RadPressure, IRfeedback,
-                        StellarWindFeedback,
                         DustGrowthDestruction, OTS, z, 
                         N_ν,
-                        tmax, mstarZAMS, Zstar_Zsun, σstar_cell, 
+                        tmax, M_StarCluster, L_bol, dNdt_LyC, Zstar_Zsun, Rhalf_StarCluster, 
                         Zstar_pos,
                         DG₀, Zgas_Zsun₀,
                         BC_r_right, BC_Z_left, BC_Z_right,
@@ -758,24 +773,13 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
         # Save spatial grid:
         SaveGridHDF5File( FileName, geometry )
 
+        # Save the Lyα dust absorption cross-section per H nucleus for all cells (useful diagnostic):
+        UpdateDustCrossSectionsPerH!( duststate, hydrostate, chemstate )
+
         # Save Lyα frequency grid
         if Lyα
             SaveLyαFreqGridHDF5File( FileName, LyαState )  
         end
-
-        # Save t = 0 state (initial conditions), which can be useful 
-        # for running comparison runs with the same ICs:
-        save_index = 1
-        t          = 0.0
-        Δt_Hydro   = 0.0
-
-        if !isnothing(LyαState)
-            # Update Lyα energy density before saving (will be zero - just for clarity):
-            Update_e_Lyα!( LyαState.e_Lyα, LyαState.Δν, LyαState.J_Lyα )
-        end
-
-        SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, gravstate, duststate, RT,
-                             LyαState, save_index, t, Δt_Hydro, Gravity )
     end
 
     ###############################################################
@@ -802,6 +806,32 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                     r, Z, rCoM, ZCoM, 
                     gravstate.P, gravstate.Q,
                     BC_Z_left, gravstate.ℓmax )
+
+        # Update gravity force diagnostics too:
+        UpdateGravityForceDiagnostics!( gravstate, geometry, Zstar_pos )
+    end
+
+    # Update the total pressure force measures before saving:
+    if Gravity
+        UpdateIntegratedPressureForces!( hydrostate, geometry, gravstate, Zstar_pos )  
+    else
+        UpdateIntegratedPressureForces!( hydrostate, geometry, Zstar_pos )            
+    end
+
+    if SaveData 
+        # Save t = 0 state (initial conditions), which can be useful 
+        # for running comparison runs with the same ICs:
+        save_index = 1
+        t          = 0.0
+        Δt_Hydro   = 0.0
+
+        if !isnothing(LyαState)
+            # Update Lyα energy density before saving (will be zero - just for clarity):
+            Update_e_Lyα!( LyαState.e_Lyα, LyαState.Δν, LyαState.J_Lyα )
+        end
+
+        SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, gravstate, duststate, RT,
+                             LyαState, save_index, t, Δt_Hydro, Gravity )
     end
 
     Δt_Resolve  = tmax / Nminsteps
@@ -837,8 +867,8 @@ function SetupRHDsimulation( mstarZAMS::Float64,  # Stellar mass (M⊙)
                     geometry, gravstate, gravcoeffs,
                     ghostgrid, 
                     LyαState, RT,
-                    Gravity, RadPressure, IRfeedback, StellarWindFeedback, 
-                    z, mstarZAMS, Zstar_Zsun, Hydro, CoolingHeating )
+                    Gravity, RadPressure, IRfeedback, 
+                    z, Zstar_Zsun, Hydro, CoolingHeating )
 
         # Update time & step: 
         t    += Δt_Hydro 
@@ -885,7 +915,7 @@ end
 
 """ This function can restart an RHD simulation, using data saved 
     in an HDF5 file. """
-function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
+function RestartRHDsimulation_StarCluster( FileName::String  = "RHDSim.h5" )
 
     PrintLYDIONLogo()
 
@@ -893,14 +923,14 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
             Number of threads used: $(Threads.nthreads())
                      Julia version: $(VERSION) """); flush(stdout)
     println("---------------------------------")
-    println(" Restarting RHD simulation from checkpoint in HDF5 file $(FileName)... ")
+    println(" Restarting RHD star cluster simulation from checkpoint in HDF5 file $(FileName)... ")
     println( " " )
 
     # Initialize various variables and settings that will be needed after
     # we close the h5 open:
-    Gravity = false; Lyα = false; Recoil = false; RadPressure = false; IRfeedback = false; StellarWindFeedback = false
+    Gravity = false; Lyα = false; Recoil = false; RadPressure = false; IRfeedback = false
     Hydro = true; LyαDestruction = true; DustGrowthDestruction = true
-    mstarZAMS = 0.0; Zstar_Zsun = 0.0
+    Zstar_Zsun = 0.0
     z = 0.0; tmax = 0.0
     t = 0.0; step = 0; Δt_Hydro = 0.0
     c̃_saved = 0.0
@@ -961,7 +991,6 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         Recoil                 = parse_bool(get_attr(Settings, "Recoil"))
         RadPressure            = parse_bool(get_attr(Settings, "RadPressure"))
         IRfeedback             = parse_bool(get_attr(Settings, "IRfeedback"))
-        StellarWindFeedback    = parse_bool(get_attr(Settings, "StellarWindFeedback"))
         DustGrowthDestruction  = parse_bool(get_attr(Settings, "DustGrowth/Destruction"))
         OTS                    = parse_bool(get_attr(Settings, "OTS"))
         LyαDestruction         = haskey(attrs(Settings), "Lya_pd_on") ? parse_bool(get_attr(Settings, "Lya_pd_on")) : true
@@ -969,15 +998,15 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         z                      = haskey(attrs(Settings), "z")         ? parse_f64(get_attr(Settings, "z"))          : 0.0
 
         # Boundary conditions in cylindrical coordinates:
-        BC_r_right     = parse_sym(get_attr(Settings, "BC_r_right"))
-        BC_Z_left      = parse_sym(get_attr(Settings, "BC_Z_left"))
-        BC_Z_right     = parse_sym(get_attr(Settings, "BC_Z_right"))
+        BC_r_right        = parse_sym(get_attr(Settings, "BC_r_right"))
+        BC_Z_left         = parse_sym(get_attr(Settings, "BC_Z_left"))
+        BC_Z_right        = parse_sym(get_attr(Settings, "BC_Z_right"))
 
         # Stellar parameters:
-        mstarZAMS      = parse_f64(get_attr(Settings, "mstar_Msun"))
-        Zstar_Zsun     = parse_f64(get_attr(Settings, "Z_star_Zsun"))
-        σstar_cell     = parse_f64(get_attr(Settings, "σ_star_cell"))
-        Zstar_pos      = parse_f64(get_attr(Settings, "Z_pos"))
+        M_StarCluster     = parse_f64(get_attr(Settings, "M_StarCluster_Msun"))
+        Zstar_Zsun        = parse_f64(get_attr(Settings, "Z_star_Zsun"))
+        Rhalf_StarCluster = parse_f64(get_attr(Settings, "Rhalf_StarCluster"))
+        Zstar_pos         = parse_f64(get_attr(Settings, "Z_pos"))
 
         # Get desired final time of simulation:
         if haskey(attrs(Settings), "tmax")
@@ -1050,6 +1079,9 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
         # Set up dust state struct, containing dust properties:
         Td₀       = 30.0      # Arbitrary dust temperature 
         duststate = SetupDustState( DustGrowthDestruction, N_r, N_Z, Td₀ )
+
+        # Initialize the IR radiation temperature to last saved values:
+        duststate.Trad     .= CheckPoint["Trad"][:, :]
 
         # Setup hydro state (not initialized to right values yet) + ghost grid arrays:
         BC_r_left::Symbol     = :Reflect # Always reflective BCs at inner r-boundary in cylindrical coordinates
@@ -1137,8 +1169,8 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
                                            rCoM, ZCoM, r, Z )
 
         # Initialize stellar RT arrays/state:
-        RT = GenerateStellarRTArrays( mstarZAMS, Zstar_Zsun, ΔV, r, Z, 
-                                      Zstar_pos, σstar_cell, c̃_saved, OTS )
+        RT = GenerateStarClusterRTArrays( M_StarCluster, Zstar_Zsun, ΔV, r, Z, 
+                                          Zstar_pos, Rhalf_StarCluster, c̃_saved, OTS )
 
         # Add stellar mass to gravitating mass:
         gravstate.ρ_bg .= RT.ρ_star
@@ -1304,8 +1336,8 @@ function RestartRHDsimulation( FileName::String  = "RHDSim.h5" )
                     geometry, gravstate, gravcoeffs,
                     ghostgrid, 
                     LyαState, RT,
-                    Gravity, RadPressure, IRfeedback, StellarWindFeedback,
-                    z, mstarZAMS, Zstar_Zsun, Hydro, CoolingHeating )
+                    Gravity, RadPressure, IRfeedback, 
+                    z, Zstar_Zsun, Hydro, CoolingHeating )
 
         # Update time & step: 
         t    += Δt_Hydro 

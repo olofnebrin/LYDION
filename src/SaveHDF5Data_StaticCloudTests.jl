@@ -110,14 +110,30 @@ function CreateHDF5File( FileName::String,
                         chunk = (N_r, N_Z, 1),
                         filters = Filters.Deflate(3))
 
-        # Global Lyα force multiplier & luminosity per saved time:
+        # Global Lyα force multiplier per saved time:
         create_dataset(file, "M_F_History", Float64,
                        (Nsaved,),
                         chunk = (1,))
 
+        # Global net radial Lyα force multiplier per saved time:
+        create_dataset(file, "M_F_radial_net_History", Float64,
+                       (Nsaved,),
+                        chunk = (1,))
+
+        # Global outward radial Lyα force multiplier per saved time:
+        create_dataset(file, "M_F_radial_out_History", Float64,
+                       (Nsaved,),
+                        chunk = (1,))                
+
+        # Lyα luminosity per saved time: 
         create_dataset(file, "L_Lya_History", Float64,
-                          (Nsaved,),
-                          chunk = (1,))
+                       (Nsaved,),
+                        chunk = (1,))
+
+        # Lyα escape fraction from simulation box:
+        create_dataset(file, "f_esc_Lya_History", Float64,
+                       (Nsaved,),
+                        chunk = (1,))
 
         # Frequency grid for Lyα:
         create_dataset(file, "ν",   Float64, (N_ν+1,))  # Bin edges
@@ -332,13 +348,23 @@ function SaveTimeStepHDF5( FileName::String,
         dset_pd                     = file["pd_History"]
         dset_pd[:, :, step]         = Lya.pd
 
-        # Save force multiplier:
+        # Save force multipliers:
         dset_M_F                    = file["M_F_History"]
         dset_M_F[step]              = Lya.M_F 
+
+        dset_M_F_radial_net         = file["M_F_radial_net_History"]
+        dset_M_F_radial_net[step]   = Lya.M_F_radial_net
+
+        dset_M_F_radial_out         = file["M_F_radial_out_History"]
+        dset_M_F_radial_out[step]   = Lya.M_F_radial_out
 
         # Save Lyα luminosity:
         dset_L_Lyα                  = file["L_Lya_History"]
         dset_L_Lyα[step]            = Lya.L_Lyα
+
+        # Save Lyα escape fraction:
+        dset_f_esc_Lyα              = file["f_esc_Lya_History"]
+        dset_f_esc_Lyα[step]        = Lya.f_esc_Lyα
 
         # Save Lyα spectrum at the outer boundary cells:
         dset_J_edge       = file["J_Lya_EdgeSpectra"]        # Raw spectra, not normalized 

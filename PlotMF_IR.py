@@ -9,7 +9,7 @@ yr   = 3.1556926e7
 kyr  = 1e3 * yr
 kms  = 1e5
 
-filename_Lya =  "RHDSim_Lya_64x64_2026-02-20.h5"
+filename_Lya =  "IdealizedRHDSim_Turbulence_true_NoLya_256x256_2026-04-04.h5"
 #filename_Lya =  "StaticCloudTest.h5"
 #filename_Lya =  "RHDSim_Lya_2025-12-23.h5"
 

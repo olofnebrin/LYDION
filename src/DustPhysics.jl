@@ -6,7 +6,7 @@
 
 """
 
-using .Structs: DustState
+using .Structs: DustState, HydrodynamicsState, ChemistryState
 using .ConstantsAndFunctions
 using DelimitedFiles          # For reading data 
 using Interpolations          # For interpolation of the Planck mean opacity
@@ -51,7 +51,7 @@ const Qabs_PAH_Lyα::Float64  = Qabs_Data[7,4];  const Qabs_C_Lyα::Float64  = Q
 
 # Export functions:
 export GetDustAbsorptionOpacities, GetDustFluxOpacities, Λdg_tot, Λdg, ComputeTd, FindGrainCharge, 
-       HeatingRate_PhotoElectric, SetupDustState, κP, κR
+       HeatingRate_PhotoElectric, SetupDustState, κP, κR, UpdateDustCrossSectionsPerH!
 
 
 """ Extract the band absorption opacities for a given dust species from the struct. """
@@ -708,7 +708,7 @@ function PhotoElectricChargingTerm( J_FUV::Float64,
         # 1 / (ne * se):
         inv_ne_s  = 1 / ( ne * se_PAH )
     else
-        error("Uknown dust type/bin $(DustType) in photoelectric charging.") 
+        error("Unknown dust type/bin $(DustType) in photoelectric charging.") 
     end
 
     # Photo-electric yields (for the desired type/bin):
@@ -735,6 +735,9 @@ end
 
 const vthH_over_vthe::Float64             = sqrt( me / mH )
 const vthHe_over_vthe::Float64            = sqrt( me / mHe )
+const vthD_over_vthe::Float64             = sqrt( me / mD )
+const vthC_over_vthe::Float64             = sqrt( me / mC )
+const vthO_over_vthe::Float64             = sqrt( me / mO )
 const Stick_ion::Float64                  = 1.0                  # Sticking coefficient of ions (1.0 by default)
 const agr_Sil_kB_over_e_squared::Float64  = agr_Sil * kB / (e^2) # Convenient variable 
 const agr_C_kB_over_e_squared::Float64    = agr_C   * kB / (e^2) 
@@ -751,6 +754,9 @@ function IonCollisionalChargingTerm( Zgr::Float64,
                                     nHII::Float64,
                                    nHeII::Float64,
                                   nHeIII::Float64,
+                                    nDII::Float64,
+                                    nCII::Float64,
+                                    nOII::Float64,
                                       ne::Float64,
                                 DustType::Union{Val{:Sil}, Val{:Gra}, Val{:PAH}} 
                                      )
@@ -776,9 +782,9 @@ function IonCollisionalChargingTerm( Zgr::Float64,
     HII_contribution    = nHII * Stick_ion * vthH_over_vthe * J̃_HII
 
     # He II contribution:
-    τ_HeII              = τ_HII              # agr * kB * T / ((+e)²) = same as for H II 
-    ν_HeII              = ν_HII              # Zgr * e / (+e) = Zgr = same as for H II 
-    J̃_HeII              = J̃(τ_HeII, ν_HeII)
+    # τ_HeII            = τ_HII              # agr * kB * T / ((+e)²) = same as for H II (so not needed)
+    # ν_HeII            = ν_HII              # Zgr * e / (+e) = Zgr = same as for H II (so not needed)
+    J̃_HeII              = J̃_HII              # Same as for H II since τ and ν are the same
     HeII_contribution   = nHeII * Stick_ion * vthHe_over_vthe * J̃_HeII
 
     # He III contribution:
@@ -787,8 +793,27 @@ function IonCollisionalChargingTerm( Zgr::Float64,
     J̃_HeIII             = J̃(τ_HeIII, ν_HeIII)
     HeIII_contribution  = nHeIII * Stick_ion * vthHe_over_vthe * J̃_HeIII
 
+    # D II contribution: 
+    # τ_DII             = τ_HII              # agr * kB * T / ((+e)²) = same as for H II (so not needed)
+    # ν_DII             = Zgr                # Zgr * e / (+e) = Zgr = same as for H II (so not needed)
+    J̃_DII               = J̃_HII              # Same as for H II since τ and ν are the same 
+    DII_contribution    = nDII * Stick_ion * vthD_over_vthe * J̃_DII
+
+    # C II contribution:
+    # τ_CII             = τ_HII              # agr * kB * T / ((+e)²) = same as for H II (so not needed)
+    # ν_CII             = Zgr                # Zgr * e / (+e) = Zgr = same as for H II (so not needed)
+    J̃_CII               = J̃_HII              # Same as for H II since τ and ν are the same 
+    CII_contribution    = nCII * Stick_ion * vthC_over_vthe * J̃_CII
+
+    # O II contribution: 
+    # τ_OII             = τ_HII              # agr * kB * T / ((+e)²) = same as for H II (so not needed)
+    # ν_OII             = Zgr                # Zgr * e / (+e) = Zgr = same as for H II (so not needed)
+    J̃_OII               = J̃_HII              # Same as for H II since τ and ν are the same 
+    OII_contribution    = nOII * Stick_ion * vthO_over_vthe * J̃_OII
+
     # Put it all together:
-    CollisionalTerm = inv_ne_se * ( HII_contribution + HeII_contribution + HeIII_contribution )
+    CollisionalTerm = inv_ne_se * ( HII_contribution + HeII_contribution + HeIII_contribution
+                                  + DII_contribution + CII_contribution  + OII_contribution )
 
     return CollisionalTerm 
 end
@@ -860,10 +885,13 @@ const rtol_Zgr::Float64            = 1e-3
 
 """ This function computes the grain charge using a bisection method. """
 function FindGrainCharge( T::Float64, 
-                       nHII::Float64,
-                      nHeII::Float64,
-                     nHeIII::Float64,
-                         ne::Float64,
+                       nHII::Float64, # H II number density 
+                      nHeII::Float64, # He II number density 
+                     nHeIII::Float64, # He III number density 
+                       nDII::Float64, # D II number density 
+                       nCII::Float64, # C II number density 
+                       nOII::Float64, # O II number density 
+                         ne::Float64, # e⁻ number density 
                       J_FUV::Float64,
                        J_LW::Float64,
                      J_EUV1::Float64,
@@ -887,7 +915,7 @@ function FindGrainCharge( T::Float64,
 
     # Define the function the root of which will give Zgr 
     # (ion collisional terms + photoelectric terms - electron collisional term):
-    f( Zgr ) = ( IonCollisionalChargingTerm( Zgr, T, nHII, nHeII, nHeIII, ne, DustType )
+    f( Zgr ) = ( IonCollisionalChargingTerm( Zgr, T, nHII, nHeII, nHeIII, nDII, nCII, nOII, ne, DustType )
                + PhotoElectricChargingTerm( J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, ne, T, Zgr, DustType, e_Lyα )
 
                - J̃( τ_e,  ν_e_prefact * Zgr )  )
@@ -1111,7 +1139,7 @@ function HeatingRate_PhotoElectric( J_FUV::Float64,
         Ya_EUV3      = Ya_C( E_EUV3, agr_PAH )
         Ya_Lyα       = Ya_C( ELyα,   agr_PAH )
     else
-        error("Uknown dust type $(DustType) in HeatingRate_PhotoElectric.")
+        error("Unknown dust type $(DustType) in HeatingRate_PhotoElectric.")
     end
 
     # Compute Ẽ for all bands:
@@ -1169,6 +1197,9 @@ end
 const vth_HI_prefact::Float64    = sqrt( 2 * kB / mH )
 const vth_H2_prefact::Float64    = sqrt( 2 * kB / mH2 )
 const vth_HeI_prefact::Float64   = sqrt( 2 * kB / mHe )
+const vth_DI_prefact::Float64    = sqrt( 2 * kB / mD )
+const vth_CI_prefact::Float64    = sqrt( 2 * kB / mC )
+const vth_OI_prefact::Float64    = sqrt( 2 * kB / mO )
 const vth_e_prefact::Float64     = sqrt( 2 * kB / me )
 const ϕ_Sil_prefact::Float64     = (e^2) / ( agr_Sil * kB )
 const ϕ_C_prefact::Float64       = (e^2) / ( agr_C * kB )
@@ -1186,7 +1217,8 @@ const Λ_C_prefact::Float64       = (3 / (2 * agr_C * e))   * sqrt(kB / π)
 const Λ_PAH_prefact::Float64     = (3 / (2 * agr_PAH * e)) * sqrt(kB / π)
 
 """ This function computes the drag force coefficient K ≡ |⟨ngr Fdrag⟩| / | ud - u |,
-    considering drag from H I, H₂, H II, He I, He II, He III, and given dust type/bin.
+    considering drag from H I, H₂, H II, He I, He II, He III, D II, C II, and O II,
+    and given dust type/bin.
     
     The drag coeffient enters the evolution of the dust momenta:
     
@@ -1196,6 +1228,9 @@ const Λ_PAH_prefact::Float64     = (3 / (2 * agr_PAH * e)) * sqrt(kB / π)
 
     K_bin = 2 × (3 ρd_bin kB T) / (4 agr_bin ρgr_bin)
           × Σ_i ni [G'_0(si) + Zi² ϕs² ln|Λs/Zi| G'_2(si)]
+
+    NOTE: We ignore drag from minor neutral species, since they are always 
+          negligible compared to H I, H₂, and He I.
     
     """
 function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/bin
@@ -1208,6 +1243,9 @@ function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/
                                      nHeI::Float64, # He I number density 
                                     nHeII::Float64, # He II number density 
                                    nHeIII::Float64, # He III number density 
+                                     nDII::Float64, # D II number density 
+                                     nCII::Float64, # C II number density 
+                                     nOII::Float64, # O II number density 
                                        ne::Float64, # e⁻ number density 
                                      ud_r::Float64, # Dust velocity in r-direction for this bin/type 
                                       u_r::Float64, # Gas velocity in r-direction 
@@ -1221,10 +1259,14 @@ function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/
     urel       = @fastmath sqrt( (ud_r - u_r) * (ud_r - u_r)  +  (ud_Z - u_Z) * (ud_Z - u_Z) )
     ne_floored = max( ne, ne_floor_K_drag )   # To avoid division by zero
 
-    # Evaluate vth ≡ √(2kT/mᵢ) for all major species:
+    # Evaluate vth ≡ √(2kT/mᵢ) for all major species (note: since electrons have negligible mass, 
+    # ions have the same vth as their neutral counterparts):
     vth_HI     = @fastmath vth_HI_prefact  * sqrt_T
     vth_H2     = @fastmath vth_H2_prefact  * sqrt_T 
     vth_HeI    = @fastmath vth_HeI_prefact * sqrt_T
+    vth_DII    = @fastmath vth_DI_prefact  * sqrt_T
+    vth_CII    = @fastmath vth_CI_prefact  * sqrt_T
+    vth_OII    = @fastmath vth_OI_prefact  * sqrt_T
     vth_e      = @fastmath vth_e_prefact   * sqrt_T
 
     # Evaluate sᵢ ≡ |ud - u| / vth for all major species
@@ -1232,23 +1274,30 @@ function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/
     s_HI       = @fastmath urel / vth_HI 
     s_H2       = @fastmath urel / vth_H2
     s_HeI      = @fastmath urel / vth_HeI 
+    s_DII      = @fastmath urel / vth_DII
+    s_CII      = @fastmath urel / vth_CII
+    s_OII      = @fastmath urel / vth_OII
     s_e        = @fastmath urel / vth_e
 
-    # Compute G₀/urel:
+    # Compute G₀/urel (for both neutrals & ions):
     G̃0_HI      = G0_over_urel( s_HI, vth_HI )
     G̃0_HII     = G̃0_HI
     G̃0_H2      = G0_over_urel( s_H2,  vth_H2 )
     G̃0_HeI     = G0_over_urel( s_HeI, vth_HeI )
     G̃0_HeII    = G̃0_HeI
     G̃0_HeIII   = G̃0_HeI
+    G̃0_DII     = G0_over_urel( s_DII, vth_DII )
+    G̃0_CII     = G0_over_urel( s_CII, vth_CII )
+    G̃0_OII     = G0_over_urel( s_OII, vth_OII )
     G̃0_e       = G0_over_urel( s_e,  vth_e )
 
-    # Compute G₂/urel (not needed for H₂, since it is neutral):
-    G̃2_HI      = G2_over_urel( s_HI, vth_HI )
-    G̃2_HII     = G̃2_HI
-    G̃2_HeI     = G2_over_urel( s_HeI, vth_HeI )
-    G̃2_HeII    = G̃2_HeI
-    G̃2_HeIII   = G̃2_HeI
+    # Compute G₂/urel (for ions & electrons):
+    G̃2_HII     = G2_over_urel( s_HI, vth_HI )
+    G̃2_HeII    = G2_over_urel( s_HeI, vth_HeI )
+    G̃2_HeIII   = G̃2_HeII
+    G̃2_DII     = G2_over_urel( s_DII, vth_DII )
+    G̃2_CII     = G2_over_urel( s_CII, vth_CII )
+    G̃2_OII     = G2_over_urel( s_OII, vth_OII )
     G̃2_e       = G2_over_urel( s_e,  vth_e )
 
     # Evaluate ϕ ≡ Z_gr * e² / a_gr * kB * T,
@@ -1316,6 +1365,15 @@ function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/
 
     HeIII_contr     = @fastmath nHeIII * ( G̃0_HeIII  +  4 * ϕ_sq_logΛ_HeIII * G̃2_HeIII )
 
+    # D II contribution (Z = 1, Z² = 1)::
+    DII_contr       = @fastmath nDII * ( G̃0_DII  +  ϕ_sq_logΛ * G̃2_DII )
+
+    # C II contribution (Z = 1, Z² = 1)::
+    CII_contr       = @fastmath nCII * ( G̃0_CII  +  ϕ_sq_logΛ * G̃2_CII )
+
+    # O II contribution (Z = 1, Z² = 1)::
+    OII_contr       = @fastmath nOII * ( G̃0_OII  +  ϕ_sq_logΛ * G̃2_OII )
+
     # e⁻ contribution (Z = - 1, Z² = 1):
     e_contr         = @fastmath ne * ( G̃0_e  +  ϕ_sq_logΛ * G̃2_e )
 
@@ -1323,6 +1381,8 @@ function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/
     K_drag          = @fastmath K_drag_prefact * ( HI_contr   + HII_contr 
                                                  + H2_contr   + HeI_contr 
                                                  + HeII_contr + HeIII_contr 
+                                                 + DII_contr  + CII_contr
+                                                 + OII_contr
                                                  + e_contr )
 
     return K_drag
@@ -1401,9 +1461,13 @@ const itp_Stick_CI_Boisson24 = extrapolate( interpolate( (Td_Boisson24,), Stick_
                                             Flat() )
 
 """ The estimated chemisorption sticking coefficient of C I on amorphous carbon grains,
-    as computed by Boisson et al. (2024). """
-@inline function Stick_CI( Td::Float64 )
-    itp_Stick_CI_Boisson24( Td )
+    as computed by Bossion et al. (2024). 
+    
+    NOTE: Bossion et al. assume that Td = T. According to Duncan Bossion (personal correspondance),
+          work-in-progress indicates that the sticking coefficient is more strongly dependent on T 
+          than Td. So for now, until that work is out, LYDION assumes the gas temperature as input. """
+@inline function Stick_CI( T::Float64 )
+    itp_Stick_CI_Boisson24( T )
 end                                           
 
 
@@ -1420,8 +1484,10 @@ const tgr0_Sil_prefact::Float64 = agr_Sil * ρgr_Sil * f_limit_Sil / ( 3 * vrel_
 const tgr0_C_prefact::Float64   = agr_C   * ρgr_C   * f_limit_C   / ( 3 * vrel_C_prefact )
 const tgr0_PAH_prefact::Float64 = agr_PAH * ρgr_C   * f_limit_PAH / ( 3 * vrel_C_prefact )
 
+""" The gas accretion mass growth time-scale for dust of a given bin/type.
+    Accretion of ions (e.g. C II) includes the necessary Coulomb modification 
+    of the collision cross-section. """
 @inline function Compute_tgr0( T::Float64,
-                              Td::Float64,
                              xCI::Float64,
                             xCII::Float64,
                              Zgr::Float64,
@@ -1451,7 +1517,7 @@ const tgr0_PAH_prefact::Float64 = agr_PAH * ρgr_C   * f_limit_PAH / ( 3 * vrel_
         # NOTE: Since we don't follow Si chemistry, we assume that xSII = xCII.
     end
     J̃_ion   = J̃( τ_i, ν_i )
-    Stick_C = Stick_CI( Td ) * ( xCI  +  xCII * J̃_ion )
+    Stick_C = Stick_CI( T ) * ( xCI  +  xCII * J̃_ion )
 
     # Sticking coefficient for Si on silicate grains is not really known, 
     # but silicate grain accretion will generally be slower than the growth of
@@ -1501,35 +1567,186 @@ const tsubl_C_0::Float64       = 1.36 / 3     # Pre-factor for graphite/carbonac
 end
 
 
-const ρ_sputter::Float64            = 1e-27 
-const T_sputter::Float64            = 2e6 
-const ω_sputter::Float64            = 2.5
-const agr_sputter_norm_Sil::Float64 = agr_Sil / (0.1 * μm)
-const agr_sputter_norm_C::Float64   = agr_C   / (0.1 * μm)
-const agr_sputter_norm_PAH::Float64 = agr_PAH / (0.1 * μm)
-const tsputter_th_prefact::Float64  = OneThird * 0.17 * Gyr  # Factor 1/3 to convert to *mass* sputtering time
+const t_sputter_th_Sil_prefact::Float64 = ( agr_Sil / μm ) / 3   # Pre-factor for thermal sputtering time-scale of silicate grains 
+const t_sputter_th_C_prefact::Float64   = ( agr_C   / μm ) / 3   # Pre-factor for thermal sputtering time-scale of graphite grains 
 
-""" Destruction time-scale (s) from thermal sputtering. """
-@inline function Compute_tsputter_thermal( ρ::Float64, 
-                                           T::Float64,
-                                    DustType::Union{Val{:Sil}, Val{:Gra}, Val{:PAH}} )
+# Fitting coefficients for thermal sputtering of silicate & graphite grains from Choban et al. (2026), table 3:
+const asput_Choban26_Sil::NTuple{6, Float64}  = ( - 226.95, 127.94, - 29.920, 3.5354, - 0.21055, 0.0050362 )
+const asput_Choban26_C::NTuple{6, Float64}    = ( - 226.85, 133.44, - 32.573, 4.0057, - 0.24747, 0.0061212 )
 
-    if T ≤ 1e5
-        # Ignore sputtering below 10⁵ K, where the fit breaks down anyway.
-        return Inf64
-    else
-        if DustType === Sil
-            anorm = agr_sputter_norm_Sil
-        elseif DustType === Gra 
-            anorm = agr_sputter_norm_C
-        elseif DustType === PAH 
-            anorm = agr_sputter_norm_PAH
+# Fitting coefficients for the thermal sputtering of PAHs from Micelotta et al. (2010), for N_C = 100 (closest 
+# to adopted PAH size in LYDION) in their table 2:
+const asput_Micelotta10_elec::NTuple{6, Float64} = ( - 2255.38, 1681.45, - 503.451, 75.4339, - 5.64956, 0.168959 )
+const asput_Micelotta10_H::NTuple{6, Float64}    = ( - 1645.64, 1257.06, - 384.309, 58.4103, - 4.41007, 0.132356 )
+const asput_Micelotta10_He::NTuple{6, Float64}   = ( - 945.901, 747.921, - 237.984, 37.6808, - 2.96613, 0.0928852 )
+const asput_Micelotta10_C::NTuple{6, Float64}    = ( - 711.244, 558.48,  - 177.983, 28.2547, - 2.23145, 0.0701374 )
+
+const χ_He_Micelotta10::Float64 = 0.1    # nHe / nH assumed by Micelotta et al. (2010)
+const χ_C_Micelotta10::Float64  = 1e-4   # nC  / nH assumed by Micelotta et al. (2010)
+
+""" Destruction time-scale (s) from thermal sputtering. It is modelled as follows:
+
+    ------ Silicate & graphite grains: ---------------------
+    
+    Choban et al. (2026) provides fits to the total yield Ytot (μm yr⁻¹ cm³) 
+    for silicate and carbonaceous grains, as computed by Nozawa et al. (2006).
+    The grain destruction time-scale is then (assuming ionized gas):
+    
+    t_sputter = agr / (3 nHII Ytot)
+    
+    One has to be careful with units, since Ytot is given in μm yr⁻¹ cm³, and so in 
+    the above expression we need to use agr in μm, nH in cm⁻³, and then multiply by 
+    yr in the end to convert to seconds.
+    
+    ------ PAHs ------------------------------------------- 
+    
+    PAH sputtering is more efficient at low temperatures, down to T ~ 10⁴ K. 
+    The destruction time-scale for a PAH of N_C carbon atoms is:
+    
+    t_sputter = N_C / (2 R_elec + ∑_{ion} R_ion)
+    
+    where R_elec is the rate of collisions with electrons (in s⁻¹), each of which kicks 
+    out 2 carbon atoms, and R_ion is the rate of collisions with a given ion ∈ (H, He, C).
+    Micelotta et al. (2010) provides fits to (the log10 of):
+    
+    J_elec(T, N_C) ≡ R_elec / nHII 
+    J_ion(T, N_C)  ≡ R_ion  / nHII
+    
+    for a few different N_C ∈ (50, 100, 200), the closest of which to our bin is N_C = 100 (also 
+    slightly more conservative than using their fits for N_C = 50). 
+    Micelotta et al. (2010) assume a specific abundance ratio, so we have to scale this 
+    in case it differs. Also note that R_ion is the the total contribution from a given ion, 
+    including nuclear and electronic rates. """
+@inline function Compute_tsputter_thermal( nHII::Float64,
+                                          nHeII::Float64,
+                                         nHeIII::Float64,
+                                           nCII::Float64,
+                                              T::Float64,
+                                       DustType::Union{Val{:Sil}, Val{:Gra}, Val{:PAH}} )
+
+    if DustType === Sil 
+        # If temperature is low (yield is negligible & fit breaks down),
+        # exit early:
+        if T ≤ 1e5 
+            return Inf 
         end
 
-        # The sputtering time-scale agr / 3 |d(agr)/dt| for the grain radius:
-        t_sputter = tsputter_th_prefact * anorm * (ρ_sputter/ρ) * ( (T_sputter/T)^ω_sputter + 1 )
+        # Get y = log_10(Ytot):
+        T  = min( T, 1e9 )
+        x  = @fastmath log10( T )
+        x2 = @fastmath x  * x 
+        x3 = @fastmath x2 * x 
+        x4 = @fastmath x3 * x 
+        x5 = @fastmath x4 * x
 
-        return t_sputter
+        y = @fastmath ( asput_Choban26_Sil[1]       +  asput_Choban26_Sil[2] * x
+                      + asput_Choban26_Sil[3] * x2  +  asput_Choban26_Sil[4] * x3 
+                      + asput_Choban26_Sil[5] * x4  +  asput_Choban26_Sil[6] * x5 )
+
+        # Get Ytot: 
+        Ytot = 10^y 
+
+        # Get the sputtering time-scale t_sputter = agr_Sil / (3 nHII Ytot) in years:
+        t_sputter_yrs = t_sputter_th_Sil_prefact / (nHII * Ytot)
+
+        # Convert to seconds and return:
+        return t_sputter_yrs * yr 
+
+    elseif DustType === Gra 
+        # If temperature is low (yield is negligible & fit breaks down),
+        # exit early:
+        if T ≤ 1e5 
+            return Inf 
+        end
+
+        # Get y = log_10(Ytot):
+        T  = min( T, 1e9 )
+        x  = @fastmath log10( T )
+        x2 = @fastmath x  * x 
+        x3 = @fastmath x2 * x 
+        x4 = @fastmath x3 * x 
+        x5 = @fastmath x4 * x
+
+        y = @fastmath ( asput_Choban26_C[1]       +  asput_Choban26_C[2] * x
+                      + asput_Choban26_C[3] * x2  +  asput_Choban26_C[4] * x3 
+                      + asput_Choban26_C[5] * x4  +  asput_Choban26_C[6] * x5 )
+
+        # Get Ytot: 
+        Ytot = 10^y 
+
+        # Get the sputtering time-scale t_sputter = agr_C / (3 nHII Ytot) in years:
+        t_sputter_yrs = t_sputter_th_C_prefact / (nHII * Ytot)
+
+        # Convert to seconds and return:
+        return t_sputter_yrs * yr 
+
+    elseif DustType === PAH
+        # If temperature is below ~ 4000 K, PAH sputtering is negligible 
+        # and fit may break down, so exit early:
+        if T ≤ 4e3 
+            return Inf 
+        end
+
+        # Get powers of log_10(T):
+        T  = min( T, 1e8 )         # Micelotta+ fit extends to 10⁸ K
+        x  = @fastmath log10( T )
+        x2 = @fastmath x  * x 
+        x3 = @fastmath x2 * x 
+        x4 = @fastmath x3 * x 
+        x5 = @fastmath x4 * x
+
+        # Get abundance ratios relative to H, to scale relative to the assumed 
+        # ratios assumed by Micelotta+:
+        nHe_ions = nHeII + nHeIII 
+        if nHII > 0.0
+            χ_He = @fastmath nHe_ions / nHII 
+            χ_C  = @fastmath nCII     / nHII 
+        else
+            χ_He = 0.0
+            χ_C  = 0.0
+        end
+
+        # Rate of C-loss from collisions with electrons:
+        f_elec = @fastmath ( asput_Micelotta10_elec[1]       +  asput_Micelotta10_elec[2] * x
+                           + asput_Micelotta10_elec[3] * x2  +  asput_Micelotta10_elec[4] * x3
+                           + asput_Micelotta10_elec[5] * x4  +  asput_Micelotta10_elec[6] * x5 )
+
+        J_elec = @fastmath 10^f_elec
+
+        R_elec = @fastmath nHII * J_elec # NOTE: Micelotta+ implicitly assumes that ne scales with ion abundances, 
+                                         # and they normalize by H-ion abundance 
+
+        # Rate of C-loss from collisions with hydrogen atoms (both nuclear collisions and electronic excitations):
+        f_H    = @fastmath ( asput_Micelotta10_H[1]       +  asput_Micelotta10_H[2] * x
+                           + asput_Micelotta10_H[3] * x2  +  asput_Micelotta10_H[4] * x3
+                           + asput_Micelotta10_H[5] * x4  +  asput_Micelotta10_H[6] * x5 )
+
+        J_H    = @fastmath 10^f_H
+
+        R_H    = @fastmath nHII * J_H
+
+        # Rate of C-loss from collisions with helium atoms (both nuclear collisions and electronic excitations):
+        f_He   = @fastmath ( asput_Micelotta10_He[1]       +  asput_Micelotta10_He[2] * x
+                           + asput_Micelotta10_He[3] * x2  +  asput_Micelotta10_He[4] * x3
+                           + asput_Micelotta10_He[5] * x4  +  asput_Micelotta10_He[6] * x5 )
+
+        J_He   = @fastmath 10^f_He
+
+        R_He   = @fastmath nHII * (χ_He / χ_He_Micelotta10) * J_He
+
+        # Rate of C-loss from collisions with carbon atoms (both nuclear collisions and electronic excitations):
+        f_C    = @fastmath ( asput_Micelotta10_C[1]       +  asput_Micelotta10_C[2] * x
+                           + asput_Micelotta10_C[3] * x2  +  asput_Micelotta10_C[4] * x3
+                           + asput_Micelotta10_C[5] * x4  +  asput_Micelotta10_C[6] * x5 )
+
+        J_C    = @fastmath 10^f_C
+
+        R_C    = @fastmath nHII * (χ_C / χ_C_Micelotta10) * J_C
+
+        # PAH thermal sputtering time-scale:
+        t_sputter_PAH = NC_PAH / ( 2 * R_elec  +  R_H  +  R_He  +  R_C )
+
+        return t_sputter_PAH
     end
 end
 
@@ -1824,10 +2041,12 @@ const t_growth_destruction_min::Float64 = 0.1 * yr
     sputtering, non-thermal sputtering, chemical sputtering. """
 @inline function DustGrowthDestruction_Update( ρd_old::Float64, 
                                               ρdplusZ::Float64,  # Density in this dust bin + currently available gas-phase limiting species
-                                                ρ_old::Float64,
                                                    nH::Float64, 
                                                   nHI::Float64,
                                                  nHII::Float64,
+                                                nHeII::Float64,
+                                               nHeIII::Float64,
+                                                 nCII::Float64,
                                                     T::Float64, 
                                                    Td::Float64,
                                                  urel::Float64,
@@ -1845,13 +2064,13 @@ const t_growth_destruction_min::Float64 = 0.1 * yr
                                                )
 
     # Gas accretion dust growth time-scale:
-    tgr0  = Compute_tgr0( T, Td, xCI, xCII, Zgr, ρdplusZ, DustType )
+    tgr0  = Compute_tgr0( T, xCI, xCII, Zgr, ρdplusZ, DustType )
 
     # Sublimation time-sale:
     tdest_subl      = Compute_tsubl( Td, DustType )
 
     # Thermal sputtering time-scale:
-    tdest_sputt_th  = Compute_tsputter_thermal( ρ_old, T, DustType )
+    tdest_sputt_th  = Compute_tsputter_thermal( nHII, nHeII, nHeIII, nCII, T, DustType )
 
     # Non-thermal sputtering time-scale:
     tdest_sputt_nth = Compute_tsputter_nonthermal( nH, urel, DustType )
@@ -1882,6 +2101,49 @@ const t_growth_destruction_min::Float64 = 0.1 * yr
 
     return ρd_new
 end 
+
+
+""" This function updates the Lyα dust absorption cross-section 
+    per H nucleus (cm² H⁻¹). A useful diagnostic in RHD simulations. """
+function UpdateDustCrossSectionsPerH!( Dust::DustState, 
+                                      Hydro::HydrodynamicsState,
+                                       Chem::ChemistryState )
+
+    # Get grid size & intervals:
+    N_r, N_Z = size( Hydro.ρ )
+    dN_r     = 1:N_r 
+    dN_Z     = 1:N_Z
+    
+    @threads for j in dN_Z 
+        @inbounds @simd for i in dN_r 
+            # Load dust densities for each bin/type:
+            ρd_Sil = Hydro.ρd[1,i,j] 
+            ρd_C   = Hydro.ρd[2,i,j] 
+            ρd_PAH = Hydro.ρd[3,i,j] 
+
+            # Dust opacity contributions from each bin/type:
+            α_Sil  = @fastmath Dust.κd_abs_Lyα_Sil * (ρd_Sil > ρd_floor) * ρd_Sil
+            α_C    = @fastmath Dust.κd_abs_Lyα_C   * (ρd_C   > ρd_floor) * ρd_C 
+            α_PAH  = @fastmath Dust.κd_abs_Lyα_PAH * (ρd_PAH > ρd_floor) * ρd_PAH 
+
+            # ------- Get the H density ---------
+            # Total gas-phase metallicity: 
+            Zgas  = Chem.ZC[i,j]  +  Chem.ZSil[i,j]  +  Chem.Zgasrest[i,j]
+
+            # Get pristine (H + He + D) gas density:
+            Z          = clamp( Zgas, 0.0, 1.0 )
+            ρ_pristine = max( (1 - Z), 0.0 ) * Hydro.ρ[i,j]
+
+            # Get hydrogen densities (true means we have not just H, but also He etc):
+            nHI, nHII, nH2, nH  = GetHydrogenDensities( Chem.xHII[i,j], Chem.xH2[i,j], ρ_pristine, true )
+
+            # Lyα dust absorption cross-section per H atom:
+            Dust.σ_Lyα_per_H[i,j] = ( α_Sil  +  α_C  +  α_PAH  ) / nH 
+        end
+    end
+
+    return nothing 
+end
 
 
 
@@ -1981,6 +2243,9 @@ function SetupDustState( DustGrowthDestruction::Bool,
     logκP_C_itp,   logκR_C_itp   = LoadκMeansInterpolations( joinpath(DustOpacityDir, "kappa_thermal_graphite.txt") )
     logκP_PAH_itp, logκR_PAH_itp = LoadκMeansInterpolations( joinpath(DustOpacityDir, "kappa_thermal_PAH.txt") )
 
+    # Initialize the dust cross-section per H atom in the Lyα band (for diagnotic purposes):
+    σ_Lyα_per_H = zeros( Float64, N_r, N_Z )
+
     return DustState( # Dust growth/destruction setting:
                       DustGrowthDestruction,
 
@@ -2025,7 +2290,10 @@ function SetupDustState( DustGrowthDestruction::Bool,
                       
                       # Interpolations for κP and κR (cm² g⁻¹):
                       logκP_Sil_itp, logκP_C_itp, logκP_PAH_itp,
-                      logκR_Sil_itp, logκR_C_itp, logκR_PAH_itp
+                      logκR_Sil_itp, logκR_C_itp, logκR_PAH_itp,
+
+                      # Lyα band dust cross-section per H atom (cm² H⁻¹):
+                      σ_Lyα_per_H
                       
                       )
 

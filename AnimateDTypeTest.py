@@ -38,7 +38,6 @@ pc  = 3.085677581e18
 with h5py.File(filename, "r") as f:
     t             = f["Times"][:]                          # (Nt,)
     rho_hist      = f["GasDensity_History"][:]             # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    rhod_hist     = f["DustDensity_History"][:]            # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     T_hist        = f["T_History"][:]                      # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xH2_hist      = f["xH2_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xHII_hist     = f["xHII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
@@ -47,8 +46,6 @@ with h5py.File(filename, "r") as f:
     xCO_hist      = f["xCO_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xOI_hist      = f["xOI_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xOII_hist     = f["xOII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    Zgr_sil_hist  = f["Zgr_sil_History"][:]                # (Nt, Nr, Nz) or (Nt, Nz, Nr)
-    Zgr_C_hist    = f["Zgr_C_History"][:]                  # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     r             = f["r"][:]                              # edges, (Nr+1,)
     Z             = f["Z"][:]                              # edges, (Nz+1,)
 
@@ -114,7 +111,6 @@ def ensure_NtNrNz(arr, a1, a2):
         raise ValueError(f"Unexpected array shape {arr.shape} vs edges Nr={Nr}, Nz={Nz}")
 
 rho_hist   = ensure_NtNrNz(rho_hist,  a1_rho, a2_rho)
-rhod_hist  = ensure_NtNrNz(rhod_hist,   rhod_hist.shape[1],   rhod_hist.shape[2])
 T_hist     = ensure_NtNrNz(T_hist,    T_hist.shape[1],   T_hist.shape[2])
 xH2_hist   = ensure_NtNrNz(xH2_hist,  xH2_hist.shape[1], xH2_hist.shape[2])
 xHII_hist  = ensure_NtNrNz(xHII_hist, xHII_hist.shape[1], xHII_hist.shape[2])
@@ -123,7 +119,6 @@ Nt, _, _   = rho_hist.shape
 
 xCHx_hist  = 1.0 - xCI_hist - xCII_hist - xCO_hist
 xOHx_hist  = 1.0 - xOI_hist - xOII_hist - 0.5493 * xCO_hist
-DG_hist    = rhod_hist / (rho_hist * 1/162)   # Dust-to-gas mass ratio in Solar units
 
 # convert to number density
 nH_hist = X * rho_hist / mH   # (Nt, Nr, Nz)

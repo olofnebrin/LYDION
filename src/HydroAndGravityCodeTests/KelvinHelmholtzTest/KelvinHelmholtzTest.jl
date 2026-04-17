@@ -28,31 +28,12 @@ function UpdateKHTest!( Δt_Hydro::Float64,
                        ghostgrid::GhostPaddedGrid{Float64}
                           )
 
-    # Main geometry arrays:
-    inv_ΔV      = geometry.inv_ΔV
-    A_X         = geometry.A_X
-    A_Y         = geometry.A_Y
-    inv_r_cell  = geometry.inv_r_cell # Not needed/carries no significance in Cartesian coordinates, except as an argument
-
-    # Weights for converting between cell center & cell-average values of 
-    # conservatives & primitives:
-    w_i_m1_X    = geometry.w_i_m1_X;     w_j_m1_Y     = geometry.w_j_m1_Y
-    w_i_0_X     = geometry.w_i_0_X;      w_j_0_Y      = geometry.w_j_0_Y
-    w_i_p1_X    = geometry.w_i_p1_X;     w_j_p1_Y     = geometry.w_j_p1_Y
-
-    q_i_m1_X    = geometry.q_i_m1_X;     q_j_m1_Y     = geometry.q_j_m1_Y
-    q_i_0_X     = geometry.q_i_0_X;      q_j_0_Y      = geometry.q_j_0_Y
-    q_i_p1_X    = geometry.q_i_p1_X;     q_j_p1_Y     = geometry.q_j_p1_Y
-
-    # WENO3 weights for interface reconstruction:
-    w_plus_i_p1 = geometry.w_plus_i_p1;  w_minus_i_p1 = geometry.w_minus_i_p1   
-    w_plus_j_p1 = geometry.w_plus_j_p1;  w_minus_j_p1 = geometry.w_minus_j_p1
-
     # Hydro state arrays (cell-averaged):
     ρ           = hydrostate.ρ;        ρu_X        = hydrostate.ρu_X 
     ρu_Y        = hydrostate.ρu_Y;     E           = hydrostate.E
     u_X         = hydrostate.u_X;      u_Y         = hydrostate.u_Y 
     P           = hydrostate.P;        γad         = hydrostate.γad 
+    e           = hydrostate.e_dual
 
     # Grid size & intervals:
     N_X, N_Y    = size( ρ )
@@ -66,14 +47,7 @@ function UpdateKHTest!( Δt_Hydro::Float64,
     ###############################################################
 
     # Update hydro variables by advection: 
-    UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, inv_ΔV, A_X, A_Y, 
-
-                  w_i_m1_X, w_i_0_X, w_i_p1_X, w_j_m1_Y, w_j_0_Y, w_j_p1_Y, 
-                  q_i_m1_X, q_i_0_X, q_i_p1_X, q_j_m1_Y, q_j_0_Y, q_j_p1_Y,  
-
-                  w_plus_i_p1, w_minus_i_p1,  w_plus_j_p1, w_minus_j_p1,
-
-                  Val(:Cartesian), inv_r_cell ) 
+    UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, geometry ) 
 
     # Update primitives to reflect latest conservatives,
     # so that we can set the CFL time-step for the scalar advection:
@@ -81,7 +55,7 @@ function UpdateKHTest!( Δt_Hydro::Float64,
         @inbounds @simd for i in dN_X
             # Recover primitives at geometric cell centers, from the 
             # conservative variables at the cell centers:
-            u_X[i,j], u_Y[i,j], P[i,j] = GetPrimitive( ρ[i,j], ρu_X[i,j], ρu_Y[i,j], E[i,j], γad[i,j] )
+            u_X[i,j], u_Y[i,j], P[i,j] = GetPrimitive( ρ[i,j], ρu_X[i,j], ρu_Y[i,j], E[i,j], e[i,j], γad[i,j] )
 
             # Ensure positive pressure:
             P[i,j] = max( P[i,j], P_floor )
@@ -243,7 +217,7 @@ function SetupKHTest( tmax::Float64,
     while t < tmax
 
         # Hydro CFL time-step:
-        Δt_CFL = GetCFLTimeStep( X, Y, ρ, P, u_X, u_Y, ud_X, ud_Y, γad )  
+        Δt_CFL = GetCFLTimeStep( hydrostate, geometry )  
 
         # Set hydro time-step:
         Δt_Hydro = min( 1.25 * Δt_Hydro, Δt_CFL, Δt_Resolve, tmax - t )

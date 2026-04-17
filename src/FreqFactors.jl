@@ -25,7 +25,7 @@ function UpdateVoigtAndEmissionProfile!( Lyα::LyαArrays,                 # The
                                            T::AbstractArray{Float64, 2}  # Gas temperature for every cell 
                                          )
 
-    N_Z, N_r = size( T )
+    N_r, N_Z = size( T )
     dN_r     = 1:N_r
     dN_Z     = 1:N_Z 
  

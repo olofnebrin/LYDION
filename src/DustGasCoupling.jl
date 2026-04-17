@@ -152,22 +152,24 @@ function UpdateGasDustMomenta( Δt::Float64, # Time-step
     urel_r_PAH_new, urel_Z_PAH_new = CapRelativeVelocities( urel_r_PAH_new, urel_Z_PAH_new, ρd_PAH )
 
     # ----- STEP 3: Recover velocities from uCoM_new and urel_new ------
-    # ud_i = uCoM  +  (ρ / ρtot) urel_i
-    # u    = uCoM  -  (∑_i ρd_i / ρtot) urel_i   (from momentum conservation)
+    # ud_i = uCoM  +  urel_i  -  ∑_j (ρd_j / ρtot) urel_j
+    # u    = uCoM  -  ∑_i (ρd_i / ρtot) urel_i   (from momentum conservation)
 
-    frac_gas = @fastmath ρ      * inv_ρtot
-    frac_Sil = @fastmath ρd_Sil * inv_ρtot
-    frac_C   = @fastmath ρd_C   * inv_ρtot
-    frac_PAH = @fastmath ρd_PAH * inv_ρtot
+    frac_Sil     = @fastmath ρd_Sil * inv_ρtot
+    frac_C       = @fastmath ρd_C   * inv_ρtot
+    frac_PAH     = @fastmath ρd_PAH * inv_ρtot
+
+    ∑frac_urel_r = @fastmath ( frac_Sil * urel_r_Sil_new  +  frac_C * urel_r_C_new  +  frac_PAH * urel_r_PAH_new )
+    ∑frac_urel_Z = @fastmath ( frac_Sil * urel_Z_Sil_new  +  frac_C * urel_Z_C_new  +  frac_PAH * urel_Z_PAH_new )
 
     # Updated dust velocities & momenta:
-    ud_r_Sil_new = @fastmath uCoM_r_new  +  frac_gas * urel_r_Sil_new
-    ud_r_C_new   = @fastmath uCoM_r_new  +  frac_gas * urel_r_C_new
-    ud_r_PAH_new = @fastmath uCoM_r_new  +  frac_gas * urel_r_PAH_new
+    ud_r_Sil_new   = @fastmath uCoM_r_new  +  urel_r_Sil_new  -  ∑frac_urel_r
+    ud_r_C_new     = @fastmath uCoM_r_new  +  urel_r_C_new    -  ∑frac_urel_r
+    ud_r_PAH_new   = @fastmath uCoM_r_new  +  urel_r_PAH_new  -  ∑frac_urel_r
 
-    ud_Z_Sil_new = @fastmath uCoM_Z_new  +  frac_gas * urel_Z_Sil_new
-    ud_Z_C_new   = @fastmath uCoM_Z_new  +  frac_gas * urel_Z_C_new
-    ud_Z_PAH_new = @fastmath uCoM_Z_new  +  frac_gas * urel_Z_PAH_new
+    ud_Z_Sil_new   = @fastmath uCoM_Z_new  +  urel_Z_Sil_new  -  ∑frac_urel_Z
+    ud_Z_C_new     = @fastmath uCoM_Z_new  +  urel_Z_C_new    -  ∑frac_urel_Z
+    ud_Z_PAH_new   = @fastmath uCoM_Z_new  +  urel_Z_PAH_new  -  ∑frac_urel_Z
 
     ρdud_r_Sil_new = @fastmath ρd_Sil * ud_r_Sil_new
     ρdud_r_C_new   = @fastmath ρd_C   * ud_r_C_new
@@ -178,8 +180,8 @@ function UpdateGasDustMomenta( Δt::Float64, # Time-step
     ρdud_Z_PAH_new = @fastmath ρd_PAH * ud_Z_PAH_new
 
     # Updated gas velocity & momenta:
-    u_r_new = @fastmath uCoM_r_new - ( frac_Sil * urel_r_Sil_new  +  frac_C * urel_r_C_new  +  frac_PAH * urel_r_PAH_new )
-    u_Z_new = @fastmath uCoM_Z_new - ( frac_Sil * urel_Z_Sil_new  +  frac_C * urel_Z_C_new  +  frac_PAH * urel_Z_PAH_new )
+    u_r_new  = @fastmath uCoM_r_new - ∑frac_urel_r
+    u_Z_new  = @fastmath uCoM_Z_new - ∑frac_urel_Z
 
     ρu_r_new = @fastmath ρ * u_r_new
     ρu_Z_new = @fastmath ρ * u_Z_new

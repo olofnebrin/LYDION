@@ -475,8 +475,9 @@ end
 Compute and save grain size statistics for each dust species:
   - Area-weighted mean grain size <a>_area = ∫a³(∂n/∂a)da / ∫a²(∂n/∂a)da
   - Mass fraction of total dust in each species: f_s = M_s / M_tot
-  - BB-band-averaged Q_abs evaluated at the area-weighted mean grain size
-    for each species, for use in grain charging (Dust.jl)
+  - Black-body photon number-weighted band-averaged Q_abs evaluated 
+    at the area-weighted mean grain size for each species, for 
+    use in e.g. grain charging (Dust.jl)
 """
 function ComputeGrainSizeStats( Q_abs_PAH_itp,
                                 Q_abs_C_itp,
@@ -512,15 +513,18 @@ function ComputeGrainSizeStats( Q_abs_PAH_itp,
                              Q_abs_PAH_itp(a_area_C, λ_cm) :
                              Q_abs_C_itp(  a_area_C, λ_cm)
 
-    # BB-weighted Q_abs for each bin at area-weighted mean grain size:
+    # Black-body photon number-weighted Q_abs for each bin,
+    # at area-weighted mean grain size:
     inv_kBT = 1.0 / (kB * Teff)   
     B_λ(λ)  = (2 * h * (c^2) / (λ^5)) / expm1( h * c * inv_kBT / λ )
 
     function Q_abs_band(Q_at_a::Function, b::Int)
         λ_lo = λ_bands_lo_cm[b]
         λ_hi = λ_bands_hi_cm[b]
-        num, _ = quadgk( λ -> Q_at_a(λ) * B_λ(λ), λ_lo, λ_hi; rtol=1e-4 )
-        den, _ = quadgk( λ -> B_λ(λ),              λ_lo, λ_hi; rtol=1e-4 )
+
+        # Weight by photon number ~ B_λ / (hν) = B_λ * λ / (hc) ~ B_λ * λ:
+        num, _ = quadgk( λ -> Q_at_a(λ) * B_λ(λ) * λ, λ_lo, λ_hi; rtol=1e-4 )
+        den, _ = quadgk( λ -> B_λ(λ) * λ,             λ_lo, λ_hi; rtol=1e-4 )
         return num / den
     end
 
@@ -796,7 +800,7 @@ end
 
 
 # Compute dust opacities & characteristic grain sizes:
-Teff = 4.8e4 
+Teff = 4.8e4 # By default we use Teff = 4.8 × 10⁴ K to approximate the spectrum of a ~ 30 M☉ metal-poor star
 
 RunComputeDustOpacities(
     joinpath(@__DIR__, "Gra_81"),

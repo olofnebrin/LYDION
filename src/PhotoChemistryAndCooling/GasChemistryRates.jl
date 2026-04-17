@@ -211,6 +211,8 @@ const Tdust_crit_H2::Float64 = 600.0
     From Hollenbach & McKee (1979). """
 @inline function S_HI_ϵ_H2( T::Float64, Td::Float64 )
 
+    Td = max( Td, 0.1 )
+
     @fastmath S_HI_ϵ = 1 / ( ( 1  +  0.04 * (T + Td)^0.5  +  0.002 * T  +  8e-6 * (T * T) ) 
                            * ( 1  +  1e4 * exp( - Tdust_crit_H2 / Td ) ) )
 
@@ -450,6 +452,7 @@ const kdisc_H2H2_high0 = 1.3e-9;    const T_discH2H2_high = 53300.0
 function kdiss_H2H2( T::Float64, 
                    nH2::Float64
                     )
+                    
     T = clamp( T, 100.0, 1e5 )
     
     # Low & high-density limits of the reaction rate:

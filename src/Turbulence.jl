@@ -30,7 +30,11 @@ function SetupTurbulence!( u_RMSturb::Float64,
                                    p::Float64 = 2.0
                            )
 
-    kmin        = Two_π / Rcl             # Largest scale (cloud-scale driving)
+    Δr_extent   = r[end] - r[1]
+    ΔZ_extent   = Z[end] - Z[1]
+    Rcl_limited = min( Rcl, max( Δr_extent, ΔZ_extent ) ) # Limit 'cloud' scale if it exceeds the box size. 
+
+    kmin        = Two_π / Rcl_limited     # Largest scale (cloud-scale/box-scale driving)
     Δr_min      = minimum( diff(r) )
     ΔZ_min      = minimum( diff(Z) )
     Δmin        = min( Δr_min, ΔZ_min )

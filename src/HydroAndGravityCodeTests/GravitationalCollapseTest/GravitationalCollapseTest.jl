@@ -122,36 +122,12 @@ function UpdateGravTest!( Δt_Hydro::Float64,
                         gravcoeffs::GravityCoeffs{Float64}
                           )
 
-    # Main geometry arrays:
-    ΔV          = geometry.ΔV
-    inv_ΔV      = geometry.inv_ΔV
-    A_r         = geometry.A_r
-    A_Z         = geometry.A_Z
-    inv_r_cell  = geometry.inv_r_cell
-    r           = geometry.r 
-    rCoM        = geometry.rCoM
-    Z           = geometry.Z
-    ZCoM        = geometry.ZCoM
-
-    # Weights for converting between cell center & cell-average values of 
-    # conservatives & primitives:
-    w_i_m1_r    = geometry.w_i_m1_r;     w_j_m1_Z     = geometry.w_j_m1_Z
-    w_i_0_r     = geometry.w_i_0_r;      w_j_0_Z      = geometry.w_j_0_Z
-    w_i_p1_r    = geometry.w_i_p1_r;     w_j_p1_Z     = geometry.w_j_p1_Z
-
-    q_i_m1_r    = geometry.q_i_m1_r;     q_j_m1_Z     = geometry.q_j_m1_Z
-    q_i_0_r     = geometry.q_i_0_r;      q_j_0_Z      = geometry.q_j_0_Z
-    q_i_p1_r    = geometry.q_i_p1_r;     q_j_p1_Z     = geometry.q_j_p1_Z
-
-    # WENO3 weights for interface reconstruction:
-    w_plus_i_p1 = geometry.w_plus_i_p1;  w_minus_i_p1 = geometry.w_minus_i_p1   
-    w_plus_j_p1 = geometry.w_plus_j_p1;  w_minus_j_p1 = geometry.w_minus_j_p1
-
     # Some hydro state arrays (cell-averaged):
     ρ           = hydrostate.ρ;        ρu_r        = hydrostate.ρu_X 
     ρu_Z        = hydrostate.ρu_Y;     E           = hydrostate.E
     u_r         = hydrostate.u_X;      u_Z         = hydrostate.u_Y 
     P           = hydrostate.P;        γad         = hydrostate.γad 
+    e           = hydrostate.e_dual
 
     # Grid size & intervals:
     N_X, N_Y    = size( ρ )
@@ -167,23 +143,17 @@ function UpdateGravTest!( Δt_Hydro::Float64,
     Δt_Hydro_half = 0.5 * Δt_Hydro
 
     # Gravity solver + kick update (half step):
+    UpdateTotalDustDensity!( hydrostate )
     GravitySolveAndKick!( Δt_Hydro_half, hydrostate, gravstate, gravcoeffs,
-                          ΔV, r, Z, rCoM, ZCoM )
+                          geometry )
                   
     # Update hydro & dust variables & passive scalars by advection (full step):
-    UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, inv_ΔV, A_r, A_Z,
-
-                  w_i_m1_r, w_i_0_r, w_i_p1_r, w_j_m1_Z, w_j_0_Z, w_j_p1_Z, 
-                  q_i_m1_r, q_i_0_r, q_i_p1_r, q_j_m1_Z, q_j_0_Z, q_j_p1_Z,  
-
-                  w_plus_i_p1, w_minus_i_p1,   
-                  w_plus_j_p1, w_minus_j_p1, 
-
-                  Val(:Cylindrical), inv_r_cell )  
+    UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, geometry )   
 
     # Gravity solver + kick update (half step):
+    UpdateTotalDustDensity!( hydrostate )
     GravitySolveAndKick!( Δt_Hydro_half, hydrostate, gravstate, gravcoeffs,
-                          ΔV, r, Z, rCoM, ZCoM )
+                          geometry )
 
     # Update primitives to reflect latest conservatives,
     # so that we can set the CFL time-step for the next time-step:
@@ -191,7 +161,7 @@ function UpdateGravTest!( Δt_Hydro::Float64,
         @inbounds @simd for i in dN_X
             # Recover primitives at geometric cell centers, from the 
             # conservative variables at the cell centers:
-            u_r[i,j], u_Z[i,j], P[i,j] = GetPrimitive( ρ[i,j], ρu_r[i,j], ρu_Z[i,j], E[i,j], γad[i,j] )
+            u_r[i,j], u_Z[i,j], P[i,j] =  GetPrimitive( ρ[i,j], ρu_r[i,j], ρu_Z[i,j], E[i,j], e[i,j], γad[i,j] )
 
             # Ensure positive pressure:
             P[i,j] = max( P[i,j], P_floor )
@@ -278,11 +248,12 @@ function SetupGravityTest( tmax::Float64,
         print("\r\033[KInitialising hydro arrays..."); flush(stdout)
     end 
 
-    # We have zero passive scalars:
+    # We have zero passive scalars, and minimum (1) number of dust species:
     N_Scalars = 0
+    N_dust    = 1
 
     # Set up hydro state + ghost grid arrays:
-    hydrostate, ghostgrid = GenerateHydroArrays( r, rCoM, Z, ZCoM, 5 / 3, N_Scalars,
+    hydrostate, ghostgrid = GenerateHydroArrays( r, rCoM, Z, ZCoM, 5 / 3, N_dust, N_Scalars,
                                                  :Reflect,  :Outflow,   # Reflective BCs at r = 0, outflow at Rmax
                                                  BC_Z_bot,  :Outflow    # User dependent BCs at Z = 0, outflow at Zmax
                                                   )
@@ -347,31 +318,31 @@ function SetupGravityTest( tmax::Float64,
                 end
 
                 # Gas momentum density:
-                ρu_r[i,j]   = 0.0
-                ρu_Z[i,j]   = 0.0
+                ρu_r[i,j]     = 0.0
+                ρu_Z[i,j]     = 0.0
 
                 # Gas pressure (uniform everywhere initially):
-                P[i,j]      = max( P0, P_floor )
+                P[i,j]        = max( P0, P_floor )
 
                 # Gas internal energy density e = P / (γ - 1) = ρ kB T₀ / ((γ - 1) μ mH):
-                e[i,j]      = P[i,j] / ( γad[i,j] - 1 )
+                e[i,j]        = P[i,j] / ( γad[i,j] - 1 )
 
                 # Initial energy density of gas, E = e:
-                E[i,j]      = e[i,j]  
+                E[i,j]        = e[i,j]  
 
                 # Dust density:
-                ρd[i,j]     = max( 1e-7 * ρ[i,j], 10.0 * ρd_floor )
+                ρd[1,i,j]     = max( 1e-7 * ρ[i,j], 10.0 * ρd_floor )
 
                 # Dust momentum density:
-                ρdud_r[i,j] = 0.0
-                ρdud_Z[i,j] = 0.0
+                ρdud_r[1,i,j] = 0.0
+                ρdud_Z[1,i,j] = 0.0
                 
             end
         end # End of i-loop 
     end # End of j-loop
 
     # Initialize total mass in simulation volume (for diagnostic purposes):
-    UpdateTotalMass!( hydrostate, ΔV )
+    UpdateTotalMass!( hydrostate, geometry )
 
     ###############################################################
     #######                                                 #######
@@ -392,8 +363,12 @@ function SetupGravityTest( tmax::Float64,
 
     # Initialize the gravitational potential, so that we use an appropriate
     # first time-step:
+
+    # Update total dust density ρdtot:
+    UpdateTotalDustDensity!( hydrostate )
+
     Update_Φ!( gravstate.Φ, gravstate.Φ_half, gravstate.Φ_old, gravstate.Φ_snapshot, 
-               gravstate.ρtot, ρ, ρd, gravstate.ρ_bg,
+               gravstate.ρtot, ρ, hydrostate.ρdtot, gravstate.ρ_bg,
                gravcoeffs.RPoiss_ijp, gravcoeffs.RPoiss_ij, gravcoeffs.RPoiss_ijm,
                gravcoeffs.ZPoiss_ijp, gravcoeffs.ZPoiss_ij, gravcoeffs.ZPoiss_ijm, 
                gravcoeffs.Δτ_max, gravcoeffs.Δτ_min,
@@ -428,10 +403,10 @@ function SetupGravityTest( tmax::Float64,
     while t < tmax
 
         # Hydro CFL time-step:
-        Δt_CFL   = GetCFLTimeStep( r, Z, ρ, P, u_r, u_Z, ud_r, ud_Z, γad ) 
+        Δt_CFL   = GetCFLTimeStep( hydrostate, geometry ) 
         
         # Gravity time-step:
-        Δt_Grav  = GetGravityTimeStep( r, Z, gravstate.∂Φ∂r, gravstate.∂Φ∂Z, ρ )   
+        Δt_Grav  = GetGravityTimeStep( r, Z, gravstate.∂Φ∂r, gravstate.∂Φ∂Z, ρ, hydrostate.ρdtot )    
 
         # Set hydro time-step:
         Δt_Hydro = min( 1.25 * Δt_Hydro, Δt_CFL, Δt_Grav, Δt_Resolve, tmax - t )

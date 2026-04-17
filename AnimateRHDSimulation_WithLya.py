@@ -17,9 +17,7 @@ sys.path.insert(0, str(cmastro_src))
 import cmastro
 
 # ---------------- user inputs ----------------
-#filename  = "Aaron_RHDSim_Lya_n4_Z2_128x128.h5"
-filename  = "RHDSim_Lya_64x64_2026-03-20.h5"
-#filename  = "Aaron_RHDSimGC_Lya_256.h5"    
+filename  = "RHDSim_StarCluster_Lya_128x128_2026-04-16.h5" 
 frameskip = 1                  # use >1 to skip frames
 save_mp4  = True               # True to save mp4 instead of interactive show
 outname   = "Animation_LyaRHD_withspectra.mp4"
@@ -223,7 +221,7 @@ plt.rcParams['ytick.direction'] = 'in'
 # -------------------------------------------------------------------
 # display ranges
 # -------------------------------------------------------------------
-vmin_nH, vmax_nH = 10, 1e5
+vmin_nH, vmax_nH = 1e3, 1e7
 norm_nH = LogNorm(vmin=vmin_nH, vmax=vmax_nH)
 
 vmin_T, vmax_T = 10.0, 1e5
@@ -279,12 +277,12 @@ panel_label_style = dict(
 ax1.set_ylabel("Z (pc)", labelpad=12)
 im_nH = ax1.pcolormesh(R, ZZ, nH_hist[0].T, norm=norm_nH, shading='auto', cmap='cma:laguna')
 cb1 = fig.colorbar(im_nH, ax=ax1, pad=0.02)
-cb1.set_ticks([10, 1e3, 1e5])
-cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$'])
+cb1.set_ticks([1e3, 1e5, 1e7])
+cb1.set_ticklabels(['10$^{3}$', '10$^{5}$', '10$^{7}$'])
 ax1.text(0.9, 0.2, "n$_{H}$ (cm$^{-3}$)", transform=ax1.transAxes, **panel_label_style)
 
-ax1.set_xlim(r[0]/pc, r[-1]/pc)
-ax1.set_ylim( Z[0]/pc, Z[-1]/pc)
+ax1.set_xlim( r[0]/pc, r[-1]/pc )
+ax1.set_ylim( Z[0]/pc, Z[-1]/pc )
 
 # --- temperature ---
 ax2.set_xlabel("r (pc)", labelpad=12)

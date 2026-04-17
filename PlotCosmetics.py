@@ -12,7 +12,7 @@ import numpy as np
 # Default colormap choices for different physical quantities, 
 # with fallbacks if cmastro colormaps are not available:
 CMAP_DEFAULTS = {
-    "density":      ("cma:laguna",    "viridis"),
+    "density":      ("cma:laguna", "viridis"),
     "temperature":  ("coolwarm",   "coolwarm"),
     "dust":         ("cma:emph",   "viridis"),
     "chemistry":    ("magma",      "magma"),

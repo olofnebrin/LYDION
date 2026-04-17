@@ -12,14 +12,15 @@
 """
 
 
-using .Structs: GravityState, GravityCoeffs
+using .Structs: GravityState, GravityCoeffs, GeometryCylindrical
 
 using .ConstantsAndFunctions  # Useful constants & functions 
 using  Base.Threads           # For CPU acceleration
 
 
 export CreateGravityStateAndCoefficients, 
-       Update_Φ!, Update_∇Φ!, ShouldWeUpdateΦ
+       Update_Φ!, Update_∇Φ!, ShouldWeUpdateΦ,
+       UpdateGravityForceDiagnostics!
 
 
 """ This function creates coefficients that enter the discretized 
@@ -110,8 +111,13 @@ function CreateGravityStateAndCoefficients( A_r::AbstractArray{Float64, 2},
     Δτ_max   = max( r[end]^2, Z[end]^2 ) / 4
     Δτ_min   = min( minimum(diff(r))^2, minimum(diff(Z))^2 ) / 4
 
-    return GravityState(Φ, Φ_half, Φ_old, Φ_snapshot, ∂Φ∂r, ∂Φ∂Z, ρtot, ρ_bg, f_gravity_r, f_gravity_Z, P, Q, ℓmax), 
-           GravityCoeffs(RPoiss_ijp, RPoiss_ij, RPoiss_ijm, ZPoiss_ijp, ZPoiss_ij, ZPoiss_ijm, Δτ_max, Δτ_min)
+    # Gravity force diagnostics:
+    IntegratedGravityForce            = 0.0
+    IntegratedGravityForce_radial_net = 0.0
+
+    return GravityState( Φ, Φ_half, Φ_old, Φ_snapshot, ∂Φ∂r, ∂Φ∂Z, ρtot, ρ_bg, f_gravity_r, f_gravity_Z, P, Q, ℓmax, 
+                         IntegratedGravityForce, IntegratedGravityForce_radial_net ), 
+           GravityCoeffs( RPoiss_ijp, RPoiss_ij, RPoiss_ijm, ZPoiss_ijp, ZPoiss_ij, ZPoiss_ijm, Δτ_max, Δτ_min )
 end
 
 
@@ -886,4 +892,65 @@ function ShouldWeUpdateΦ( Φ::AbstractArray{Float64, 2},
     end # End of j-loop 
 
     return ShouldWeUpdate
+end
+
+
+""" This function updates the integrated gravitational forces, 
+    which are useful diagnostics in RHD simulations. Specifically:
+    
+    IntegratedGravityForce            ≡ ∫dV |f_grav| 
+    IntegratedGravityForce_radial_net ≡ ∫dV ( f_gravity ⋅ r̂_out ) """
+function UpdateGravityForceDiagnostics!( GravState::GravityState, 
+                                              Geom::GeometryCylindrical,
+                                          Z_center::Float64 )
+
+    # Unpack needed arrays:
+    f_grav_r  = GravState.f_gravity_r
+    f_grav_Z  = GravState.f_gravity_Z
+    rCoM      = Geom.rCoM
+    ZCoM      = Geom.ZCoM
+    ΔV        = Geom.ΔV 
+
+    # Grid size & intervals:
+    N_r, N_Z  = size( ΔV )   # Grid size 
+    dN_r      = 1:N_r        # r-interval 
+    dN_Z      = 1:N_Z        # Z-interval
+
+    IntegratedGravityForce            = 0.0  # Initialize ∫dV |f_grav|
+    IntegratedGravityForce_radial_net = 0.0  # Initialize ∫dV ( f_gravity ⋅ r̂_out )
+    for j in dN_Z 
+        @inbounds @simd for i in dN_r 
+            # Magnitude of gravitatonal force:
+            f_grav_mag = @fastmath sqrt( f_grav_r[i,j] * f_grav_r[i,j]  +  f_grav_Z[i,j] * f_grav_Z[i,j] )
+
+            # Get contribution to ∫dV |f_grav| from this cell:
+            IntegratedGravityForce += ΔV[i,j] * f_grav_mag
+
+            # Distance from star/cloud center:
+            Δr       = rCoM[i]
+            ΔZ       = ZCoM[j] - Z_center
+            distance = @fastmath sqrt( Δr * Δr  +  ΔZ * ΔZ )
+
+            if distance > 0.0
+                inv_d   = @fastmath 1.0 / distance
+                e_out_r = Δr * inv_d
+                e_out_Z = ΔZ * inv_d
+
+                f_grav_radial = f_grav_r[i,j] * e_out_r  +  f_grav_Z[i,j] * e_out_Z
+            else
+                # At the stellar position the outward direction is undefined:
+                f_grav_radial = 0.0
+            end
+
+            # Get contribution to ∫dV ( f_gravity ⋅ r̂_out ):
+            IntegratedGravityForce_radial_net += ΔV[i,j] * f_grav_radial
+
+        end # End of i-loop 
+    end # End of j-loop 
+
+    # Save results in the gravity struct:
+    GravState.IntegratedGravityForce            = IntegratedGravityForce
+    GravState.IntegratedGravityForce_radial_net = IntegratedGravityForce_radial_net
+
+    return nothing 
 end

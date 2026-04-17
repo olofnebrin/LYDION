@@ -19,7 +19,8 @@ import cmastro
 
 
 # ---------------- user inputs ----------------
-filename = "RHDSim_NoLya_128x128_2026-04-03.h5"    
+#filename = "IdealizedRHDSim_Turbulence_false_Lya_64x64_2026-04-07.h5"     
+filename = "RHDSim_NoLya_256x512_2026-04-13.h5" 
 frameskip = 1                 
 save_mp4 = True               
 outname = "density_T.mp4"
@@ -57,10 +58,8 @@ with h5py.File(filename, "r") as f:
 
 
 xHI_hist  = 1.0 - 2.0 * xH2_hist - xHII_hist
-rhod_hist = rhod_Sil_hist + rhod_C_hist + rhod_PAH_hist 
-#rhod_hist = rhod_Sil_hist 
-
-Trad_hist = np.maximum(Trad_hist, 1.0)   # Use gas temperature for plotting if Trad is not available (e.g. in early stages when dust is negligible)
+#rhod_hist = rhod_Sil_hist + rhod_C_hist + rhod_PAH_hist 
+rhod_hist = rhod_Sil_hist 
 
 # shapes (needed by ensure_NtNrNz)
 Nt_raw, a1_rho, a2_rho = rho_hist.shape
@@ -138,7 +137,7 @@ nH_hist = X * rho_hist / mH   # (Nt, Nr, Nz)
 R, ZZ = np.meshgrid(r/pc, Z/pc, indexing='ij')
 
 # display ranges
-vmin_nH, vmax_nH = 10, 1e5
+vmin_nH, vmax_nH = 1e2, 1e8
 norm_nH = LogNorm(vmin=vmin_nH, vmax=vmax_nH)
 
 vmin_T, vmax_T = 1, 1e5
@@ -166,11 +165,11 @@ ax3.tick_params(labelbottom=False)
 ax1.set_ylabel("Z (pc)", labelpad=12)
 im_nH = ax1.pcolormesh(R, ZZ, nH_hist[0].T, norm=norm_nH, shading='auto', cmap='cma:laguna')
 cb1 = fig.colorbar(im_nH, ax=ax1, pad=0.02)
-#cb1.set_ticks([1e3, 1e5, 1e7, 1e9])
-cb1.set_ticks([10, 1e3, 1e5])
-#cb1.set_ticklabels(['10$^{3}$', '10$^{5}$', '10$^{7}$', '10$^{9}$'])
+cb1.set_ticks([1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8])
+#cb1.set_ticks([10, 1e3, 1e5])
+cb1.set_ticklabels(['10$^{2}$', '10$^{3}$', '10$^{4}$', '10$^{5}$', '10$^{6}$', '10$^{7}$', '10$^{8}$'])
 #cb1.set_ticklabels(['10$^{4}$', '10$^{6}$', '10$^{8}$'])
-cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$'])
+#cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$'])
 panel_label_style = dict(ha='right', va='top', color='black',
                          path_effects=[pe.withStroke(linewidth=3, foreground='white')])
 ax1.text(0.9, 0.2, "n$_{H}$ (cm$^{-3}$)", transform=ax1.transAxes, **panel_label_style)
@@ -181,7 +180,7 @@ ax1.set_ylim( Z[0]/pc, Z[-1]/pc )
 # --- temperature ---
 ax2.set_xlabel("r (pc)", labelpad=12)
 ax2.set_ylabel("Z (pc)", labelpad=12)
-im_T = ax2.pcolormesh(R, ZZ, Trad_hist[0].T, norm=norm_T, shading='auto', cmap='coolwarm')
+im_T = ax2.pcolormesh(R, ZZ, T_hist[0].T, norm=norm_T, shading='auto', cmap='coolwarm')
 cb2 = fig.colorbar(im_T, ax=ax2, pad=0.02)
 cb2.set_ticks([1, 10, 100, 1e3, 1e4, 1e5])
 cb2.set_ticklabels(['1', '10', '10$^{2}$', '10$^{3}$', '10$^{4}$', '10$^{5}$'])
@@ -221,7 +220,7 @@ frames = saved_idx[::frameskip]
 def init():
     k0 = frames[0]
     im_nH.set_array(nH_hist[k0].T.ravel())
-    im_T.set_array(Trad_hist[k0].T.ravel())
+    im_T.set_array(T_hist[k0].T.ravel())
     im_xH2.set_array(np.clip(DG_hist[k0].T, vmin_DG, vmax_DG).ravel())
     im_xHII.set_array(np.clip(xHII_hist[k0].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k0]/kyr:.2f} kyr")
@@ -229,7 +228,7 @@ def init():
 
 def update(k):
     im_nH.set_array(nH_hist[k].T.ravel())
-    im_T.set_array(Trad_hist[k].T.ravel())
+    im_T.set_array(T_hist[k].T.ravel())
     im_xH2.set_array(np.clip(DG_hist[k].T, vmin_DG, vmax_DG).ravel())
     im_xHII.set_array(np.clip(xHII_hist[k].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k]/kyr:.2f} kyr")

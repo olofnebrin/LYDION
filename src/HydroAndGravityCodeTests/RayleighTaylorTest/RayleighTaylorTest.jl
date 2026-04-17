@@ -128,11 +128,12 @@ function SetupRTTest( tmax::Float64,
         print("\r\033[KInitialising hydro arrays..."); flush(stdout)
     end 
 
-    # We have zero passive scalars:
+    # We have zero passive scalars, and minimum (1) number of dust species:
     N_Scalars = 0
+    N_dust    = 1
 
     # Set up hydro state + ghost grid arrays:
-    hydrostate, ghostgrid = GenerateHydroArrays( X, XCoM, Y, YCoM, 7 / 5, N_Scalars,
+    hydrostate, ghostgrid = GenerateHydroArrays( X, XCoM, Y, YCoM, 7 / 5, N_dust, N_Scalars,
                                                  :Periodic, :Periodic,   # Periodic BCs in X 
                                                  :Reflect,  :Reflect     # Reflective BCs in Y 
                                                   )
@@ -213,7 +214,7 @@ function SetupRTTest( tmax::Float64,
             E[i,j]      = P[i,j] / (γad[i,j] - 1)  +  (ρu_X[i,j]^2 + ρu_Y[i,j]^2) / (2 * ρ[i,j])
 
             # Set dust density to be tiny (not coupled to gas):
-            ρd[i,j]     = max( 1e-5 * ρ[i,j], ρd_floor )
+            ρd[1,i,j]   = max( 1e-5 * ρ[i,j], ρd_floor )
 
         end # End of i-loop 
     end # End of j-loop
@@ -259,7 +260,7 @@ function SetupRTTest( tmax::Float64,
     while t < tmax
 
         # Hydro CFL time-step:
-        Δt_CFL = GetCFLTimeStep( X, Y, ρ, P, u_X, u_Y, ud_X, ud_Y, γad )  
+        Δt_CFL = GetCFLTimeStep( hydrostate, geometry )  
 
         # Set hydro time-step:
         Δt_Hydro = min( 1.25 * Δt_Hydro, Δt_CFL, Δt_Resolve, tmax - t )

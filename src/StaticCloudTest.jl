@@ -106,6 +106,8 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
     Z          = geometry.Z
     ZCoM       = geometry.ZCoM
     ΔV         = geometry.ΔV
+    A_r        = geometry.A_r 
+    A_Z        = geometry.A_Z 
 
     # Grid intervals:
     N_r        = length( rCoM )
@@ -276,10 +278,7 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
     
     # Initialize the progress meter:
     prog = Progress( 100; dt = 0.01, desc = "Time integration progress:",
-                     barglyphs=BarGlyphs("[=> ]"), barlen = 50, color=:green ) 
-
-    t_emit = 0.0
-    t_adv  = 0.0              
+                     barglyphs=BarGlyphs("[=> ]"), barlen = 50, color=:green )              
 
     step = 0
     while t < tmax
@@ -304,12 +303,17 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
                                        ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r, 
                                        true )
 
-        println( maximum(LyaState.e_Lyα) )
+        # Update Lyα forces f_Lyα, force multipliers:
+        LyaState.M_F, LyaState.M_F_radial_net, 
+        LyaState.M_F_radial_out,  
+        LyaState.L_Lyα = Update_f_Lyα_MF_L_Lyα!( LyaState.f_Lyα_r, LyaState.f_Lyα_Z, Δρu_r, Δρu_Z, 
+                                                 ∫dν_js_Lyα, ΔV, rCoM, ZCoM, Δt,
+                                                 Zc, # Cloud center 
+                                                 BC_Z_bot )
 
-        # Update Lyα forces f_Lyα, force multiplier, and M_F:
-        LyaState.M_F, LyaState.L_Lyα = Update_f_Lyα_MF_L_Lyα!( LyaState.f_Lyα_r, LyaState.f_Lyα_Z, Δρu_r, Δρu_Z, 
-                                                               ∫dν_js_Lyα, ΔV, Δt,
-                                                               BC_Z_bot )
+        # Update Lyα escape fraction:
+        LyaState.f_esc_Lyα = Compute_f_esc_Lyα_Cylindrical( H_r, H_Z, A_r, A_Z, LyaState.Δν, 
+                                                            LyaState.L_Lyα, BC_Z_bot )
 
         # Reset Δρu to zero for next time-step (to ensure correct force calculation):
         Reset_Δρu!( Δρu_r, Δρu_Z )
@@ -349,9 +353,6 @@ function SetupStaticCloudTest( τcl::Float64,              # Cloud optical depth
         end
 
     end # End of time integration 
-
-    #println("Emit/abs:  ", t_emit*1e-9, " s")
-    #println("UpdateJH:  ", t_adv*1e-9,  " s")
 
 
     return nothing 

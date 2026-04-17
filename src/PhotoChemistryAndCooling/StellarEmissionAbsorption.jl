@@ -31,6 +31,7 @@ using DelimitedFiles          # For reading data from files
 # Export functions:
 export dNdt_opt, L_opt, dNdt_FUV, L_FUV, dNdt_LW, L_LW,
        dNdt_EUV1, L_EUV1, dNdt_EUV2, L_EUV2, dNdt_EUV3, L_EUV3, L_bol,
+       ClusterEmissionRates,
        HeatingRate_LW, HeatingRate_EUV1, HeatingRate_EUV2, HeatingRate_EUV3, 
        HeatingRate_Compton,
        IonRate_HI, IonRate_H2, IonRate_HeI, IonRate_HeII, IonRate_OI, IonRate_CI,
@@ -567,6 +568,148 @@ function L_bol( mstarZAMS::Float64,
     L_EUV1(mstarZAMS, Zstar_Zsun) + L_EUV2(mstarZAMS, Zstar_Zsun) + L_EUV3(mstarZAMS, Zstar_Zsun)
 end
 
+################################################################################
+#######                                                                  #######
+#######              S T A R  C L U S T E R  E M I S S I O N             #######
+#######                                                                  #######
+################################################################################
+
+# The functions below are useful for computing/initializing the photon emission 
+# rates from a star cluster of a given total mass and IMF (Kroupa).
+
+const p_high_Kroupa::Float64      = 2.3 
+const p_low_Kroupa::Float64       = 1.3 
+const mstar_Kroupa_break::Float64 = 0.5  # Kroupa mass break (high-mass tail above this mass)
+const C_Kroupa_break::Float64     = mstar_Kroupa_break^(p_high_Kroupa - p_low_Kroupa)
+const mstar_Kroupa_min::Float64   = 0.08 
+const mstar_Kroupa_max::Float64   = 100.0
+
+""" This function returns the unnormalized Kroupa IMF. """
+function ∂N∂m_Kroupa_unnormalized( mstar::Float64 )
+
+    if mstar < mstar_Kroupa_min || mstar > mstar_Kroupa_max
+        # Outside the mass range there are no stars, so return 0:
+        return 0.0
+    elseif mstar < mstar_Kroupa_break 
+        return mstar^(- p_low_Kroupa)
+    else
+        # High-mass tail, with a constant pre-factor set so 
+        # IMF is continuous at the mass break:
+        return C_Kroupa_break * mstar^(- p_high_Kroupa)
+    end
+end
+
+
+""" This function computes the normalization factor for the Kroupa IMF, 
+    such that it produces a cluster of a given mass M_StarCluster (M⊙).
+    
+    Thus:
+    
+    A_Kroupa = M_StarCluster / [ ∫dm m ∂N/∂m ] ,
+    
+    where ∫dm m ∂N/∂m can be computed analytically. """
+function NormalizationFactor_Kroupa( M_StarCluster::Float64 )
+
+    I_low   = ( mstar_Kroupa_break^(2 - p_low_Kroupa) - mstar_Kroupa_min^(2 - p_low_Kroupa) ) / (
+              2 - p_low_Kroupa)
+
+    I_upper = C_Kroupa_break * ( mstar_Kroupa_max^(2 - p_high_Kroupa) - mstar_Kroupa_break^(2 - p_high_Kroupa) ) / (
+              2 - p_high_Kroupa)
+
+    # Total integral:
+    I       = I_low  +  I_upper
+
+    # Get normalization factor:
+    A_Kroupa = M_StarCluster / I 
+
+    return A_Kroupa
+end
+
+
+""" This function computes the photon emission rates in 
+    all stellar bands (opt, FUV, LW, EUV1, EUV2, EUV3) 
+    from a star cluster of a given cluster mass M_StarCluster (M⊙)
+    and metallicity Zstar_Zsun (in Solar units), and assuming the 
+    Kroupa IMF. 
+    
+    Thus, for e.g. the FUV band, with a change of variables to 
+    get integration in log-space: 
+    
+    Ṅ_FUV_SC = ∫dm (∂N/∂m) Ṅ_FUV(m)
+             = ∫(dm/m) m (∂N/∂m)(m) Ṅ_FUV(m)
+             = ∫dx exp(x) (∂N/∂m)[exp(x)] Ṅ_FUV[exp(x)] """
+function ClusterEmissionRates( M_StarCluster::Float64, Zstar_Zsun::Float64 )
+
+    x_min        = log( mstar_Kroupa_min )
+    x_max        = log( mstar_Kroupa_max )
+    Δx           = ( x_max - x_min ) / 3000  # Step-size in log-space, with 3000 integration points 
+
+    # Get normalization constant for the IMF, such that it is consistent with 
+    # a star cluster of the given mass:
+    A_Kroupa     = NormalizationFactor_Kroupa( M_StarCluster )
+
+    # Initialize cluster emission rates:
+    dNdt_opt_SC  = 0.0
+    dNdt_FUV_SC  = 0.0
+    dNdt_LW_SC   = 0.0
+    dNdt_EUV1_SC = 0.0
+    dNdt_EUV2_SC = 0.0
+    dNdt_EUV3_SC = 0.0
+
+    # Integrate numerically to find emission rates:
+    x = x_min # Start at x = x_min 
+    while x < x_max
+        # Get stellar mass corresponding to x_mid = x + 0.5 Δx (midpoint):
+        x_mid     = x + 0.5 * Δx 
+        mstar_mid = exp( x_mid )
+
+        # Get normalized Kroupa IMF ∂N⋆/∂m⋆ at this mass:
+        ∂N∂m = A_Kroupa * ∂N∂m_Kroupa_unnormalized( mstar_mid )
+
+        # Integrands:
+        if mstar_mid ≥ 8.0
+            # Only include emission above 8 M⊙, above which the fits 
+            # are applicable (see Denge et al. 2024):
+            Integrand_opt  = mstar_mid * ∂N∂m * dNdt_opt( mstar_mid, Zstar_Zsun )
+            Integrand_FUV  = mstar_mid * ∂N∂m * dNdt_FUV( mstar_mid, Zstar_Zsun )
+            Integrand_LW   = mstar_mid * ∂N∂m * dNdt_LW( mstar_mid, Zstar_Zsun )
+            Integrand_EUV1 = mstar_mid * ∂N∂m * dNdt_EUV1( mstar_mid, Zstar_Zsun )
+            Integrand_EUV2 = mstar_mid * ∂N∂m * dNdt_EUV2( mstar_mid, Zstar_Zsun )
+            Integrand_EUV3 = mstar_mid * ∂N∂m * dNdt_EUV3( mstar_mid, Zstar_Zsun )
+        else
+            Integrand_opt  = 0.0
+            Integrand_FUV  = 0.0
+            Integrand_LW   = 0.0
+            Integrand_EUV1 = 0.0
+            Integrand_EUV2 = 0.0
+            Integrand_EUV3 = 0.0
+        end
+
+        # Add contributions to emission rates:
+        dNdt_opt_SC   += Δx * Integrand_opt
+        dNdt_FUV_SC   += Δx * Integrand_FUV
+        dNdt_LW_SC    += Δx * Integrand_LW
+        dNdt_EUV1_SC  += Δx * Integrand_EUV1
+        dNdt_EUV2_SC  += Δx * Integrand_EUV2
+        dNdt_EUV3_SC  += Δx * Integrand_EUV3
+
+        # Update x:
+        x += Δx 
+    end
+
+    # Also get luminosities:
+    Lum_opt   = dNdt_opt_SC  * E_opt 
+    Lum_FUV   = dNdt_FUV_SC  * E_FUV
+    Lum_LW    = dNdt_LW_SC   * E_LW
+    Lum_EUV1  = dNdt_EUV1_SC * E_EUV1
+    Lum_EUV2  = dNdt_EUV2_SC * E_EUV2
+    Lum_EUV3  = dNdt_EUV3_SC * E_EUV3
+
+    return dNdt_opt_SC, dNdt_FUV_SC, dNdt_LW_SC, 
+           dNdt_EUV1_SC, dNdt_EUV2_SC, dNdt_EUV3_SC,
+           Lum_opt, Lum_FUV, Lum_LW, Lum_EUV1, Lum_EUV2, Lum_EUV3
+end
+
 
 ################################################################################
 #######                                                                  #######
@@ -640,11 +783,10 @@ end
 
 const ConstantComptonHeating::Float64 = σT / (me * c)  # Convenient constant 
 
-""" Compton heating/cooling rate (erg cm⁻³ s⁻¹) from stellar 
+""" Compton heating/cooling rate (erg cm⁻³ s⁻¹) from  
     radiation backgrounds (see e.g. Ploeckinger et al. 2025):
 
-    (4π ne σT / (me c²)) ∫dν J (hν - 4 kB T) 
-    """
+    (4π ne σT / (me c²)) ∫dν J (hν - 4 kB T) """
 @inline function HeatingRate_Compton( J_opt::Float64,
                                       J_FUV::Float64,
                                        J_LW::Float64,

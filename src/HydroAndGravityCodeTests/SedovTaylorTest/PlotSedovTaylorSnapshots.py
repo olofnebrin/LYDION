@@ -7,8 +7,8 @@ import matplotlib.patheffects as pe
 
 # ---------------- User inputs ----------------
 script_dir = os.path.dirname(os.path.abspath(__file__))
-filename   = os.path.join(script_dir, "SedovTest_E1.00e+00_rho1_gamma1.67_t0.4_512x512.h5")
-outname    = os.path.join(script_dir, "SedovTaylorFourPanels_512.pdf")
+filename   = os.path.join(script_dir, "SedovTest_E1.00e+00_rho1_gamma1.67_t0.4_128x128.h5")
+outname    = os.path.join(script_dir, "SedovTaylorFourPanels_128.pdf")
 save_fig   = True
 # ---------------------------------------------
 

@@ -26,7 +26,7 @@ include( "./SpatialGrid.jl" )
 include( "./PoissonGravitySolver.jl" )
 include( "./Hydrodynamics.jl" )
 
-include( "./Dust.jl" )
+include( "./DustPhysics.jl" )
 include( "./DustGasCoupling.jl" )
 include( "PhotoChemistryAndCooling/InitializeChemistryStruct.jl" ) 
 include( "PhotoChemistryAndCooling/PhotoThermoChemistry.jl" )
@@ -39,6 +39,9 @@ include( "./SaveHDF5Data_RHDTests.jl" )
 using  Base.Threads              # For CPU acceleration
 using  ProgressMeter             # To show time step progress
 using  Dates, Printf
+
+const N_dust::Int           = 3      # 3 dust bins (Sil, C, PAH) 
+const N_passivescalars::Int = 19     # Number of passive scalars (for chemistry etc)
 
 export SetupRHDsimulation, RestartRHDsimulation
 
@@ -224,11 +227,14 @@ function UpdateRHD!( Δt_Hydro::Float64,
     # Update LyC and Lyman-Werner escape fractions (just diagnostics):
     Update_fesc_LyC_and_LW_Cylindrical!( RT, A_r, A_Z, BC_Z_bot )
 
-    # Update IR luminsoity & force diagnostics (just useful for comparing forces after simulation):
-    Update_M_F_IR_L_IR!( RT, ΔV, BC_Z_bot )
+    # Position of star along Z-axis (needed below for radial force multipliers):
+    Zmid = 0.5 * ( Z[1] + Z[end] )
+    Zc   = ifelse( BC_Z_bot === :Reflect, 0.0, Zmid )
 
-    # Update direct radiation pressure force diagnostics (just for analyzing after simulation):
-    Update_M_F_dir!( RT, ΔV, BC_Z_bot )
+    # Update direct/stellar & IR luminsoity & force diagnostics 
+    # (just useful for comparing forces after simulation):
+    Update_M_F_dir!( RT, geometry, Zc )
+    Update_M_F_IR_L_IR!( RT, geometry, Zc, BC_Z_bot )
 
     # Update gas temperature (+ adiabatic index), gas energy,
     # and primitives (for computing CFL time-step):
@@ -255,20 +261,22 @@ function UpdateRHD!( Δt_Hydro::Float64,
                 u_r[i,j]  = ρu_r[i,j] / ρ[i,j]
                 u_Z[i,j]  = ρu_Z[i,j] / ρ[i,j]
 
-                # Same for the dust:
-                ud_r[i,j], ud_Z[i,j] = GetDustVelocities( ρd[i,j], ρdud_r[i,j], ρdud_Z[i,j],
-                                                          ρ[i,j], u_r[i,j], u_Z[i,j] )
-
             end
         end # End of i-loop 
     end # End of j-loop 
 
+    # Update dust velocities for each bin:
+    UpdateDustVelocities!( hydrostate )
+
     # Update gas velocity dispersions (useful diagnostic):
     UpdateGasVelocityDispersion!( hydrostate, geometry )
 
+    # Update gas pressure force diagnostics, using the updated pressure
+    # (just useful for comparing forces after simulation):
+    UpdateIntegratedPressureForces!( hydrostate, geometry, Zc )
+
     return nothing
 end
-
 
 
 function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate from star 
@@ -308,7 +316,7 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
                                xCO_ext::Float64,
                                xOI_ext::Float64,
                               xOII_ext::Float64,
-                             Zgas_Zsun::Float64,
+                            Zgas_Zsun₀::Float64,
                                      z::Float64,
                                  Hydro::Bool    = true,     # Hydrodynamics (on/off)
                            RadPressure::Bool    = true,
@@ -335,7 +343,7 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
     PrintLYDIONLogo()
 
     # Initialize the RSL for M1 stellar & Lyα RT (will be updated adaptively each time-step)
-    c̃          = 300 * kms  
+    c̃          = c̃_min 
 
     # Setup uniform cylindrical grid:
     LZ_uniform = min( LZ_uniform, Zmax )
@@ -377,7 +385,7 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
         end
         print(""" Simulation setup: A central star emitting ionizing photons at 
                   rates dNdt_EUV1 = $(dNdt_EUV1), dNdt_EUV2 = $(dNdt_EUV2), dNdt_EUV3 = $(dNdt_EUV3),
-                  in a cloud of initial density nH = $(nH₀) cm⁻³, metallicity Z/Z⊙ = $(Zgas_Zsun),
+                  in a cloud of initial density nH = $(nH₀) cm⁻³, metallicity Z/Z⊙ = $(Zgas_Zsun₀),
                   dust-to-gas ratio D/D⊙ = $(DG₀/DGsun). Initial turbulent RMS velocity 
                   is $(u_RMSturb/1e5) km s⁻¹.
 
@@ -404,9 +412,8 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
     CoolingHeating = true 
 
     # Set up hydro state + ghost grid arrays:
-    N_scalars::Int        = 17       # Number of passive scalars (fixed from chemistry + dust)
     BC_r_left::Symbol     = :Reflect # Always reflective BCs at inner r-boundary in cylindrical coordinates
-    hydrostate, ghostgrid = GenerateHydroArrays( r, rCoM, Z, ZCoM, 5 / 3, N_scalars,
+    hydrostate, ghostgrid = GenerateHydroArrays( r, rCoM, Z, ZCoM, 5 / 3, N_dust, N_passivescalars,
                                                  BC_r_left, BC_r_right,  # Inner & outer r-BCs 
                                                  BC_Z_left, BC_Z_right   # Lower & outer Z-BCs
                                                   )
@@ -572,29 +579,43 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
     RT = GenerateStellarRTArrays_Idealized( dNdt_EUV1, dNdt_EUV2, dNdt_EUV3, ΔV, r, Z, 
                                             Zstar_pos, σstar_cell, c̃, OTS )
 
+    # Bolometric luminosity (for saving):
+    L_bol = RT.Lum_bol
+
     ###############################################################
     #######                                                 #######
     #######           S E T  U P  S A V E  F I L E          #######
     #######                                                 #######
     ###############################################################
 
+    # Update the total pressure force measures before saving:
+    UpdateIntegratedPressureForces!( hydrostate, geometry, Zstar_pos )   
+
     if SaveData
 
         # Create save file:
-        CreateHDF5File( FileName, dNdt_EUV1, dNdt_EUV2, dNdt_EUV3,
+        CreateHDF5File( FileName, dNdt_EUV1, dNdt_EUV2, dNdt_EUV3, L_bol,
                         N_r, N_Z, Nminsteps, Nmaxsteps, Nsaved,  
                         RadPressure, IRfeedback,
                         OTS, z, 
                         tmax, σstar_cell, 
                         Zstar_pos,
-                        DG₀, Zgas_Zsun,
+                        DG₀, Zgas_Zsun₀,
                         BC_r_right, BC_Z_left, BC_Z_right,
                         CFL, CFL_RT, c̃,
                         FileDescription )
 
         # Save spatial grid:
         SaveGridHDF5File( FileName, geometry )
+    end
 
+    ###############################################################
+    #######                                                 #######
+    #######          T I M E  I N T E G R A T I O N         #######
+    #######                                                 #######
+    ###############################################################
+
+    if SaveData
         # Save t = 0 state (initial conditions), which can be useful 
         # for running comparison runs with the same ICs:
         save_index = 1
@@ -604,12 +625,6 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
         SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, duststate, RT,
                              save_index, t, Δt_Hydro )
     end
-
-    ###############################################################
-    #######                                                 #######
-    #######          T I M E  I N T E G R A T I O N         #######
-    #######                                                 #######
-    ###############################################################
 
     Δt_Resolve  = tmax / Nminsteps
 

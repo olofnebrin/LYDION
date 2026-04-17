@@ -11,8 +11,7 @@ using Base.Threads            # For CPU acceleration
 
 # Export functions:
 export Compute_D_Edd, Compute_D_Edd_from_f_n,
-       Update_D_Edd!, Update_D_Edd_Serial!, Update_D_Edd_Threaded!,
-       M1WaveSpeeds_r, M1WaveSpeeds_Z
+       Update_D_Edd!, Update_D_Edd_Serial!, Update_D_Edd_Threaded!
 
 # Export constants:
 export fmin, fmax, Jeps, Heps
@@ -169,7 +168,15 @@ end
 end
 
 
-const TwoThirds::Float64 = 2 / 3
+###############################################################
+#######                                                 #######
+#######                 O L D  C O D E                  #######
+#######                                                 #######
+###############################################################
+
+# The code below is old, from early testing of LYDION with the 
+# HLL flux, for which the eigenvalues were needed. 
+
 
 """ HLL eigenvalues (in units c̃), for a given f = |H| / J
     and μ = cos θ. See Skinner & Ostriker (2013). """
@@ -195,9 +202,7 @@ const TwoThirds::Float64 = 2 / 3
         @assert min(λ1, λ3) ≥ - 1.0 "min(λ1, λ3) = $(min(λ1, λ3))"
     end
 
-    return -1.0, 1.0
-
-    #return λ1, λ3
+    return λ1, λ3
 end 
 
 

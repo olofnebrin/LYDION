@@ -96,6 +96,8 @@ mutable struct LyαArrays
 
     # Force multiplier, Lyα luminosity, Lyα escape fraction:
     M_F::Float64
+    M_F_radial_net::Float64        # Force multiplier radially outward (can be negative if force is radially inward)
+    M_F_radial_out::Float64        # Force multiplier radially outward (only outward components counted) 
     M_F_antigravity::Float64       # Force multiplier anti-parallel to gravity 
     L_Lyα::Float64
     f_esc_Lyα::Float64
@@ -206,6 +208,7 @@ mutable struct StellarRTArrays
     Lum_EUV1::Float64
     Lum_EUV2::Float64
     Lum_EUV3::Float64
+    Lum_bol::Float64    # Stellar bolometric luminosity, i.e. sum of the non-IR band luminosities 
 
     # Stellar luminosities in all bands, in the simulated volume:
     Lum_opt_vol::Float64
@@ -252,11 +255,15 @@ mutable struct StellarRTArrays
 
     # Direct stellar radiation pressure 'force multipliers' (expected ~ 1 for absorption from point source):
     M_F_dir::Float64
+    M_F_dir_radial_net::Float64    # Force multiplier radially outward (can be negative if force is radially inward)
+    M_F_dir_radial_out::Float64    # Force multiplier radially outward (only outward components counted) 
     M_F_dir_antigravity::Float64   # Force multiplier anti-parallel to gravity 
 
     # IR radiation pressure force multipliers (useful diagnostics):
     M_F_IR::Float64
-    M_F_IR_antigravity::Float64   # Force multiplier anti-parallel to gravity 
+    M_F_IR_radial_net::Float64     # Force multiplier radially outward (can be negative if force is radially inward)
+    M_F_IR_radial_out::Float64     # Force multiplier radially outward (only outward components counted) 
+    M_F_IR_antigravity::Float64    # Force multiplier anti-parallel to gravity 
 
     # On-the-spot approximation (Case B) or modelling of recombination photons:
     OTS::Bool
@@ -415,6 +422,9 @@ mutable struct DustState{ITP_P, ITP_R}
     # Store log₁₀(κ) vs. log₁₀(T) interpolations:
     logκP_Sil_itp::ITP_P; logκP_C_itp::ITP_P; logκP_PAH_itp::ITP_P
     logκR_Sil_itp::ITP_R; logκR_C_itp::ITP_R; logκR_PAH_itp::ITP_R
+
+    # Store dust cross-sections per H atom in the Lyα band, for diagnostic purposes:
+    σ_Lyα_per_H::Array{Float64, 2}
 end
 
 
@@ -572,6 +582,19 @@ mutable struct HydrodynamicsState{T<:AbstractFloat}
     σ_X::T 
     σ_Y::T 
     σ::T 
+
+    # Measures of the total gas pressure force (relevant for measuring photoionization feedback 
+    # in RHD simulations in cylindrical coordinates, otherwise unused):
+    IntegratedPressureForce::T                # ∫dV |- ∇P|
+    IntegratedPressureForce_radial_net::T     # ∫dV ( - ∇P ⋅ r̂_out )
+    IntegratedPressureForce_radial_out::T     # ∫dV max( - ∇P ⋅ r̂_out, 0.0 )
+    IntegratedPressureForce_antigrav::T       # ∫dV ( - ∇P ⋅ â_grav )
+
+    # Pressure at interfaces obtained from Riemann solver:
+    P_interface_X::Array{T, 2}
+    P_interface_Y::Array{T, 2}
+    P_interface_X_snapshot::Array{T, 2}  # Store snapshot of P_interface_X from step n (since P_interface_X is updated each RK stage)
+    P_interface_Y_snapshot::Array{T, 2}  # Store snapshot of P_interface_Y from step n (since P_interface_Y is updated each RK stage)
 end
 
 
@@ -743,6 +766,10 @@ mutable struct GravityState{T<:AbstractFloat}
     P::Array{T, 2}           # Legendre polynomials (for BCs), one array for each thread (to avoid race conditions)
     Q::Array{T, 1}           # Multipole moments (for BCs)
     ℓmax::Int                # Maximum ℓ to use in Legendre polynomials
+
+    # Force diagnostics:
+    IntegratedGravityForce::T                # ∫dV |f_gravity|, same as ∫dV ( f_gravity ⋅ â_grav )
+    IntegratedGravityForce_radial_net::T     # ∫dV ( f_gravity ⋅ r̂_out ), NOTE: negative typically
 end
 
 """ A struct for the Poisson equation coefficients. These never 

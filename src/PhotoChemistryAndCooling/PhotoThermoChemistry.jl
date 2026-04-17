@@ -28,7 +28,7 @@ include("./CosmicRays.jl")
 const CFL_RT::Float64                  = 0.4             # CFL factor that determines the advection time-step for stellar, IR & Lyα RT (Default: 0.4. NOTE: Must be < 1)
 const C_RP::Float64                    = 0.1             # Sets the radiation pressure-limited maximum global time-step (Default = 0.1, should be < 1)
 const C_RP_Dust::Float64               = 0.4             # Sets the radiation pressure-limited maximum global time-step for the pure dust contribution (Default = 0.4, since dust is typically coupled to gas)
-const ϵ_RSL::Float64                   = 3.0             # RSL is ≥ ϵ_RSL × max(|u|, c_s) (Default: 5.0)
+const ϵ_RSL::Float64                   = 4.0             # RSL is ≥ ϵ_RSL × max(|u|, c_s) (Default: 4.0)
 const c̃_min::Float64                   = 100 * kms       # Lower bound on RSL, regardless of gas conditions (Default: 100 km/s)
 const max_steps::Int64                 = 1000000         # Maximum number of sub-cycling sub-steps per global time-step (default = 10⁶)
 const DEBUG_PhotoThermoChemistry::Bool = false           # Allow safety checks for physical values etc. Cheap & good for tracking bugs.
@@ -38,7 +38,7 @@ const DEBUG_PhotoThermoChemistry::Bool = false           # Allow safety checks f
 export CFL_RT, c̃_min, GetRadPressureTimeStep_GasAcceleration, GetRadPressureTimeStep_DustAcceleration,
        GetRadPressureTimeStep_GasDustAcceleration,
        UpdateRTandThermoChemistry!, StellarRTArrays, 
-       GenerateStellarRTArrays, GenerateStellarRTArrays_Idealized,
+       GenerateStellarRTArrays, GenerateStarClusterRTArrays, GenerateStellarRTArrays_Idealized,
        FindRSL
 
     
@@ -2566,13 +2566,16 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         # over a substep Δtsub.
 
         # Get grain charges:
-        Zgr_Sil = FindGrainCharge( T_old, nHII_old, nHeII_old, nHeIII_old, ne_old,
+        Zgr_Sil = FindGrainCharge( T_old, nHII_old, nHeII_old, nHeIII_old, 
+                                   nDII_old, nCII_old, nOII_old, ne_old,
                                    J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, Sil, e_Lyα_new )
 
-        Zgr_C   = FindGrainCharge( T_old, nHII_old, nHeII_old, nHeIII_old, ne_old,
+        Zgr_C   = FindGrainCharge( T_old, nHII_old, nHeII_old, nHeIII_old, 
+                                   nDII_old, nCII_old, nOII_old, ne_old,
                                    J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, Gra, e_Lyα_new )
 
-        Zgr_PAH = FindGrainCharge( T_old, nHII_old, nHeII_old, nHeIII_old, ne_old,
+        Zgr_PAH = FindGrainCharge( T_old, nHII_old, nHeII_old, nHeIII_old, 
+                                   nDII_old, nCII_old, nOII_old, ne_old,
                                    J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, PAH, e_Lyα_new )
 
         # Initialize updated dust & gas velocities (for tracking convergence):
@@ -2633,17 +2636,20 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
                 # (to approximate a BDF1 update):
                 Kdrag_Sil = ComputeDragCoefficientK( Zgr_Sil, ρd_Sil_old, T_old, Sil,
                                                      nHI_old, nH2_old, nHII_old, 
-                                                     nHeI_old, nHeII_old, nHeIII_old, ne_old,
+                                                     nHeI_old, nHeII_old, nHeIII_old,
+                                                     nDII_old, nCII_old, nOII_old, ne_old,
                                                      ud_r_Sil_new, u_r_new, ud_Z_Sil_new, u_Z_new )
 
                 Kdrag_C   = ComputeDragCoefficientK( Zgr_C, ρd_C_old, T_old, Gra,
                                                      nHI_old, nH2_old, nHII_old, 
-                                                     nHeI_old, nHeII_old, nHeIII_old, ne_old,
+                                                     nHeI_old, nHeII_old, nHeIII_old, 
+                                                     nDII_old, nCII_old, nOII_old, ne_old,
                                                      ud_r_C_new, u_r_new, ud_Z_C_new, u_Z_new )
 
                 Kdrag_PAH = ComputeDragCoefficientK( Zgr_PAH, ρd_PAH_old, T_old, PAH,
                                                      nHI_old, nH2_old, nHII_old, 
-                                                     nHeI_old, nHeII_old, nHeIII_old, ne_old,
+                                                     nHeI_old, nHeII_old, nHeIII_old, 
+                                                     nDII_old, nCII_old, nOII_old, ne_old,
                                                      ud_r_PAH_new, u_r_new, ud_Z_PAH_new, u_Z_new )
 
                 # Get candidate update:
@@ -2732,8 +2738,9 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
 
             # -------- UPDATE SILICATE DUST DENSITY --------------------------
             ρd_Sil_new   = DustGrowthDestruction_Update( ρd_Sil_old, ρdplusZ_Sil,
-                                                         ρ_old, nH_old, nHI_old,
-                                                         nHII_old, T_old, Td_Sil_new,
+                                                         nH_old, nHI_old,
+                                                         nHII_old, nHeII_old, nHeIII_old, nCII_old,
+                                                         T_old, Td_Sil_new,
                                                          urel_Sil, xCI_old, xCII_old, Zgr_Sil,
                                                          J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, e_Lyα_new,
                                                          Sil, Δtsub )
@@ -2747,8 +2754,9 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
             # -------- UPDATE GRAPHITE DUST DENSITY --------------------------
             # Update graphite dust density:
             ρd_C_new     = DustGrowthDestruction_Update( ρd_C_old, ρdplusZ_C,
-                                                         ρ_old, nH_old, nHI_old,
-                                                         nHII_old, T_old, Td_C_new,
+                                                         nH_old, nHI_old,
+                                                         nHII_old, nHeII_old, nHeIII_old, nCII_old,
+                                                         T_old, Td_C_new,
                                                          urel_C, xCI_old, xCII_old, Zgr_C,
                                                          J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, e_Lyα_new,
                                                          Gra, Δtsub )
@@ -2766,8 +2774,9 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
 
             # Update the PAH dust density: 
             ρd_PAH_new   = DustGrowthDestruction_Update( ρd_PAH_old, ρdplusZ_PAH,
-                                                         ρ_old, nH_old, nHI_old,
-                                                         nHII_old, T_old, Td_PAH_new,
+                                                         nH_old, nHI_old,
+                                                         nHII_old, nHeII_old, nHeIII_old, nCII_old,
+                                                         T_old, Td_PAH_new,
                                                          urel_PAH, xCI_old, xCII_old, Zgr_PAH,
                                                          J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, e_Lyα_new,
                                                          PAH, Δtsub )
@@ -2989,7 +2998,7 @@ function ThermoChemistrySubStepUpdate!( icell::Int, jcell::Int,      # Cell (i,j
         # Get the maximum relative change among them:
         Δx_rel      = maximum( ( ΔxH2_rel, ΔxHII_rel, ΔxCO_rel, ΔxCII_rel, ΔxOII_rel, Δne_rel ) )
 
-        if Δx_rel > tol_Chem 
+        if Δx_rel > tol_Chem || !isfinite(Δx_rel)
             # Change in H₂, H II, e⁻, or C/O was too high, reduce Δtsub & retry:
             Δtsub = Δtsub_half
 
@@ -3930,7 +3939,8 @@ end
 
 
 """ This function sets up the stellar (+ IR) RT arrays and state,
-    for use in the realistic RHD simulations. """
+    for use in the realistic RHD simulations, for a (fixed)
+    star of a given mass mstarZAMS (in M⊙). """
 function GenerateStellarRTArrays( mstarZAMS::Float64, 
                                  Zstar_Zsun::Float64,
                                          ΔV::AbstractArray{Float64, 2},
@@ -4070,6 +4080,9 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
     Lum_EUV2      = L_EUV2(mstarZAMS, Zstar_Zsun) * Lsun 
     Lum_EUV3      = L_EUV3(mstarZAMS, Zstar_Zsun) * Lsun 
 
+    # Get bolometric stellar luminosity:
+    Lum_bol = Lum_opt + Lum_FUV + Lum_LW + Lum_EUV1 + Lum_EUV2 + Lum_EUV3
+
     # Get photon emission rates in all bands:
     dN_dt_opt     = dNdt_opt(mstarZAMS, Zstar_Zsun)
     dN_dt_FUV     = dNdt_FUV(mstarZAMS, Zstar_Zsun)
@@ -4124,10 +4137,14 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
 
     # Initialize direct radiation pressure 'force multipliers':
     M_F_dir             = 0.0
+    M_F_dir_radial_net  = 0.0
+    M_F_dir_radial_out  = 0.0
     M_F_dir_antigravity = 0.0
 
     # Initialize IR radiation pressure force multipliers:
     M_F_IR              = 0.0
+    M_F_IR_radial_net   = 0.0
+    M_F_IR_radial_out   = 0.0
     M_F_IR_antigravity  = 0.0
 
 
@@ -4189,7 +4206,7 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
 
         α_F_IR, α_F_stellar,
 
-        Lum_IR, Lum_opt, Lum_FUV, Lum_LW, Lum_EUV1, Lum_EUV2, Lum_EUV3,
+        Lum_IR, Lum_opt, Lum_FUV, Lum_LW, Lum_EUV1, Lum_EUV2, Lum_EUV3, Lum_bol,
 
         Lum_opt_vol, Lum_FUV_vol, Lum_LW_vol, Lum_EUV1_vol, Lum_EUV2_vol, Lum_EUV3_vol,
 
@@ -4204,9 +4221,303 @@ function GenerateStellarRTArrays( mstarZAMS::Float64,
 
         f_esc_LyC, f_esc_LW,
 
-        M_F_dir, M_F_dir_antigravity,
+        M_F_dir, M_F_dir_radial_net, M_F_dir_radial_out, M_F_dir_antigravity,
 
-        M_F_IR, M_F_IR_antigravity,
+        M_F_IR, M_F_IR_radial_net, M_F_IR_radial_out, M_F_IR_antigravity,
+
+        OTS
+    )
+
+end
+
+
+""" This function sets up the stellar (+ IR) RT arrays and state,
+    for use in the realistic RHD simulations, for a (fixed)
+    star cluster of a given mass M_StarCluster (in M⊙). """
+function GenerateStarClusterRTArrays( M_StarCluster::Float64, 
+                                         Zstar_Zsun::Float64,
+                                                 ΔV::AbstractArray{Float64, 2},
+                                                  r::AbstractArray{Float64, 1},
+                                                  Z::AbstractArray{Float64, 1},
+                                       Zcluster_pos::Float64,
+                                  Rhalf_StarCluster::Float64,      # Half-mass radius of the star cluster (in cm)
+                                                  c̃::Float64,
+                                                OTS::Bool = false  # On-the-spot approximation (if true) or not (if false)
+                                      )
+   
+    # Grid size: 
+    N_r, N_Z = size( ΔV )
+    dN_r     = 1:N_r
+    dN_Z     = 1:N_Z
+
+    # Convenient arrays: 
+    zeros_c()  = zeros(Float64, N_r,   N_Z)
+    zeros_rf() = zeros(Float64, N_r+1, N_Z)   # For r-interface fluxes 
+    zeros_zf() = zeros(Float64, N_r,   N_Z+1) # For Z-interface fluxes 
+
+    # Intensities (latest & old) for all bands: 
+    J_IR     = zeros_c();  J_IR_old   = copy(J_IR)
+    J_opt    = zeros_c();  J_opt_old  = copy(J_opt)
+    J_FUV    = zeros_c();  J_FUV_old  = copy(J_FUV)
+    J_LW     = zeros_c();  J_LW_old   = copy(J_LW)
+    J_EUV1   = zeros_c();  J_EUV1_old = copy(J_EUV1)
+    J_EUV2   = zeros_c();  J_EUV2_old = copy(J_EUV2)
+    J_EUV3   = zeros_c();  J_EUV3_old = copy(J_EUV3)
+
+    # H ≡ ∫dΩ I n̂ / 4π arrays for all bands:
+    H_r_IR         = zeros_c();  H_Z_IR        = zeros_c()
+    H_r_IR_old     = zeros_c();  H_Z_IR_old    = zeros_c()
+
+    H_r_opt        = zeros_c();  H_Z_opt       = zeros_c()
+    H_r_opt_old    = zeros_c();  H_Z_opt_old   = zeros_c()
+
+    H_r_FUV        = zeros_c();  H_Z_FUV       = zeros_c()
+    H_r_FUV_old    = zeros_c();  H_Z_FUV_old   = zeros_c()
+
+    H_r_LW         = zeros_c();  H_Z_LW        = zeros_c()
+    H_r_LW_old     = zeros_c();  H_Z_LW_old    = zeros_c()
+
+    H_r_EUV1       = zeros_c();  H_Z_EUV1      = zeros_c()
+    H_r_EUV1_old   = zeros_c();  H_Z_EUV1_old  = zeros_c()
+
+    H_r_EUV2       = zeros_c();  H_Z_EUV2      = zeros_c()
+    H_r_EUV2_old   = zeros_c();  H_Z_EUV2_old  = zeros_c()
+
+    H_r_EUV3       = zeros_c();  H_Z_EUV3      = zeros_c()
+    H_r_EUV3_old   = zeros_c();  H_Z_EUV3_old  = zeros_c()
+
+    # Eddington tensor components for all bands:
+    D_rr_IR   = fill(1/3, N_r, N_Z);  D_ZZ_IR   = fill(1/3, N_r, N_Z);  D_rZ_IR   = zeros_c()
+    D_rr_opt  = fill(1/3, N_r, N_Z);  D_ZZ_opt  = fill(1/3, N_r, N_Z);  D_rZ_opt  = zeros_c()
+    D_rr_FUV  = fill(1/3, N_r, N_Z);  D_ZZ_FUV  = fill(1/3, N_r, N_Z);  D_rZ_FUV  = zeros_c()
+    D_rr_LW   = fill(1/3, N_r, N_Z);  D_ZZ_LW   = fill(1/3, N_r, N_Z);  D_rZ_LW   = zeros_c()
+    D_rr_EUV1 = fill(1/3, N_r, N_Z);  D_ZZ_EUV1 = fill(1/3, N_r, N_Z);  D_rZ_EUV1 = zeros_c()
+    D_rr_EUV2 = fill(1/3, N_r, N_Z);  D_ZZ_EUV2 = fill(1/3, N_r, N_Z);  D_rZ_EUV2 = zeros_c()
+    D_rr_EUV3 = fill(1/3, N_r, N_Z);  D_ZZ_EUV3 = fill(1/3, N_r, N_Z);  D_rZ_EUV3 = zeros_c()
+
+    # ϕϕ-component of radiation pressure tensor K = D × J at interfaces, 
+    # needed for geometric source term:
+    K_ϕϕ_iphalf_IR   = zeros_c();     K_ϕϕ_imhalf_IR   = zeros_c()
+    K_ϕϕ_iphalf_opt  = zeros_c();     K_ϕϕ_imhalf_opt  = zeros_c()
+    K_ϕϕ_iphalf_FUV  = zeros_c();     K_ϕϕ_imhalf_FUV  = zeros_c()
+    K_ϕϕ_iphalf_LW   = zeros_c();     K_ϕϕ_imhalf_LW   = zeros_c()
+    K_ϕϕ_iphalf_EUV1 = zeros_c();     K_ϕϕ_imhalf_EUV1 = zeros_c()
+    K_ϕϕ_iphalf_EUV2 = zeros_c();     K_ϕϕ_imhalf_EUV2 = zeros_c()
+    K_ϕϕ_iphalf_EUV3 = zeros_c();     K_ϕϕ_imhalf_EUV3 = zeros_c()
+
+    # Interface fluxes for all bands: 
+    F_r_IR      = zeros_rf(); F_Z_IR      = zeros_zf()
+    F_r_Hr_IR   = zeros_rf(); F_Z_Hr_IR   = zeros_zf()
+    F_r_HZ_IR   = zeros_rf(); F_Z_HZ_IR   = zeros_zf()
+
+    F_r_opt     = zeros_rf(); F_Z_opt     = zeros_zf()
+    F_r_Hr_opt  = zeros_rf(); F_Z_Hr_opt  = zeros_zf()
+    F_r_HZ_opt  = zeros_rf(); F_Z_HZ_opt  = zeros_zf()
+
+    F_r_FUV     = zeros_rf(); F_Z_FUV     = zeros_zf()
+    F_r_Hr_FUV  = zeros_rf(); F_Z_Hr_FUV  = zeros_zf()
+    F_r_HZ_FUV  = zeros_rf(); F_Z_HZ_FUV  = zeros_zf()
+
+    F_r_LW      = zeros_rf(); F_Z_LW      = zeros_zf()
+    F_r_Hr_LW   = zeros_rf(); F_Z_Hr_LW   = zeros_zf()
+    F_r_HZ_LW   = zeros_rf(); F_Z_HZ_LW   = zeros_zf()
+
+    F_r_EUV1    = zeros_rf(); F_Z_EUV1    = zeros_zf()
+    F_r_Hr_EUV1 = zeros_rf(); F_Z_Hr_EUV1 = zeros_zf()
+    F_r_HZ_EUV1 = zeros_rf(); F_Z_HZ_EUV1 = zeros_zf()
+
+    F_r_EUV2    = zeros_rf(); F_Z_EUV2    = zeros_zf()
+    F_r_Hr_EUV2 = zeros_rf(); F_Z_Hr_EUV2 = zeros_zf()
+    F_r_HZ_EUV2 = zeros_rf(); F_Z_HZ_EUV2 = zeros_zf()
+
+    F_r_EUV3    = zeros_rf(); F_Z_EUV3    = zeros_zf()
+    F_r_Hr_EUV3 = zeros_rf(); F_Z_Hr_EUV3 = zeros_zf()
+    F_r_HZ_EUV3 = zeros_rf(); F_Z_HZ_EUV3 = zeros_zf()
+
+    # Flux opacities for IR (can be non-zero) & stellar bands (always set to zero,
+    # since no diffusion fix is applied):
+    α_F_IR        = zeros_c()
+    α_F_stellar   = zeros_c()
+
+    # Emissivities for all bands:
+    js_IR         = zeros_c()
+    js_opt        = zeros_c()
+    js_FUV        = zeros_c()
+    js_LW         = zeros_c()
+    js_EUV1       = zeros_c()
+    js_EUV2       = zeros_c()
+    js_EUV3       = zeros_c()
+
+    # Cell weight factors for emissivity & stellar mass density (only used here):
+    fstar_ij      = zeros_c()
+
+    # Stellar mass density for all cells:
+    ρ_star        = zeros_c()
+
+    # Arrays for tracking changes in gas momentum from radiation pressure:
+    Δρu_stellar_r = zeros_c()
+    Δρu_stellar_Z = zeros_c()
+    Δρu_IR_r      = zeros_c()
+    Δρu_IR_Z      = zeros_c()
+    f_stellar_r   = zeros_c()    # Stellar rad. pressure force per unit volume in r-direction
+    f_stellar_Z   = zeros_c()    # Stellar rad. pressure force per unit volume in Z-direction
+    f_IR_r        = zeros_c()    # IR rad. pressure force per unit volume in r-direction
+    f_IR_Z        = zeros_c()    # IR rad. pressure force per unit volume in Z-direction
+
+    # Get photon emission rates (in s⁻¹) & luminosities (in erg s⁻¹) 
+    # from the star cluster, for all bands except IR:
+    dN_dt_opt, dN_dt_FUV, dN_dt_LW, 
+    dN_dt_EUV1, dN_dt_EUV2, dN_dt_EUV3,
+    Lum_opt, Lum_FUV, Lum_LW, 
+    Lum_EUV1, Lum_EUV2, Lum_EUV3 = ClusterEmissionRates( M_StarCluster, Zstar_Zsun )
+
+    # Initialize IR luminosity as zero:
+    Lum_IR    = 0.0 
+
+    # Get bolometric luminosity of the star cluster:
+    Lum_bol   = Lum_opt + Lum_FUV + Lum_LW + Lum_EUV1 + Lum_EUV2 + Lum_EUV3
+
+    # Get ionizing photon emission rate from the star cluster:
+    dN_dt_LyC = dN_dt_EUV1 + dN_dt_EUV2 + dN_dt_EUV3
+
+    # For a Gaussian density profile, ρ_star ∝ exp[ - (r² + Z²)/2σ² ], 
+    # the half-mass radius R_half, containing half the cluster mass, is 
+    # R_half ≈ 1.538 σ. This can be found using (with R being spherical radius):
+    #
+    # M(< R)/Mtot = erf(R/√2σ) - √(2/π)(R/σ) exp[- (R/σ)²/2 ]
+    σstar = Rhalf_StarCluster / 1.538
+    
+    # Compute weight factors f_ij that determine the emissivity 
+    # and stellar mass in a given cell (i,j):
+    ComputeStellar_fij!( fstar_ij, r, Z, Zcluster_pos, σstar )
+
+    # Get emissivities in all bands, for all cells. Weighted 
+    # so that the total luminosity over all (infinite) space is 
+    # the stellar luminosity for the band in question:
+    @inbounds for j in dN_Z
+        for i in dN_r 
+            js_opt[i,j]  = fstar_ij[i,j] * Lum_opt  / (Four_π * ΔV[i,j])
+            js_FUV[i,j]  = fstar_ij[i,j] * Lum_FUV  / (Four_π * ΔV[i,j])
+            js_LW[i,j]   = fstar_ij[i,j] * Lum_LW   / (Four_π * ΔV[i,j])
+            js_EUV1[i,j] = fstar_ij[i,j] * Lum_EUV1 / (Four_π * ΔV[i,j])
+            js_EUV2[i,j] = fstar_ij[i,j] * Lum_EUV2 / (Four_π * ΔV[i,j])
+            js_EUV3[i,j] = fstar_ij[i,j] * Lum_EUV3 / (Four_π * ΔV[i,j])
+        end
+    end
+
+    # Get stellar luminosities in actual simulated volume (will be 0.5 * L for 
+    # reflective BCs, but we compute it explicitly here to be sure):
+    fstar_ij_sum = sum( fstar_ij )
+    Lum_opt_vol  = Lum_opt  * fstar_ij_sum
+    Lum_FUV_vol  = Lum_FUV  * fstar_ij_sum
+    Lum_LW_vol   = Lum_LW   * fstar_ij_sum
+    Lum_EUV1_vol = Lum_EUV1 * fstar_ij_sum
+    Lum_EUV2_vol = Lum_EUV2 * fstar_ij_sum
+    Lum_EUV3_vol = Lum_EUV3 * fstar_ij_sum
+
+
+    # Get the stellar mass density in a given cell (i,j), weighted 
+    # so that the total stellar mass over all (infinite) space is 
+    # mstarZAMS:
+    @inbounds for j in dN_Z
+        for i in dN_r 
+            ρ_star[i,j] = fstar_ij[i,j] * (M_StarCluster * Msun) / ΔV[i,j]
+        end
+    end
+
+    # Initialize LyC and LW escape fractions:
+    f_esc_LyC = 0.0
+    f_esc_LW  = 0.0 
+
+    # Initialize direct radiation pressure 'force multipliers':
+    M_F_dir             = 0.0
+    M_F_dir_radial_net  = 0.0
+    M_F_dir_radial_out  = 0.0
+    M_F_dir_antigravity = 0.0
+
+    # Initialize IR radiation pressure force multipliers:
+    M_F_IR              = 0.0
+    M_F_IR_radial_net   = 0.0
+    M_F_IR_radial_out   = 0.0
+    M_F_IR_antigravity  = 0.0
+
+
+    return StellarRTArrays( 
+        c̃,
+
+        J_IR,   J_IR_old,  
+        J_opt,  J_opt_old,  
+        J_FUV,  J_FUV_old,  
+        J_LW,   J_LW_old,     
+        J_EUV1, J_EUV1_old, 
+        J_EUV2, J_EUV2_old,  
+        J_EUV3, J_EUV3_old, 
+
+        H_r_IR,         H_Z_IR, 
+        H_r_IR_old,     H_Z_IR_old,
+
+        H_r_opt,        H_Z_opt, 
+        H_r_opt_old,    H_Z_opt_old,
+
+        H_r_FUV,        H_Z_FUV,
+        H_r_FUV_old,    H_Z_FUV_old,
+        
+        H_r_LW,         H_Z_LW,
+        H_r_LW_old,     H_Z_LW_old,
+
+        H_r_EUV1,       H_Z_EUV1, 
+        H_r_EUV1_old,   H_Z_EUV1_old,
+
+        H_r_EUV2,       H_Z_EUV2, 
+        H_r_EUV2_old,   H_Z_EUV2_old,
+
+        H_r_EUV3,       H_Z_EUV3,
+        H_r_EUV3_old,   H_Z_EUV3_old,
+
+        D_rr_IR,  D_ZZ_IR, D_rZ_IR, 
+        D_rr_opt,  D_ZZ_opt, D_rZ_opt, 
+        D_rr_FUV,  D_ZZ_FUV, D_rZ_FUV, 
+        D_rr_LW,   D_ZZ_LW, D_rZ_LW,
+        D_rr_EUV1, D_ZZ_EUV1, D_rZ_EUV1, 
+        D_rr_EUV2, D_ZZ_EUV2, D_rZ_EUV2, 
+        D_rr_EUV3, D_ZZ_EUV3, D_rZ_EUV3,
+
+        K_ϕϕ_iphalf_IR,   K_ϕϕ_imhalf_IR,
+        K_ϕϕ_iphalf_opt,  K_ϕϕ_imhalf_opt,
+        K_ϕϕ_iphalf_FUV,  K_ϕϕ_imhalf_FUV,
+        K_ϕϕ_iphalf_LW,   K_ϕϕ_imhalf_LW,
+        K_ϕϕ_iphalf_EUV1, K_ϕϕ_imhalf_EUV1,
+        K_ϕϕ_iphalf_EUV2, K_ϕϕ_imhalf_EUV2,
+        K_ϕϕ_iphalf_EUV3, K_ϕϕ_imhalf_EUV3,
+
+        F_r_IR,   F_Z_IR,   F_r_Hr_IR,   F_Z_Hr_IR,   F_r_HZ_IR,   F_Z_HZ_IR,
+        F_r_opt,  F_Z_opt,  F_r_Hr_opt,  F_Z_Hr_opt,  F_r_HZ_opt,  F_Z_HZ_opt,
+        F_r_FUV,  F_Z_FUV,  F_r_Hr_FUV,  F_Z_Hr_FUV,  F_r_HZ_FUV,  F_Z_HZ_FUV,
+        F_r_LW,   F_Z_LW,   F_r_Hr_LW,   F_Z_Hr_LW,   F_r_HZ_LW,   F_Z_HZ_LW,
+        F_r_EUV1, F_Z_EUV1, F_r_Hr_EUV1, F_Z_Hr_EUV1, F_r_HZ_EUV1, F_Z_HZ_EUV1,
+        F_r_EUV2, F_Z_EUV2, F_r_Hr_EUV2, F_Z_Hr_EUV2, F_r_HZ_EUV2, F_Z_HZ_EUV2,
+        F_r_EUV3, F_Z_EUV3, F_r_Hr_EUV3, F_Z_Hr_EUV3, F_r_HZ_EUV3, F_Z_HZ_EUV3,
+
+        α_F_IR, α_F_stellar,
+
+        Lum_IR, Lum_opt, Lum_FUV, Lum_LW, Lum_EUV1, Lum_EUV2, Lum_EUV3, Lum_bol,
+
+        Lum_opt_vol, Lum_FUV_vol, Lum_LW_vol, Lum_EUV1_vol, Lum_EUV2_vol, Lum_EUV3_vol,
+
+        dN_dt_opt, dN_dt_FUV, dN_dt_LW, dN_dt_EUV1, dN_dt_EUV2, dN_dt_EUV3, dN_dt_LyC,
+
+        js_IR, js_opt, js_FUV, js_LW, js_EUV1, js_EUV2, js_EUV3, ρ_star,
+
+        Δρu_stellar_r, Δρu_stellar_Z, 
+        Δρu_IR_r,      Δρu_IR_Z, 
+        f_stellar_r,   f_stellar_Z,
+        f_IR_r,        f_IR_Z,
+
+        f_esc_LyC, f_esc_LW,
+
+        M_F_dir, M_F_dir_radial_net, M_F_dir_radial_out, M_F_dir_antigravity,
+
+        M_F_IR, M_F_IR_radial_net, M_F_IR_radial_out, M_F_IR_antigravity,
 
         OTS
     )
@@ -4357,6 +4668,9 @@ function GenerateStellarRTArrays_Idealized( dN_dt_EUV1::Float64,
     Lum_EUV2      = dN_dt_EUV2 * E_EUV2
     Lum_EUV3      = dN_dt_EUV3 * E_EUV3
 
+    # Get bolometric stellar luminosity:
+    Lum_bol = Lum_opt + Lum_FUV + Lum_LW + Lum_EUV1 + Lum_EUV2 + Lum_EUV3
+
     # Get photon emission rates in all bands:
     dN_dt_opt     = 0.0
     dN_dt_FUV     = 0.0
@@ -4406,10 +4720,14 @@ function GenerateStellarRTArrays_Idealized( dN_dt_EUV1::Float64,
 
     # Initialize direct radiation pressure 'force multipliers':
     M_F_dir             = 0.0
+    M_F_dir_radial_net  = 0.0
+    M_F_dir_radial_out  = 0.0
     M_F_dir_antigravity = 0.0
 
     # Initialize IR radiation pressure force multipliers:
     M_F_IR              = 0.0
+    M_F_IR_radial_net   = 0.0
+    M_F_IR_radial_out   = 0.0
     M_F_IR_antigravity  = 0.0
 
 
@@ -4471,7 +4789,7 @@ function GenerateStellarRTArrays_Idealized( dN_dt_EUV1::Float64,
 
         α_F_IR, α_F_stellar,
 
-        Lum_IR, Lum_opt, Lum_FUV, Lum_LW, Lum_EUV1, Lum_EUV2, Lum_EUV3,
+        Lum_IR, Lum_opt, Lum_FUV, Lum_LW, Lum_EUV1, Lum_EUV2, Lum_EUV3, Lum_bol,
 
         Lum_opt_vol, Lum_FUV_vol, Lum_LW_vol, Lum_EUV1_vol, Lum_EUV2_vol, Lum_EUV3_vol,
 
@@ -4486,9 +4804,9 @@ function GenerateStellarRTArrays_Idealized( dN_dt_EUV1::Float64,
 
         f_esc_LyC, f_esc_LW,
 
-        M_F_dir, M_F_dir_antigravity,
+        M_F_dir, M_F_dir_radial_net, M_F_dir_radial_out, M_F_dir_antigravity,
 
-        M_F_IR, M_F_IR_antigravity,
+        M_F_IR, M_F_IR_radial_net, M_F_IR_radial_out, M_F_IR_antigravity,
 
         OTS
     )

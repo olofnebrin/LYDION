@@ -17,8 +17,8 @@ using  Base.Threads               # For CPU acceleration
 
 export Initialize_ν_Scratch2D!, AdvectLyα!, FrequencyUpdateJLyα_AllCells!, UpdateLyαJandH! 
 
-const DEBUG_Lyα::Bool     = true    # For debugging/ensuring correct array sizes (default: false)
-const LOG_LYA_TIMES::Bool = true    # Set true to print per-step timings, only useful for benchmarking performance (default: false)
+const DEBUG_Lyα::Bool     = false    # For debugging/ensuring correct array sizes (default: false)
+const LOG_LYA_TIMES::Bool = false    # Set true to print per-step timings, only useful for benchmarking performance (default: false)
 
 
 const scratch_ν = Ref{Vector{NTuple{7, Vector{Float64}}}}(Vector{NTuple{7, Vector{Float64}}}())
@@ -163,10 +163,6 @@ end
     # -------------------------------------------------------------------------------------
 
     UpdateLyaJold = true  # We want to update Jold to J when the advection step is finished 
-
-    ## OLD: Update old H components:
-    #copyto!( H_r_old, H_r )
-    #copyto!( H_Z_old, H_Z )
 
     # Find frequency bins that are active (non-negligible J):
     kmin, kmax = FindActiveBins( Lyα, geometry.ΔV )
