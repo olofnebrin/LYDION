@@ -51,8 +51,8 @@ Rmax_lin::Float64                  =  1.2 * pc      # Uniform/linear grid out to
 LZ_uniform::Float64                =  1.2 * pc      # Total extent of uniform grid along the Z-axis.  
 Rmax::Float64                      =  1.2 * pc      # Logarithmic grid from Rmax_lin to Rmax (typically lower-resolution region)
 Zmax::Float64                      =  1.2 * pc      # Maximum extent along Z-axis. Should be ≥ LZ_uniform.
-N_r_lin::Int                       =  128           # Number of cells along r-direction in the uniform grid section 
-N_Z_lin::Int                       =  128           # Number of cells along Z-direction in the uniform grid section 
+N_r_lin::Int                       =  512           # Number of cells along r-direction in the uniform grid section 
+N_Z_lin::Int                       =  512           # Number of cells along Z-direction in the uniform grid section 
 N_r_log::Int                       =  0             # Number of cells along r-direction in the logarithmic grid section 
 N_Z_log_side::Int                  =  0             # Number of cells along Z-direction (per side if BC_Z_bot = :Outflow) in the logarithmic grid section  
  
