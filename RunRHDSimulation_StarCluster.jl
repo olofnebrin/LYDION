@@ -29,7 +29,7 @@ Rhalf_StarCluster::Float64         =  0.05 * pc     # Half-mass radius of star c
 POWER_LAW_ENVELOPE::Bool           =  false
 p_ENVELOPE::Float64                =  2.0
 
-z::Float64                         =  0.0           # Redshift 
+z::Float64                         =  10.0          # Redshift 
 DG₀::Float64                       =  0.01 * DGsun  # Dust-to-gas ratio (NOTE: *not* normalized to Solar value. To get e.g. Solar, set DG₀ = DGsun)
 Zgas_Zsun₀::Float64                =  Zstar_Zsun    # Initial gas metallicity in Solar units (metals can be depleted onto dust, and dust can be returned to gas)
 nH_core::Float64                   =  1e5           # Initial core density (cm⁻³)
@@ -38,7 +38,7 @@ T₀::Float64                        =  500           # Initial cloud temperatur
 T_ext::Float64                     =  500           # Temperature outside the cloud 
 Rcore::Float64                     =  0.5 * pc 
 Rcl::Float64                       =  0.5 * pc      # Radius of cloud (i.e. high-density region)
-u_RMSturb::Float64                 =  3 * kms       # Initial RMS turbulence velocity 
+u_RMSturb::Float64                 =  4 * kms       # Initial RMS turbulence velocity 
 
 # Grid settings below. If BC_Z_bot = :Reflect (Case 1), there is assumed symmetry at Z = 0. If 
 # BC_Z_bot = :Outflow, there is no assumed symmetry, and the star + cloud is instead centered at Z = Zmax / 2.
