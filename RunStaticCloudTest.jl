@@ -4,7 +4,7 @@ include( "src/StaticCloudTest.jl" )
 using .StaticCloudTest                         # The module setting up the no-hydro static cloud test
 using .StaticCloudTest.ConstantsAndFunctions   # For constants (e.g. unit conversions)
 
-τcl::Float64              = 1e8       # Cloud Lyα optical depth 
+τcl::Float64              = 1e9       # Cloud Lyα optical depth 
 T::Float64                = 1e4       # Cloud temperature (K)
 τabs::Float64             = 0.0       # Cloud continuum absorption optical depth 
 pd::Float64               = 0.0       # Lyα destruction probability
@@ -15,8 +15,8 @@ Recoil::Bool              = false     # Whether atomic recoil is turned on (true
 IonizedSourceRegion::Bool = false     # Whether gas in emission region is ionized (if true) or not (if false)
 tmax_unitless::Float64    = 4.0       # Maximum simulation time, in units (aτcl)^(1/3) × (Rcl / c̃) (default: 4.0)
 BC_Z_bot::Symbol          = :Reflect  # Reflective or outflow BCs at Z = 0 (reflective if midplane symmetry, outflow if not)
-N_r_lin::Int              = 32        # Number of cells along r-direction (uniform grid)
-N_Z_lin::Int              = 32        # Number of cells along Z-direction (uniform grid)
+N_r_lin::Int              = 64        # Number of cells along r-direction (uniform grid)
+N_Z_lin::Int              = 64        # Number of cells along Z-direction (uniform grid)
 
 if Recoil == true
     if θhole > 0.0

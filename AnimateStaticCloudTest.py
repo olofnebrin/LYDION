@@ -9,7 +9,7 @@ import re
 from matplotlib.ticker import AutoMinorLocator, LogLocator, NullFormatter
 
 ########## USER INPUT #########################
-FileName  = "CloudTest_rs1.0_NoRecoil_tau1.0e8_T10000.0_umax0.0_tauabs0.0_pd0.0_32x32.h5"
+FileName  = "CloudTest_rs1.0_NoRecoil_tau1.0e9_T10000.0_umax0.0_tauabs0.0_pd0.0_64x64.h5"
 frameskip = 1
 save_mp4  = True
 outname   = "StaticCloud_eLya_withLyaSpec.mp4"

@@ -1801,8 +1801,11 @@ function Compute_tsputter_nonthermal( nH::Float64,
         y    = a0 + a1*x + a2*x2 + a3*x3 + a4*x4 + a5*x5 
         Ytot = max( 10^y, 0.0 )  
 
+        # Normalize Ytot by 10⁻⁶ μm yr⁻¹ cm³ as done by Hu+ (2019):
+        Ytot_norm = 1e6 * Ytot   # = Ytot / 10⁻⁶ μm yr⁻¹ cm³
+
         # The non-thermal sputtering time:
-        t_sputter = t_sputter0 * ( 1 / nH ) * ( 1 / Ytot )
+        t_sputter = t_sputter0 * ( 1 / nH ) * ( 1 / Ytot_norm )
 
         return t_sputter
     else

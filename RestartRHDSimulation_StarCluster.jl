@@ -7,7 +7,7 @@ using .RHDSolver_StarCluster                         # The full RHD solver modul
 
 # Name of HDF5 file containing simulation you want to restart:
 #FileName = "RHDSim_NoLya_128x128_2026-03-21.h5"
-FileName = "RHDSim_StarCluster_Lya_128x128_2026-04-16.h5" 
+FileName = "RHDSim_StarCluster_NoLya_64x64_2026-04-18.h5" 
 
 # Restart the simulation:
 RestartRHDsimulation_StarCluster( FileName )
