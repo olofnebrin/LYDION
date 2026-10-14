@@ -146,11 +146,10 @@ function GenerateLyαArrays( c_Lyα::Float64,
 
     # Get number of threads, for determining the size of the scratch 
     # arrays for the interface fluxes:
-    # nthreads   = Threads.maxthreadid() NOTE: Not needed anymore for new layout J[k,i,j]
 
     # Convenient arrays: 
     zeros_c()  = zeros( Float64, N_ν, N_r,   N_Z )
-    zeros_rf() = zeros( Float64, N_ν, N_r+1, N_Z )  # For r-interface fluxes 
+    zeros_rf() = zeros( Float64, N_ν, N_r+1, N_Z )    # For r-interface fluxes 
     zeros_zf() = zeros( Float64, N_ν, N_r,   N_Z+1 )  # For Z-interface fluxes 
 
     # Intensities (latest & old, and stage values for RK2) for all bins: 

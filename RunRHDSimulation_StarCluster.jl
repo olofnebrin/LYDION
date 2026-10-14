@@ -17,9 +17,9 @@ FluxMethodLyαRT::String            =  "GLF"         # Flux method for Lyα M1 R
 #################  S T E L L A R  P R O P E R T I E S  ##################
 #########################################################################
 
-M_StarCluster::Float64             =  1e6           # Mass of star cluster (M⊙)
-Zstar_Zsun::Float64                =  0.1           # Metallicity of the star in Solar units 
-Rhalf_StarCluster::Float64         =  0.5 * pc      # Half-mass radius of star cluster (in cm)
+M_StarCluster::Float64             =  1e4           # Mass of star cluster (M⊙)
+Zstar_Zsun::Float64                =  0.01          # Metallicity of the star in Solar units 
+Rhalf_StarCluster::Float64         =  0.05 * pc     # Half-mass radius of star cluster (in cm)
 
 #########################################################################
 ######  C L O U D  P R O P E R T I E S  &  S P A T I A L  G R I D  ######
@@ -32,7 +32,7 @@ POWER_LAW_ENVELOPE::Bool           =  false
 p_ENVELOPE::Float64                =  2.0
 
 z::Float64                         =  10.0          # Redshift 
-DG₀::Float64                       =  0.1 * DGsun   # Dust-to-gas ratio (NOTE: *not* normalized to Solar value. To get e.g. Solar, set DG₀ = DGsun)
+DG₀::Float64                       =  0.01 * DGsun  # Dust-to-gas ratio (NOTE: *not* normalized to Solar value. To get e.g. Solar, set DG₀ = DGsun)
 Zgas_Zsun₀::Float64                =  Zstar_Zsun    # Initial gas metallicity in Solar units (metals can be depleted onto dust, and dust can be returned to gas)
 nH_core::Float64                   =  1e6           # Initial core density (cm⁻³)
 nH_ext::Float64                    =  1.0           # Initial density far outside the cloud (cm⁻³)

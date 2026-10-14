@@ -4,6 +4,7 @@
 *.jl.*.cov
 *.ji
 *_OLD.jl
+ProfileRHDSimulation_SingleStar.jl
 Manifest.toml
 
 # Python

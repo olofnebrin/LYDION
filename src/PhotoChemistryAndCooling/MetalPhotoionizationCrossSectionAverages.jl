@@ -5,7 +5,6 @@
              fits.
 """
 
-include(joinpath(@__DIR__, "..", "ConstantsAndFunctions.jl"))
 using .ConstantsAndFunctions
 
 struct PhotoBandAverage
@@ -558,12 +557,6 @@ const σCI_EUV3_N    = CI_EUV3_Avg.σ_N
 const σCI_EUV3_E    = CI_EUV3_Avg.σ_E
 const hCI_EUV3      = CI_EUV3_Avg.h
 
-println("σCI_LW_N   = $(σCI_LW_N/1e-18)   × 10⁻¹⁸ cm²")
-println("σCI_EUV1_N = $(σCI_EUV1_N/1e-18) × 10⁻¹⁸ cm²")
-println("σCI_EUV2_N = $(σCI_EUV2_N/1e-18) × 10⁻¹⁸ cm²")
-println("σCI_EUV3_N = $(σCI_EUV3_N/1e-18) × 10⁻¹⁸ cm²")
-println("")
-
 # C II:
 const σCII_EUV1_N   = CII_EUV1_Avg.σ_N
 const σCII_EUV1_E   = CII_EUV1_Avg.σ_E
@@ -589,10 +582,6 @@ const hOI_EUV2      = OI_EUV2_Avg.h
 const σOI_EUV3_N    = OI_EUV3_Avg.σ_N
 const σOI_EUV3_E    = OI_EUV3_Avg.σ_E
 const hOI_EUV3      = OI_EUV3_Avg.h
-
-println("σOI_EUV1_N = $(σOI_EUV1_N/1e-18) × 10⁻¹⁸ cm²")
-println("σOI_EUV2_N = $(σOI_EUV2_N/1e-18) × 10⁻¹⁸ cm²")
-println("σOI_EUV3_N = $(σOI_EUV3_N/1e-18) × 10⁻¹⁸ cm²")
 
 # O II:
 const σOII_EUV2_N   = OII_EUV2_Avg.σ_N

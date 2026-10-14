@@ -763,9 +763,15 @@ function SetupRHDsimulation_StarCluster( M_StarCluster::Float64,  # Stellar mass
     end
     
     # Generate struct with Lyα arrays + settings:
-    LyαState::Union{LyαArrays,Nothing} =
-    Lyα ? GenerateLyαArrays( c̃, r, Z, T, Recoil, LyαDestruction, HLL_LyαRT ) : nothing
+    if Lyα
+        LyαState = 
+        GenerateLyαArrays( c̃, r, Z, T, Recoil, LyαDestruction,
+                           30.0, 1.1, 1.1, HLL_LyαRT )
 
+        # The settings above are Tmin = 30 K, q_fine = q_wing = 1.1. 
+    else
+        LyαState = nothing 
+    end
 
     ###############################################################
     #######                                                 #######
