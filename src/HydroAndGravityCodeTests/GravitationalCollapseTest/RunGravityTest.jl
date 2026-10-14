@@ -11,7 +11,7 @@ using .GravitationalCollapseTest         # The gravitational collapse test setup
 
 tmax::Float64                      =  0.065       # Final time (sec), 0.065 by default 
 N_r::Int                           =  128         # Number of cells along cylindrical r-axis. 
-BC_Z_bot::Symbol                   =  :Reflect    # Use :Reflect to only simulate upper midplane, and :Outflow to simulate both sides
+BC_Z_bot::Symbol                   =  :Outflow    # Use :Reflect to only simulate upper midplane, and :Outflow to simulate both sides
 Nminsteps::Int                     =  300
 Nmaxsteps::Int                     =  100000
 
