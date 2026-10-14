@@ -13,14 +13,11 @@ using .RHDSolver_Idealized.ConstantsAndFunctions   # For constants (e.g. unit co
 using  Dates                                       # To have date in the file name for convenience
 
 
-# HDF5 file name where the data will be saved:
-FileName  = "DTypeTest.h5"
-
-
 tmax::Float64                      =  5e8 * yr      # Stop simulation at t = tmax (unless it stops automatically earlier)
-Nsaved::Int                        =  300           # Target number of saved time-steps (if saving is turned on -- see below)
-Nminsteps::Int                     =  300           # Minimum number of time-steps taken in simulation 
-Nmaxsteps::Int                     =  100000        # Maximum number of time-steps taken in simulation 
+Nsaved::Int                        =  500           # Target number of saved time-steps (if saving is turned on -- see below)
+Nminsteps::Int                     =  500           # Minimum number of time-steps taken in simulation 
+Nmaxsteps::Int                     =  1000000       # Maximum number of time-steps taken in simulation 
+FluxMethodStellarRT::String        =  "HLL"         # Flux method for stellar/IR M1 RT (HLL or GLF) 
 
 #########################################################################
 #################  S T E L L A R  P R O P E R T I E S  ##################
@@ -28,7 +25,7 @@ Nmaxsteps::Int                     =  100000        # Maximum number of time-ste
 
 Teff::Float64                      =  1e5           # Effective temperature of black-body 
 dNdt_LyC::Float64                  =  5e48          # Total ionizing photon emission rate 
-σstar_cell::Float64                =  3             # Gaussian size of stellar emission region in cell size units (≳ 4 for approximately spherical H II regions)
+σstar_cell::Float64                =  3             # Gaussian size of stellar emission region in cell size units (≳ 3 for approximately spherical H II regions)
 
 # Compute the emission rates in the three ionizing bands:
 dNdt_EUV1, dNdt_EUV2, dNdt_EUV3    =  GetBlackBodyIonizingEmission( dNdt_LyC, Teff )
@@ -67,6 +64,13 @@ BC_r_right::Symbol                 =  :Outflow      # BCs at outer r-boundary (:
 BC_Z_bot::Symbol                   =  :Reflect      # BCs at lower Z-boundary (:Outflow or :Reflect)
 BC_Z_top::Symbol                   =  :Outflow      # BCs at upper Z-boundary (:Outflow or :Reflect) 
 
+# Place the cloud center at the same position as the star:
+if BC_Z_bot === :Reflect 
+    Zcl_pos_norm = 0.0
+else
+    Zcl_pos_norm = 0.5
+end
+
 ######################################################################
 ######  C H E M I S T R Y  I N I T I A L  C O N D I T I O N S  #######
 ######################################################################
@@ -86,9 +90,15 @@ xDII₀::Float64                     =  0.0          # Initial D II fraction (nD
 xHD₀::Float64                      =  0.0          # Initial HD fraction inside cloud                 (≤ 1)
 xCI₀::Float64                      =  1.0          # Initial C I fraction (nCI/nC) inside cloud       (≤ 1)
 xCII₀::Float64                     =  0.0          # Initial C II fraction inside cloud               (≤ 1)
+xCIII₀::Float64                    =  0.0          # Initial C III fraction inside cloud              (≤ 1)
 xCO₀::Float64                      =  0.0          # Initial CO fraction inside cloud                 (≤ 1)
 xOI₀::Float64                      =  1.0          # Initial O I fraction (nOI/nO) inside cloud       (≤ 1)
 xOII₀::Float64                     =  0.0          # Initial O II fraction inside cloud               (≤ 1)
+xOIII₀::Float64                    =  0.0          # Initial O III fraction inside cloud              (≤ 1)
+xOIV₀::Float64                     =  0.0          # Initial O IV fraction inside cloud               (≤ 1)
+xSII₀::Float64                     =  0.0          # Initial S II fraction inside cloud               (≤ 1)
+xSIII₀::Float64                    =  0.0          # Initial S III fraction inside cloud              (≤ 1)
+xSIV₀::Float64                     =  0.0          # Initial S IV fraction inside cloud               (≤ 1)
 
 xHII_ext::Float64                  =  1.0          # Initial H II fraction outside cloud 
 xH2_ext::Float64                   =  0.0          # Initial H₂ fraction outside cloud 
@@ -98,18 +108,25 @@ xDII_ext::Float64                  =  0.0          # Initial D II fraction outsi
 xHD_ext::Float64                   =  0.0          # Initial HD fraction outside cloud 
 xCI_ext::Float64                   =  1.0         
 xCII_ext::Float64                  =  0.0  
+xCIII_ext::Float64                 =  0.0 
 xCO_ext::Float64                   =  0.0  
 xOI_ext::Float64                   =  1.0         
 xOII_ext::Float64                  =  0.0 
+xOIII_ext::Float64                 =  0.0 
+xOIV_ext::Float64                  =  0.0
+xSII_ext::Float64                  =  0.0 
+xSIII_ext::Float64                 =  0.0 
+xSIV_ext::Float64                  =  0.0  
 
 ######################################################################
 ###############  P H Y I S I C S  S E T T I N G S  ###################
 ######################################################################
 
+c̃_min::Float64                     =  0.01 * c   # Minimum reduced speed of light   (cm s⁻¹)
 Hydro::Bool                        =  true       # Hydrodynamics                    (on if true, off if false)
 RadPressure::Bool                  =  false      # Radiation pressure feedback      (on if true, off if false)
 IRfeedback::Bool                   =  false      # IR radiation pressure feedback   (on if true, off if false - NOTE: Is only on if also RadPressure = true)
-OTS::Bool                          =  false      # On-the-spot/Case B approximation (on if true, off if false - NOTE: If off, recombination radiation is modelled self-consistently)
+OTS::Bool                          =  true       # On-the-spot/Case B approximation (on if true, off if false - NOTE: If off, recombination radiation is modelled self-consistently)
 
 ######################################################################
 ###################  O U T P U T  F I L E  ###########################
@@ -131,6 +148,8 @@ end
 
 FileDescription  = "Idealized RHD test, with dNdt_EUV1 = $(dNdt_EUV1), dNdt_EUV2 = $(dNdt_EUV2),  dNdt_EUV3 = $(dNdt_EUV3). Spatial resolution: $(N_r)x$(N_Z)."
 
+# HDF5 file name where the data will be saved:
+FileName  = "DTypeTest_$(N_r_lin)x$(N_Z_lin)_RSL$(c̃_min/c)_sigmastar$(σstar_cell)_OTS$(OTS).h5"
 
 ###############################################################
 #######                                                 #######
@@ -143,15 +162,22 @@ FileDescription  = "Idealized RHD test, with dNdt_EUV1 = $(dNdt_EUV1), dNdt_EUV2
 
 print_info = true 
 
-SetupRHDsimulation( dNdt_EUV1, dNdt_EUV2, dNdt_EUV3, DG₀, nH₀, nH_ext, Rcl, 
-                    σstar_cell, Rmax_lin, LZ_uniform, Rmax, Zmax,
+SetupRHDsimulation( dNdt_EUV1, dNdt_EUV2, dNdt_EUV3, Teff, DG₀, nH₀, nH_ext, Rcl, 
+                    σstar_cell, Rmax_lin, LZ_uniform, Rmax, Zmax, false,
                     T₀, T_ext, tmax, 
-                    xHII₀, xH2₀, xHeII₀, xHeIII₀, xDII₀, xHD₀, xCI₀, xCII₀, xCO₀, xOI₀, xOII₀,
-                    xHII_ext, xH2_ext, xHeII_ext, xHeIII_ext, xDII_ext, xHD_ext, 
-                    xCI_ext, xCII_ext, xCO_ext, xOI_ext, xOII_ext, Zgas_Zsun,
-                    z, Hydro, 
+                    xHII₀, xH2₀,   xHeII₀, xHeIII₀, xDII₀, xHD₀, 
+                    xCI₀,  xCII₀,  xCIII₀, xCO₀, 
+                    xOI₀,  xOII₀,  xOIII₀, xOIV₀,
+                    xSII₀, xSIII₀, xSIV₀,
+                    xHII_ext, xH2_ext,   xHeII_ext, xHeIII_ext, xDII_ext, xHD_ext, 
+                    xCI_ext,  xCII_ext,  xCIII_ext, xCO_ext, 
+                    xOI_ext,  xOII_ext,  xOIII_ext, xOIV_ext, 
+                    xSII_ext, xSIII_ext, xSIV_ext, 
+                    Zgas_Zsun,
+                    z, c̃_min, Zcl_pos_norm, Hydro, 
                     RadPressure, IRfeedback, OTS, HydrogenAndHelium,
                     u_RMSturb, N_r_lin, N_Z_lin, N_r_log, N_Z_log_side,
                     BC_r_right, BC_Z_bot, BC_Z_top,
                     SaveData, Nminsteps, Nmaxsteps, Nsaved,
-                    print_info, FileName, FileDescription )
+                    print_info, FileName, FileDescription,
+                    FluxMethodStellarRT )

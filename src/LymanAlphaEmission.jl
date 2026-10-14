@@ -93,33 +93,37 @@ const itp_ProbCaseA_Lyα_SH95 = extrapolate( interpolate((logT_SH95, logne_SH95_
 end
 
 
+const ELyα_inv_Four_π::Float64 = ELyα * inv_Four_π  # Convenient constant in the emissivity for recombinations & excitations
+
 """ The (frequency-integrated) Lyα emissivity (erg s⁻¹ cm⁻³ sr⁻¹) from 
-    recombinations, as a function of temperature T (K), HII number
+    recombinations, as a function of temperature T (K), H II number
     density nHII (cm⁻³), and electron number density ne (cm⁻³).
     
     If the on-the-spot (OTS) approximation is used, the Case B 
     recombination coefficient & Lyα emission probability is adopted.
     Otherwise, the Case A recombination coefficient & Lyα emission probability 
     is used. """
-function ∫dν_js_recLyα( T::Float64, 
-                     nHII::Float64, 
-                       ne::Float64, 
-                      OTS::Bool = false
-                        )
+@inline function ∫dν_js_recLyα( T::Float64, 
+                             nHII::Float64, 
+                               ne::Float64, 
+                              OTS::Bool = false
+                               )
 
     if OTS
-        # On-the-spot approximation → Case B rate:
+        # On-the-spot approximation → Case B rate & Lyα emission probability:
+        krec        = krecHII(T, true)
         Prob_Lyα    = Prob_Lyα_SH95( T, ne, true )
 
         # Emissivity:
-        ∫dν_js_rec  = Prob_Lyα * krecHII(T, true) * nHII * ne * ELyα * inv_Four_π
+        ∫dν_js_rec  = @fastmath Prob_Lyα * krec * nHII * ne * ELyα_inv_Four_π
         return ∫dν_js_rec
     else
-        # Case A rate:
+        # Case A rate & Lyα emission probability:
+        krec        = krecHII(T, false)
         Prob_Lyα    = Prob_Lyα_SH95( T, ne, false )
 
         # Emissivity:
-        ∫dν_js_rec  = Prob_Lyα * krecHII(T, false) * nHII * ne * ELyα * inv_Four_π
+        ∫dν_js_rec  = @fastmath Prob_Lyα * krec * nHII * ne * ELyα_inv_Four_π
         return ∫dν_js_rec
     end
 end
@@ -132,34 +136,39 @@ end
 ##################################################################################### 
 
 # Transition energies (1 - n⁻²) * 13.6 eV in units of temperature:
-const T_Ryd = ELyC / kB
-const T_12  = (1 - 1/2^2) * T_Ryd
-const T_13  = (1 - 1/3^2) * T_Ryd
-const T_14  = (1 - 1/4^2) * T_Ryd
-const T_15  = (1 - 1/5^2) * T_Ryd
+const T_Ryd::Float64 = ELyC / kB
+const T_12::Float64  = (1 - 1/2^2) * T_Ryd
+const T_13::Float64  = (1 - 1/3^2) * T_Ryd
+const T_14::Float64  = (1 - 1/4^2) * T_Ryd
+const T_15::Float64  = (1 - 1/5^2) * T_Ryd
 
 """ The (frequency-integrated) Lyα emissivity (erg s⁻¹ cm⁻³ sr⁻¹) from 
-    collisional excitation, as a function of temperature T (K), HI number
+    collisional excitation, as a function of temperature T (K), H I number
     density nHI (cm⁻³), and electron number density ne (cm⁻³). See ref. 2. """
-function ∫dν_js_collLyα( T::Float64, 
-                       nHI::Float64, 
-                        ne::Float64 
-                         )
+@inline function ∫dν_js_collLyα( T::Float64, 
+                               nHI::Float64, 
+                                ne::Float64 
+                                )
     # Convenient variables:
-    T6         = min( T, 3e5 ) / 1e6
-    T6_squared = T6 * T6 
-    T6_cubed   = T6_squared * T6 
+    T          = max( T, 1.0 )          # Avoid NaN if T → 0 in e.g. sqrt(T)
+    inv_T      = @fastmath 1.0 / T
+    T6         = min( T, 3e5 ) * 1e-6   # T / 10⁶ K, clamped to < 3 × 10⁵ K 
+    T6_squared = @fastmath T6  * T6 
+    T6_cubed   = @fastmath T6_squared * T6 
 
     # Effective collision strengths:
-    Y12        = 0.267486 + 1.57257*T6 - 6.44026*T6_squared + 11.5401*T6_cubed
-    Y13        = 0.0940821 + 2.90748*T6 - 6.69528*T6_squared + 7.86419*T6_cubed 
-    Y14        = 0.0415028 + 1.13673*T6 - 3.97454*T6_squared + 6.05941*T6_cubed
-    Y15        = 0.032277 + 0.40856*T6 - 1.34604*T6_squared + 2.07558*T6_cubed
+    Y12        = @fastmath 0.267486  + 1.57257*T6 - 6.44026*T6_squared + 11.5401*T6_cubed
+    Y13        = @fastmath 0.0940821 + 2.90748*T6 - 6.69528*T6_squared + 7.86419*T6_cubed 
+    Y14        = @fastmath 0.0415028 + 1.13673*T6 - 3.97454*T6_squared + 6.05941*T6_cubed
+    Y15        = @fastmath 0.032277  + 0.40856*T6 - 1.34604*T6_squared + 2.07558*T6_cubed
 
     # Effective collisional excitation rate coefficient:
-    qcoll = ( 8.63e-6 / (2*sqrt(T)) ) * (
-            @fastmath Y12*exp(-T_12/T) + Y13*exp(-T_13/T) + Y14*exp(-T_14/T) + Y15*exp(-T_15/T) )
+    qcoll = @fastmath ( 8.63e-6 / (2*sqrt(T)) ) * (
+            Y12 * exp(-T_12 * inv_T)  +  Y13 * exp(-T_13 * inv_T)  +  Y14 * exp(-T_14 * inv_T)  +  Y15 * exp(-T_15 * inv_T) )
 
-    return qcoll * nHI * ne * ELyα / Four_π
+    # Put it all together to get the emissivity:
+    ∫dν_js_coll  = @fastmath qcoll * nHI * ne * ELyα_inv_Four_π
+
+    return ∫dν_js_coll
 end
 

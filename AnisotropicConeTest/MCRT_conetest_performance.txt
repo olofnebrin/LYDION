@@ -1,0 +1,16 @@
+This is the performance for the MCRT runs of the cone test reported by Aaron on Slack.
+He wrote:
+
+"The cone test is now uploaded to the box drive Lya-cloud-xcrit0.hdf5 and Lya-cloud-xcrit3.hdf5 (both for xcrit=0 and =3 to see the difference with core skipping).
+Calculation Rate = 3 seconds per photon without core-skipping
+Total time for 2e6 photons = 1667 core hours
+It is orders of magnitude faster with core-skipping (2710 times faster with xcrit=3)"
+
+And later, after running the same test with 1e7 photons:
+
+"Lya-cloud-xcrit1.hdf5 is in the box drive now too.
+Calculation Rate = 3 seconds per photon without core-skipping
+Relative Timings:
+t(x_crit=0) / t(x_crit = 1) = 10.7
+t(x_crit=0) / t(x_crit = 2) = 762
+t(x_crit=0) / t(x_crit = 3) = 2710"

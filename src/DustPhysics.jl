@@ -6,8 +6,10 @@
 
 """
 
-using .Structs: DustState, HydrodynamicsState, ChemistryState
+using .Structs: DustState, HydrodynamicsState, ChemistryState, StellarRTArrays, LyαArrays, # Stellar & Lyα RT arrays needed to initialize dust temperatures
+                iopt_RT, iFUV_RT, iLW_RT, iEUV1_RT, iEUV2_RT, iEUV3_RT, iIR_RT
 using .ConstantsAndFunctions
+using .ConstantsAndFunctions.FastInterpolations: CreateLUTFromData, EvaluateLUTFlat  # For dust opacity interpolations  
 using DelimitedFiles          # For reading data 
 using Interpolations          # For interpolation of the Planck mean opacity
 using QuadGK                  # For integrating over data 
@@ -51,7 +53,8 @@ const Qabs_PAH_Lyα::Float64  = Qabs_Data[7,4];  const Qabs_C_Lyα::Float64  = Q
 
 # Export functions:
 export GetDustAbsorptionOpacities, GetDustFluxOpacities, Λdg_tot, Λdg, ComputeTd, FindGrainCharge, 
-       HeatingRate_PhotoElectric, SetupDustState, κP, κR, UpdateDustCrossSectionsPerH!
+       HeatingRate_PhotoElectric, SetupDustState, κP, κR, UpdateDustCrossSectionsPerH!,
+       InitializeDustTemperaturesAndCharges!
 
 
 """ Extract the band absorption opacities for a given dust species from the struct. """
@@ -170,43 +173,49 @@ end
 
 const Td_max::Float64  = 2e3   # Upper limit to dust temperature (K) - assumed sublimation above
 
-""" Planck-mean opacity for a dust bin, as computed from the stored log-log interpolation (cm² g⁻¹). """
+""" Planck-mean opacity for a dust bin, as computed from the stored look-up table (cm² g⁻¹). """
 @inline function κP( Dust::DustState, T::Float64, ::Val{:Sil} )
-    T = clamp( T, 1.0, Td_max )
-    return 10.0^( Dust.logκP_Sil_itp( log10(T) ) )
+    T      = clamp( T, 1.0, Td_max )
+    log10T = @fastmath log10(T)
+    return EvaluateLUTFlat( Dust.logκP_Sil_itp, log10T )
 end
 
 @inline function κP( Dust::DustState, T::Float64, ::Val{:Gra} )
-    T = clamp( T, 1.0, Td_max )
-    return 10.0^( Dust.logκP_C_itp( log10(T) ) )
+    T      = clamp( T, 1.0, Td_max )
+    log10T = @fastmath log10(T)
+    return EvaluateLUTFlat( Dust.logκP_C_itp, log10T )
 end
 
 @inline function κP( Dust::DustState, T::Float64, ::Val{:PAH} )
-    T = clamp( T, 1.0, Td_max )
-    return 10.0^( Dust.logκP_PAH_itp( log10(T) ) )
+    T      = clamp( T, 1.0, Td_max )
+    log10T = @fastmath log10(T)
+    return EvaluateLUTFlat( Dust.logκP_PAH_itp, log10T )
 end
 
 
-""" Rosseland-mean opacity for a dust bin, as computed from its log-log interpolation (cm² g⁻¹). """
+""" Rosseland-mean opacity for a dust bin, as computed from the stored look-up table (cm² g⁻¹). """
 @inline function κR( Dust::DustState, T::Float64, ::Val{:Sil} )
-    T = clamp( T, 1.0, Td_max )
-    return 10.0^( Dust.logκR_Sil_itp( log10(T) ) )
+    T      = clamp( T, 1.0, Td_max )
+    log10T = @fastmath log10(T)
+    return EvaluateLUTFlat( Dust.logκR_Sil_itp, log10T )
 end
 
 @inline function κR( Dust::DustState, T::Float64, ::Val{:Gra} )
-    T = clamp( T, 1.0, Td_max )
-    return 10.0^( Dust.logκR_C_itp( log10(T) ) )
+    T      = clamp( T, 1.0, Td_max )
+    log10T = @fastmath log10(T)
+    return EvaluateLUTFlat( Dust.logκR_C_itp, log10T )
 end
 
 @inline function κR( Dust::DustState, T::Float64, ::Val{:PAH} )
-    T = clamp( T, 1.0, Td_max )
-    return 10.0^( Dust.logκR_PAH_itp( log10(T) ) )
+    T      = clamp( T, 1.0, Td_max )
+    log10T = @fastmath log10(T)
+    return EvaluateLUTFlat( Dust.logκR_PAH_itp, log10T )
 end
 
 
-const atol_Td::Float64 = 0.1   # Absolute tolerance (K) to deem converged 
-const rtol_Td::Float64 = 1e-4  # Relative tolerance to deem converged 
-const dNiter_Td        = 1:50  # Consider up to 50 iterations by default 
+const atol_Td::Float64          = 0.1   # Absolute tolerance (K) to deem converged 
+const rtol_Td::Float64          = 1e-4  # Relative tolerance to deem converged 
+const dNiter_Td::UnitRange{Int} = 1:50  # Consider up to 50 iterations by default 
 
 """ This function computes the dust temperature, given the radiation background,
     and gas conditions. Uses bisection for robustness. Dust temperature is found by 
@@ -228,7 +237,8 @@ function ComputeTd( J_IR::Float64,
                     Trad::Float64,  # Radiation temperature for J_IR 
                        T::Float64,
                       nH::Float64,
-                   e_Lyα::Float64 = 0.0
+                   e_Lyα::Float64 = 0.0,
+                Td_guess::Float64 = 30.0  # Initial guess for dust temperature 
                      )
 
     κd_abs_opt, κd_abs_FUV, κd_abs_LW, 
@@ -254,11 +264,31 @@ function ComputeTd( J_IR::Float64,
 
               - 4 * κP(Dust, Td, DustType) * σSB * Td^4 )
 
-    # Bracket expected range:
-    a       = max( 0.5 * TCMB, 1.0 )    # Use small Td > 0 to avoid problems in the κP interpolation
-    b       = Td_max 
-    fa      = f(a)
-    fb      = f(b)
+    # ------ Bracket expected range --------------
+    Td_min   = max( 0.5 * TCMB, 1.0 )           # Use small minimum Td > 0 to avoid problems in the κP interpolation
+
+    Td_guess = clamp( Td_guess, Td_min, Td_max )
+
+    a        = max( Td_min, 0.9 * Td_guess )    # Basically look around ±10% of the old dust temperature, bracketed in the range 
+    b        = min( Td_max, 1.1 * Td_guess )
+    fa       = f(a)
+    fb       = f(b)
+
+    # In case the bracket does not enclose the root, expand the bracket:
+    if fa * fb > 0.0
+        for _ in dNiter_Td
+            a  = max( Td_min, 0.8 * a )
+            b  = min( Td_max, 1.2 * b )
+            fa = f(a)
+            fb = f(b)
+
+            if ( a == Td_min && b == Td_max ) || fa * fb ≤ 0.0
+                # In this case the bracket encloses the root, 
+                # or it has reached the maximum bracket width 
+                break
+            end 
+        end
+    end
 
     if fa * fb > 0.0
         # In this case, dust heating still prevails even at Td = Td_max, so 
@@ -266,9 +296,7 @@ function ComputeTd( J_IR::Float64,
         return Td_max
     end
 
-    # Initialize "old" temperature:
-    Td_old  = 0.5 * (a + b)
-
+    # Start bisection iterations:
     for _ in dNiter_Td 
         Td_new   = 0.5 * ( a + b )
         fmid     = f(Td_new)
@@ -285,12 +313,10 @@ function ComputeTd( J_IR::Float64,
             a  = Td_new
             fa = fmid
         end
-
-        Td_old = Td_new
     end
 
-    # If bisection failed to converge, it meant that Td > Td_max, and so we take:
-    return Td_max
+    # If bisection failed to converge to within tolerance, return the best bracket midpoint:
+    return 0.5 * (a + b)
 end
 
 
@@ -349,6 +375,110 @@ const σSB_over_π::Float64 = σSB / π
     return Trad 
 end
 
+
+""" Initialize equilibrium dust temperatures and grain charges for all cells.
+
+    This should be called once after the initial hydro/chemistry state and stellar/IR
+    radiation fields have been created. 
+
+    NOTE: This is only an initializer. During the photo-thermochemistry subcycling, Td and Zgr
+          are updated. """
+function InitializeDustTemperaturesAndCharges!( Dust::DustState,
+                                               Hydro::HydrodynamicsState,
+                                                Chem::ChemistryState,
+                                                  RT::StellarRTArrays,
+                                                 Lyα::Union{LyαArrays, Nothing},
+                                                   z::Float64 = 0.0 )
+
+    # Gather arrays:
+    ρ  = Hydro.ρ   # Gas density 
+    T  = Hydro.T   # Gas temperature 
+
+    N_r, N_Z = size( ρ )
+    dN_r     = 1:N_r
+    dN_Z     = 1:N_Z
+
+    # CMB temperature:
+    TCMB = @fastmath TCMB0 * ( 1 + z )
+
+    @threads for j in dN_Z
+        @inbounds for i in dN_r
+
+            # Get number densities. We only need nH here, but GetAllNumberDensities
+            # is the safest way to stay consistent with the rest of the code.
+            nHI, nHII, nH2, nHeI, nHeII, nHeIII, nDI, nDII, nHD,
+            nCI, nCII, nCIII, nCO, nCHx,
+            nOI, nOII, nOIII, nOIV, nOHx,
+            nSI, nSII, nSIII, nSIV,
+            ne, n, nH, nHe, nD,
+            nC, nO, nS = GetAllNumberDensities( Chem.xH2[i,j], Chem.xHII[i,j],
+                                                Chem.xHeII[i,j], Chem.xHeIII[i,j],
+                                                Chem.xHD[i,j], Chem.xDII[i,j],
+                                                Chem.xCI[i,j], Chem.xCII[i,j],
+                                                Chem.xCIII[i,j], Chem.xCO[i,j],
+                                                Chem.xOI[i,j], Chem.xOII[i,j],
+                                                Chem.xOIII[i,j], Chem.xOIV[i,j],
+                                                Chem.xSII[i,j], Chem.xSIII[i,j],
+                                                Chem.xSIV[i,j],
+                                                ρ[i,j],
+                                                Chem.ZC[i,j], Chem.ZSil[i,j],
+                                                Chem.Zgasrest[i,j],
+                                                Chem.HydrogenAndHelium )
+
+            # Intensities:
+            J_IR   = RT.J[iIR_RT,   i,j]
+            J_opt  = RT.J[iopt_RT,  i,j]
+            J_FUV  = RT.J[iFUV_RT,  i,j]
+            J_LW   = RT.J[iLW_RT,   i,j]
+            J_EUV1 = RT.J[iEUV1_RT, i,j]
+            J_EUV2 = RT.J[iEUV2_RT, i,j]
+            J_EUV3 = RT.J[iEUV3_RT, i,j]
+
+            # Initial Lyα energy density:
+            e_Lyα = isnothing(Lyα) ? 0.0 : Lyα.e_Lyα[i,j]
+
+            # Initial IR radiation temperature. Dust.Trad is zero from SetupDustState,
+            # so avoid passing zero into κP(Dust, Trad, ...).
+            Trad = max( Dust.Trad[i,j], TCMB )
+
+            # Initialize equilibrium dust temperatures from the current radiation field.
+            Td_Sil = ComputeTd( J_IR, J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
+                                Dust, Sil, TCMB, Trad, T[i,j], nH, e_Lyα )
+
+            Td_C   = ComputeTd( J_IR, J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
+                                Dust, Gra, TCMB, Trad, T[i,j], nH, e_Lyα )
+
+            Td_PAH = ComputeTd( J_IR, J_opt, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
+                                Dust, PAH, TCMB, Trad, T[i,j], nH, e_Lyα )
+
+            # Store initialized temperatures:
+            Dust.Td_Sil[i,j] = Td_Sil
+            Dust.Td_C[i,j]   = Td_C
+            Dust.Td_PAH[i,j] = Td_PAH
+
+            # Initialize & store dust grain charges:
+            Dust.Zgr_Sil[i,j] = FindGrainCharge( T[i,j], nHII, nHeII, nHeIII, 
+                                                 nDII, nCII, nCIII, nOII, nOIII, nOIV,
+                                                 nSII, nSIII, nSIV, ne,
+                                                 J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, 
+                                                 Sil, e_Lyα )
+
+            Dust.Zgr_C[i,j]   = FindGrainCharge( T[i,j], nHII, nHeII, nHeIII, 
+                                                 nDII, nCII, nCIII, nOII, nOIII, nOIV,
+                                                 nSII, nSIII, nSIV, ne,
+                                                 J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, 
+                                                 Gra, e_Lyα )
+
+            Dust.Zgr_PAH[i,j] = FindGrainCharge( T[i,j], nHII, nHeII, nHeIII, 
+                                                 nDII, nCII, nCIII, nOII, nOIII, nOIV,
+                                                 nSII, nSIII, nSIV, ne,
+                                                 J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, 
+                                                 PAH, e_Lyα )
+        end # End of i-loop 
+    end # End of j-loop 
+
+    return nothing
+end
 
 ###########################################################################
 #######                                                             #######
@@ -539,21 +669,26 @@ const e²_agr_PAH::Float64 = (e^2) / agr_PAH
 end
 
 
+# Silicate grains:
+const Ya_Sil_FUV::Float64  = Ya_Sil(E_FUV,  agr_Sil)  # Pre-compute once  
+const Ya_Sil_LW::Float64   = Ya_Sil(E_LW,   agr_Sil)  # Pre-compute once  
+const Ya_Sil_EUV1::Float64 = Ya_Sil(E_EUV1, agr_Sil)  # Pre-compute once  
+const Ya_Sil_EUV2::Float64 = Ya_Sil(E_EUV2, agr_Sil)  # Pre-compute once  
+const Ya_Sil_EUV3::Float64 = Ya_Sil(E_EUV3, agr_Sil)  # Pre-compute once  
+const Ya_Sil_Lyα::Float64  = Ya_Sil(ELyα,   agr_Sil)  # Pre-compute once  
+
 """ The photoelectric yield for a silicate or graphite/PAH dust grain, 
     as computed by Kimura (2016). PAH grains assume graphite properties, 
     but the relevant characteristic PAH grain size. """
-function Ype( hν::Float64,
-             Zgr::Float64,
-                ::Val{:Sil}
-             )
+@inline function Ype( hν::Float64,
+                     Zgr::Float64,
+                  Ya_Sil::Float64,
+                  hν_pet::Float64, # The threshold photon energy needed for photoelectric emission
+                        ::Val{:Sil}
+                     )
 
-    # Choose relevant grain size, and value of e² / a_gr:
-    agr    = agr_Sil
+    # Choose relevant value of e² / a_gr:
     e²_agr = e²_agr_Sil
-
-    # The threshold photon energy hν_pet
-    # needed for photoelectric emission:
-    hν_pet, _ = Compute_hν_pet_and_Emin( Zgr, Sil )
 
     # If photon energy is below the threshold, return zero yield 
     # and exit early:
@@ -571,24 +706,28 @@ function Ype( hν::Float64,
     end
 
     # Photoelectric yield:
-    Ype = y₂ * Ya_Sil(hν, agr)
+    Ype = y₂ * Ya_Sil
 
     return Ype 
 end
 
 # Larger graphite grains:
-function Ype( hν::Float64,
-             Zgr::Float64,
-                ::Val{:Gra}
-             )
+const Ya_C_FUV::Float64  = Ya_C(E_FUV,  agr_C)  # Pre-compute once  
+const Ya_C_LW::Float64   = Ya_C(E_LW,   agr_C)  # Pre-compute once  
+const Ya_C_EUV1::Float64 = Ya_C(E_EUV1, agr_C)  # Pre-compute once  
+const Ya_C_EUV2::Float64 = Ya_C(E_EUV2, agr_C)  # Pre-compute once  
+const Ya_C_EUV3::Float64 = Ya_C(E_EUV3, agr_C)  # Pre-compute once  
+const Ya_C_Lyα::Float64  = Ya_C(ELyα,   agr_C)  # Pre-compute once  
 
-    # Choose relevant grain size, and value of e² / a_gr:
-    agr    = agr_C
+@inline function Ype( hν::Float64,
+                     Zgr::Float64,
+                    Ya_C::Float64,
+                  hν_pet::Float64, # The threshold photon energy needed for photoelectric emission
+                        ::Val{:Gra}
+                     )
+
+    # Choose relevant value of e² / a_gr:
     e²_agr = e²_agr_C
-
-    # The threshold photon energy hν_pet
-    # needed for photoelectric emission:
-    hν_pet, _ = Compute_hν_pet_and_Emin( Zgr, Gra )
 
     # If photon energy is below the threshold, return zero yield 
     # and exit early:
@@ -606,24 +745,28 @@ function Ype( hν::Float64,
     end
 
     # Photoelectric yield:
-    Ype = y₂ * Ya_C(hν, agr)
+    Ype = y₂ * Ya_C
 
     return Ype 
 end
 
 # PAH grains:
-function Ype( hν::Float64,
-             Zgr::Float64,
-                ::Val{:PAH}
-             )
+const Ya_PAH_FUV::Float64  = Ya_C(E_FUV,  agr_PAH)  # Pre-compute once  
+const Ya_PAH_LW::Float64   = Ya_C(E_LW,   agr_PAH)  # Pre-compute once  
+const Ya_PAH_EUV1::Float64 = Ya_C(E_EUV1, agr_PAH)  # Pre-compute once  
+const Ya_PAH_EUV2::Float64 = Ya_C(E_EUV2, agr_PAH)  # Pre-compute once  
+const Ya_PAH_EUV3::Float64 = Ya_C(E_EUV3, agr_PAH)  # Pre-compute once  
+const Ya_PAH_Lyα::Float64  = Ya_C(ELyα,   agr_PAH)  # Pre-compute once  
 
-    # Choose relevant grain size, and value of e² / a_gr:
-    agr    = agr_PAH
+@inline function Ype( hν::Float64,
+                     Zgr::Float64,
+                  Ya_PAH::Float64,
+                  hν_pet::Float64, # The threshold photon energy needed for photoelectric emission
+                        ::Val{:PAH}
+                    )
+
+    # Choose relevant value of e² / a_gr:
     e²_agr = e²_agr_PAH
-
-    # The threshold photon energy hν_pet
-    # needed for photoelectric emission:
-    hν_pet, _ = Compute_hν_pet_and_Emin( Zgr, PAH )
 
     # If photon energy is below the threshold, return zero yield 
     # and exit early:
@@ -641,7 +784,7 @@ function Ype( hν::Float64,
     end
 
     # Photoelectric yield:
-    Ype = y₂ * Ya_C(hν, agr)
+    Ype = y₂ * Ya_PAH
 
     return Ype 
 end
@@ -665,20 +808,20 @@ const uth_Inv_prefact::Float64 = sqrt( π * me / (8 * kB) )
     is the photoelectric emission rate (see Tielens 2005):
     
     J_pe = ∫dν (4πJ/hν) π agr² Qabs Ype(hν)  """
-function PhotoElectricChargingTerm( J_FUV::Float64,
-                                     J_LW::Float64,
-                                   J_EUV1::Float64,
-                                   J_EUV2::Float64,
-                                   J_EUV3::Float64,
-                                       ne::Float64,
-                                        T::Float64,
-                                      Zgr::Float64,
-                                 DustType::Union{Val{:Sil}, Val{:Gra}, Val{:PAH}},
-                                    e_Lyα::Float64 = 0.0
-                                   )
+@inline function PhotoElectricChargingTerm( J_FUV::Float64,
+                                             J_LW::Float64,
+                                           J_EUV1::Float64,
+                                           J_EUV2::Float64,
+                                           J_EUV3::Float64,
+                                               ne::Float64,
+                                                T::Float64,
+                                              Zgr::Float64,
+                                         DustType::Union{Val{:Sil}, Val{:Gra}, Val{:PAH}},
+                                            e_Lyα::Float64 = 0.0
+                                         )
 
     # Convenient thermal factor (inverse of thermal velocity):
-    uth_Inv  = uth_Inv_prefact / sqrt(T)
+    uth_Inv  = @fastmath uth_Inv_prefact / sqrt(T)
 
     # Clamp ne to avoid division by zero:
     ne       = max( ne, 1e-30 )
@@ -689,45 +832,68 @@ function PhotoElectricChargingTerm( J_FUV::Float64,
         Qabs_EUV1 = Qabs_Sil_EUV1; Qabs_EUV2 = Qabs_Sil_EUV2
         Qabs_EUV3 = Qabs_Sil_EUV3; Qabs_Lyα  = Qabs_Sil_Lyα
 
+        # Values of Ya:
+        Ya_FUV  = Ya_Sil_FUV;  Ya_LW   = Ya_Sil_LW
+        Ya_EUV1 = Ya_Sil_EUV1; Ya_EUV2 = Ya_Sil_EUV2
+        Ya_EUV3 = Ya_Sil_EUV3; Ya_Lyα  = Ya_Sil_Lyα
+
         # 1 / (ne * se):
-        inv_ne_s  = 1 / ( ne * se_Sil )
+        inv_ne_s  = @fastmath 1 / ( ne * se_Sil )
     elseif DustType === Gra
         # Absorption efficiencies:
         Qabs_FUV  = Qabs_C_FUV;  Qabs_LW   = Qabs_C_LW
         Qabs_EUV1 = Qabs_C_EUV1; Qabs_EUV2 = Qabs_C_EUV2
         Qabs_EUV3 = Qabs_C_EUV3; Qabs_Lyα  = Qabs_C_Lyα
 
+        # Values of Ya:
+        Ya_FUV  = Ya_C_FUV;  Ya_LW   = Ya_C_LW
+        Ya_EUV1 = Ya_C_EUV1; Ya_EUV2 = Ya_C_EUV2
+        Ya_EUV3 = Ya_C_EUV3; Ya_Lyα  = Ya_C_Lyα
+
         # 1 / (ne * se):
-        inv_ne_s  = 1 / ( ne * se_C )
+        inv_ne_s  = @fastmath 1 / ( ne * se_C )
     elseif DustType === PAH
         # Absorption efficiencies:
         Qabs_FUV  = Qabs_PAH_FUV;  Qabs_LW   = Qabs_PAH_LW
         Qabs_EUV1 = Qabs_PAH_EUV1; Qabs_EUV2 = Qabs_PAH_EUV2
         Qabs_EUV3 = Qabs_PAH_EUV3; Qabs_Lyα  = Qabs_PAH_Lyα
 
+        # Values of Ya:
+        Ya_FUV  = Ya_PAH_FUV;  Ya_LW   = Ya_PAH_LW
+        Ya_EUV1 = Ya_PAH_EUV1; Ya_EUV2 = Ya_PAH_EUV2
+        Ya_EUV3 = Ya_PAH_EUV3; Ya_Lyα  = Ya_PAH_Lyα
+
         # 1 / (ne * se):
-        inv_ne_s  = 1 / ( ne * se_PAH )
+        inv_ne_s  = @fastmath 1 / ( ne * se_PAH )
     else
         error("Unknown dust type/bin $(DustType) in photoelectric charging.") 
     end
 
+    # Compute the threshold photon energy needed for photoelectric emission:
+    hν_pet, _ = Compute_hν_pet_and_Emin( Zgr, DustType )
+
     # Photo-electric yields (for the desired type/bin):
-    Ype_FUV  = Ype( E_FUV,  Zgr, DustType )
-    Ype_LW   = Ype( E_LW,   Zgr, DustType )
-    Ype_EUV1 = Ype( E_EUV1, Zgr, DustType )
-    Ype_EUV2 = Ype( E_EUV2, Zgr, DustType )
-    Ype_EUV3 = Ype( E_EUV3, Zgr, DustType )
-    Ype_Lyα  = Ype( ELyα,   Zgr, DustType )
+    Ype_FUV  = Ype( E_FUV,  Zgr, Ya_FUV,  hν_pet,  DustType )
+    Ype_LW   = Ype( E_LW,   Zgr, Ya_LW,   hν_pet,  DustType )
+    Ype_EUV1 = Ype( E_EUV1, Zgr, Ya_EUV1, hν_pet,  DustType )
+    Ype_EUV2 = Ype( E_EUV2, Zgr, Ya_EUV2, hν_pet,  DustType )
+    Ype_EUV3 = Ype( E_EUV3, Zgr, Ya_EUV3, hν_pet,  DustType )
+
+    if e_Lyα > 0.0
+        Ype_Lyα = Ype( ELyα, Zgr, Ya_Lyα, hν_pet, DustType )
+    else
+        Ype_Lyα = 0.0
+    end
 
     # Photoelectric term:
-    PhotoElectricTerm = Four_π * ( (J_FUV  * inv_E_FUV)  * (Qabs_FUV  * inv_ne_s ) * uth_Inv * Ype_FUV
-                                 + (J_LW   * inv_E_LW)   * (Qabs_LW   * inv_ne_s ) * uth_Inv * Ype_LW
-                                 + (J_EUV1 * inv_E_EUV1) * (Qabs_EUV1 * inv_ne_s ) * uth_Inv * Ype_EUV1
-                                 + (J_EUV2 * inv_E_EUV2) * (Qabs_EUV2 * inv_ne_s ) * uth_Inv * Ype_EUV2
-                                 + (J_EUV3 * inv_E_EUV3) * (Qabs_EUV3 * inv_ne_s ) * uth_Inv * Ype_EUV3 )
+    PhotoElectricTerm = @fastmath Four_π * ( (J_FUV  * inv_E_FUV)  * (Qabs_FUV  * inv_ne_s ) * uth_Inv * Ype_FUV
+                                           + (J_LW   * inv_E_LW)   * (Qabs_LW   * inv_ne_s ) * uth_Inv * Ype_LW
+                                           + (J_EUV1 * inv_E_EUV1) * (Qabs_EUV1 * inv_ne_s ) * uth_Inv * Ype_EUV1
+                                           + (J_EUV2 * inv_E_EUV2) * (Qabs_EUV2 * inv_ne_s ) * uth_Inv * Ype_EUV2
+                                           + (J_EUV3 * inv_E_EUV3) * (Qabs_EUV3 * inv_ne_s ) * uth_Inv * Ype_EUV3 )
 
     # Add contribution from Lyα:
-    PhotoElectricTerm += (c * e_Lyα * inv_ELyα) * (Qabs_Lyα * inv_ne_s)  * uth_Inv * Ype_Lyα
+    PhotoElectricTerm += @fastmath (c * e_Lyα * inv_ELyα) * (Qabs_Lyα * inv_ne_s)  * uth_Inv * Ype_Lyα
 
     return PhotoElectricTerm
 end
@@ -738,82 +904,122 @@ const vthHe_over_vthe::Float64            = sqrt( me / mHe )
 const vthD_over_vthe::Float64             = sqrt( me / mD )
 const vthC_over_vthe::Float64             = sqrt( me / mC )
 const vthO_over_vthe::Float64             = sqrt( me / mO )
+const vthS_over_vthe::Float64             = sqrt( me / mS )
 const Stick_ion::Float64                  = 1.0                  # Sticking coefficient of ions (1.0 by default)
 const agr_Sil_kB_over_e_squared::Float64  = agr_Sil * kB / (e^2) # Convenient variable 
 const agr_C_kB_over_e_squared::Float64    = agr_C   * kB / (e^2) 
 const agr_PAH_kB_over_e_squared::Float64  = agr_PAH * kB / (e^2) 
 
-""" The ion collisional charging term:
+""" The ion collisional charging current term:
 
-    ∑_i π * agr² * nᵢ * sᵢ * sqrt(8 kB T / π mᵢ) * J̃ᵢ ,
+    ∑_i π * agr² * nᵢ * Zᵢ * sᵢ * sqrt(8 kB T / π mᵢ) * J̃ᵢ ,
     
-    normalized by π * agr² * sₑ * sqrt(8 kB T / π mₑ), as for the 
+    normalized by π * agr² * nₑ * sₑ * sqrt(8 kB T / π mₑ), as for the 
     photoelectric term. """
-function IonCollisionalChargingTerm( Zgr::Float64, 
-                                       T::Float64,
-                                    nHII::Float64,
-                                   nHeII::Float64,
-                                  nHeIII::Float64,
-                                    nDII::Float64,
-                                    nCII::Float64,
-                                    nOII::Float64,
-                                      ne::Float64,
-                                DustType::Union{Val{:Sil}, Val{:Gra}, Val{:PAH}} 
-                                     )
+@inline function IonCollisionalChargingTerm( Zgr::Float64, 
+                                               T::Float64,
+                                            nHII::Float64,
+                                           nHeII::Float64,
+                                          nHeIII::Float64,
+                                            nDII::Float64,
+                                            nCII::Float64,
+                                           nCIII::Float64,
+                                            nOII::Float64,
+                                           nOIII::Float64,
+                                            nOIV::Float64,
+                                            nSII::Float64,
+                                           nSIII::Float64,
+                                            nSIV::Float64,
+                                              ne::Float64,
+                                        DustType::Union{Val{:Sil}, Val{:Gra}, Val{:PAH}} 
+                                           )
 
     # Floor electron density:
     ne = max( ne, 1e-30 )
 
     if DustType === Sil
-        inv_ne_se             = 1 / ( ne * se_Sil )
+        inv_ne_se             = @fastmath 1 / ( ne * se_Sil )
         agr_kB_over_e_squared = agr_Sil_kB_over_e_squared
     elseif DustType === Gra
-        inv_ne_se             = 1 / ( ne * se_C )
+        inv_ne_se             = @fastmath 1 / ( ne * se_C )
         agr_kB_over_e_squared = agr_C_kB_over_e_squared
     elseif DustType === PAH
-        inv_ne_se             = 1 / ( ne * se_PAH )
+        inv_ne_se             = @fastmath 1 / ( ne * se_PAH )
         agr_kB_over_e_squared = agr_PAH_kB_over_e_squared
     end
 
     # H II contribution:
-    τ_HII               = agr_kB_over_e_squared * T    # agr * kB * T / ((+e)²)
+    τ_HII               = @fastmath agr_kB_over_e_squared * T    # agr * kB * T / ((+e)²)
     ν_HII               = Zgr                          # Zgr * e / (+e) = Zgr 
     J̃_HII               = J̃(τ_HII, ν_HII)
-    HII_contribution    = nHII * Stick_ion * vthH_over_vthe * J̃_HII
+    HII_contribution    = @fastmath nHII * Stick_ion * vthH_over_vthe * J̃_HII
 
     # He II contribution:
     # τ_HeII            = τ_HII              # agr * kB * T / ((+e)²) = same as for H II (so not needed)
     # ν_HeII            = ν_HII              # Zgr * e / (+e) = Zgr = same as for H II (so not needed)
     J̃_HeII              = J̃_HII              # Same as for H II since τ and ν are the same
-    HeII_contribution   = nHeII * Stick_ion * vthHe_over_vthe * J̃_HeII
+    HeII_contribution   = @fastmath nHeII * Stick_ion * vthHe_over_vthe * J̃_HeII
 
-    # He III contribution:
-    τ_HeIII             = 0.25 * τ_HII       # agr * kB * T / ((+2e)²) = 0.25 * τ_HII
-    ν_HeIII             = 0.5 * ν_HII        # Zgr * e / (+2e) = 0.5 * Zgr = 0.5 * ν_HII
+    # He III contribution (factor 2 at the end from Z_HeIII = 2):
+    τ_HeIII             = @fastmath 0.25 * τ_HII       # agr * kB * T / ((+2e)²) = 0.25 * τ_HII
+    ν_HeIII             = @fastmath 0.5 * ν_HII        # Zgr * e / (+2e) = 0.5 * Zgr = 0.5 * ν_HII
     J̃_HeIII             = J̃(τ_HeIII, ν_HeIII)
-    HeIII_contribution  = nHeIII * Stick_ion * vthHe_over_vthe * J̃_HeIII
+    HeIII_contribution  = @fastmath 2 * nHeIII * Stick_ion * vthHe_over_vthe * J̃_HeIII
 
     # D II contribution: 
     # τ_DII             = τ_HII              # agr * kB * T / ((+e)²) = same as for H II (so not needed)
     # ν_DII             = Zgr                # Zgr * e / (+e) = Zgr = same as for H II (so not needed)
     J̃_DII               = J̃_HII              # Same as for H II since τ and ν are the same 
-    DII_contribution    = nDII * Stick_ion * vthD_over_vthe * J̃_DII
+    DII_contribution    = @fastmath nDII * Stick_ion * vthD_over_vthe * J̃_DII
 
     # C II contribution:
     # τ_CII             = τ_HII              # agr * kB * T / ((+e)²) = same as for H II (so not needed)
     # ν_CII             = Zgr                # Zgr * e / (+e) = Zgr = same as for H II (so not needed)
     J̃_CII               = J̃_HII              # Same as for H II since τ and ν are the same 
-    CII_contribution    = nCII * Stick_ion * vthC_over_vthe * J̃_CII
+    CII_contribution    = @fastmath nCII * Stick_ion * vthC_over_vthe * J̃_CII
+
+    # C III contribution (factor 2 at the end from Z_CIII = 2): 
+    # τ_CIII            = τ_HeIII            # agr * kB * T / ((+2e)²) = 0.25 * τ_HII
+    # ν_CIII            = ν_HeIII            # Zgr * e / (+2e) = 0.5 * Zgr = 0.5 * ν_HII
+    J̃_CIII              = J̃_HeIII            # Same as for He III since τ and ν are the same 
+    CIII_contribution   = @fastmath 2 * nCIII * Stick_ion * vthC_over_vthe * J̃_CIII
 
     # O II contribution: 
     # τ_OII             = τ_HII              # agr * kB * T / ((+e)²) = same as for H II (so not needed)
     # ν_OII             = Zgr                # Zgr * e / (+e) = Zgr = same as for H II (so not needed)
     J̃_OII               = J̃_HII              # Same as for H II since τ and ν are the same 
-    OII_contribution    = nOII * Stick_ion * vthO_over_vthe * J̃_OII
+    OII_contribution    = @fastmath nOII * Stick_ion * vthO_over_vthe * J̃_OII
+
+    # O III contribution (factor 2 at the end from Z_OIII = 2): 
+    # τ_OIII            = τ_HeIII            # agr * kB * T / ((+2e)²) = 0.25 * τ_HII
+    # ν_OIII            = ν_HeIII            # Zgr * e / (+2e) = 0.5 * Zgr = 0.5 * ν_HII
+    J̃_OIII              = J̃_HeIII            # Same as for He III since τ and ν are the same 
+    OIII_contribution   = @fastmath 2 * nOIII * Stick_ion * vthO_over_vthe * J̃_OIII
+
+    # O IV contribution (factor 3 at the end from Z_OIV = 3):
+    τ_OIV               = τ_HII * OneNinth   # agr * kB * T / ((+3e)²) = τ_HII / 9
+    ν_OIV               = ν_HII * OneThird   # Zgr * e / (+3e) = (1/3) * Zgr = (1/3) * ν_HII
+    J̃_OIV               = J̃(τ_OIV, ν_OIV)
+    OIV_contribution    = @fastmath 3 * nOIV * Stick_ion * vthO_over_vthe * J̃_OIV
+
+
+    # S II contribution:
+    J̃_SII               = J̃_HII              # Same as for H II since τ and ν are the same
+    SII_contribution    = @fastmath nSII * Stick_ion * vthS_over_vthe * J̃_SII
+
+    # S III contribution (factor 2 at the end from Z_SIII = 2): 
+    J̃_SIII              = J̃_HeIII            # Same as for He III since τ and ν are the same 
+    SIII_contribution   = @fastmath 2 * nSIII * Stick_ion * vthS_over_vthe * J̃_SIII
+
+    # S IV contribution (factor 3 at the end from Z_SIV = 3): 
+    J̃_SIV               = J̃_OIV              # Same as for O IV since τ and ν are the same
+    SIV_contribution    = @fastmath 3 * nSIV * Stick_ion * vthS_over_vthe * J̃_SIV
 
     # Put it all together:
-    CollisionalTerm = inv_ne_se * ( HII_contribution + HeII_contribution + HeIII_contribution
-                                  + DII_contribution + CII_contribution  + OII_contribution )
+    CollisionalTerm = @fastmath inv_ne_se * ( HII_contribution + HeII_contribution + HeIII_contribution
+                                            + DII_contribution + CII_contribution  + CIII_contribution
+                                            + OII_contribution + OIII_contribution + OIV_contribution
+                                            + SII_contribution + SIII_contribution + SIV_contribution )
 
     return CollisionalTerm 
 end
@@ -870,6 +1076,43 @@ end
     return Zgr_min 
 end  
 
+
+""" Residual for grain charge root solve:
+    ion collisional term + photoelectric term - electron collisional term. """
+@inline function GrainChargeResidual( Zgr::Float64,
+                                      τ_e::Float64,
+                                        T::Float64,
+                                     nHII::Float64,
+                                    nHeII::Float64,
+                                   nHeIII::Float64,
+                                     nDII::Float64,
+                                     nCII::Float64,
+                                    nCIII::Float64,
+                                     nOII::Float64,
+                                    nOIII::Float64,
+                                     nOIV::Float64,
+                                     nSII::Float64,
+                                    nSIII::Float64,
+                                     nSIV::Float64,
+                                       ne::Float64,
+                                    J_FUV::Float64,
+                                     J_LW::Float64,
+                                   J_EUV1::Float64,
+                                   J_EUV2::Float64,
+                                   J_EUV3::Float64,
+                                 DustType::Union{Val{:Sil}, Val{:Gra}, Val{:PAH}},
+                                    e_Lyα::Float64
+                                   )
+
+    return ( IonCollisionalChargingTerm( Zgr, T, nHII, nHeII, nHeIII, nDII, nCII, nCIII,
+                                         nOII, nOIII, nOIV, nSII, nSIII, nSIV, ne, DustType )
+           + PhotoElectricChargingTerm( J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3,
+                                         ne, T, Zgr, DustType, e_Lyα )
+
+           - J̃( τ_e, -Zgr ) )
+end
+
+
 # Minimum & maximum allowed grain charges:
 const Zgr_min_Sil::Float64         = Zgr_min( Sil )
 const Zgr_min_C::Float64           = Zgr_min( Gra )
@@ -884,22 +1127,29 @@ const atol_Zgr::Float64            = 0.1
 const rtol_Zgr::Float64            = 1e-3 
 
 """ This function computes the grain charge using a bisection method. """
-function FindGrainCharge( T::Float64, 
-                       nHII::Float64, # H II number density 
-                      nHeII::Float64, # He II number density 
-                     nHeIII::Float64, # He III number density 
-                       nDII::Float64, # D II number density 
-                       nCII::Float64, # C II number density 
-                       nOII::Float64, # O II number density 
-                         ne::Float64, # e⁻ number density 
-                      J_FUV::Float64,
-                       J_LW::Float64,
-                     J_EUV1::Float64,
-                     J_EUV2::Float64,
-                     J_EUV3::Float64,
-                   DustType::Union{Val{:Sil}, Val{:Gra}, Val{:PAH}},
-                      e_Lyα::Float64 = 0.0
-                          )
+@inline function FindGrainCharge( T::Float64, 
+                               nHII::Float64, # H II number density 
+                              nHeII::Float64, # He II number density 
+                             nHeIII::Float64, # He III number density 
+                               nDII::Float64, # D II number density 
+                               nCII::Float64, # C II number density 
+                              nCIII::Float64, # C III number density 
+                               nOII::Float64, # O II number density 
+                              nOIII::Float64, # O III number density 
+                               nOIV::Float64, # O IV number density 
+                               nSII::Float64, # S II number density 
+                              nSIII::Float64, # S III number density 
+                               nSIV::Float64, # S IV number density 
+                                 ne::Float64, # e⁻ number density 
+                              J_FUV::Float64,
+                               J_LW::Float64,
+                             J_EUV1::Float64,
+                             J_EUV2::Float64,
+                             J_EUV3::Float64,
+                           DustType::Union{Val{:Sil}, Val{:Gra}, Val{:PAH}},
+                              e_Lyα::Float64 = 0.0,
+                          Zgr_guess::Float64 = 0.0
+                                 )
 
     # Compute τₑ = agr * kB * T / ((-e)²):
     if DustType === Sil 
@@ -910,50 +1160,53 @@ function FindGrainCharge( T::Float64,
         τ_e  = agr_PAH_kB_over_e_squared * T   # τₑ = agr * kB * T / ((-e)²)
     end
 
-    # Pre-factor for νₑ = Zgr * e / (-e) = - Zgr, just a minus sign:
-    ν_e_prefact = - 1.0                        
-
-    # Define the function the root of which will give Zgr 
-    # (ion collisional terms + photoelectric terms - electron collisional term):
-    f( Zgr ) = ( IonCollisionalChargingTerm( Zgr, T, nHII, nHeII, nHeIII, nDII, nCII, nOII, ne, DustType )
-               + PhotoElectricChargingTerm( J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, ne, T, Zgr, DustType, e_Lyα )
-
-               - J̃( τ_e,  ν_e_prefact * Zgr )  )
-
-    # Bracket expected range:
+    # Bracket maximum expected range:
     if DustType === Sil 
         # Minimum value is expected to be ≈ - 2.5 * agr * kB * T / e²,
         # and maximum value set by photoelectric charging, so make the following bracket:
-        a       = - 3 * agr_Sil_kB_over_e_squared * T      
-        b       = Zgr_pe_max_Sil
+        a_full  = - 3 * agr_Sil_kB_over_e_squared * T      
+        b_full  = Zgr_pe_max_Sil
         Zgr_Min = Zgr_min_Sil
     elseif DustType === Gra 
-        a       = - 3 * agr_C_kB_over_e_squared * T  
-        b       = Zgr_pe_max_C
+        a_full  = - 3 * agr_C_kB_over_e_squared * T  
+        b_full  = Zgr_pe_max_C
         Zgr_Min = Zgr_min_C
     elseif DustType === PAH 
-        a       = - 3 * agr_PAH_kB_over_e_squared * T  
-        b       = Zgr_pe_max_PAH
+        a_full  = - 3 * agr_PAH_kB_over_e_squared * T  
+        b_full  = Zgr_pe_max_PAH
         Zgr_Min = Zgr_min_PAH
     end
-    fa     = f(a)
-    fb     = f(b)
+
+    # Use initial guess to get a (hopefully) better bracket range (roughly ±20%):
+    Zgr_guess = clamp( Zgr_guess, a_full, b_full )
+    δZgr      = max( 1.0,  0.2 * abs(Zgr_guess),  atol_Zgr )
+    a         = max( a_full, Zgr_guess - δZgr )
+    b         = min( b_full, Zgr_guess + δZgr )
+
+    fa     = GrainChargeResidual( a, τ_e, T, nHII, nHeII, nHeIII, nDII, nCII, nCIII, nOII, nOIII, nOIV,
+                                  nSII, nSIII, nSIV, ne, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, DustType, e_Lyα )
+
+    fb     = GrainChargeResidual( b, τ_e, T, nHII, nHeII, nHeIII, nDII, nCII, nCIII, nOII, nOIII, nOIV,
+                                  nSII, nSIII, nSIV, ne, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, DustType, e_Lyα )
 
     # Check that this is an OK bracket. If not, try to enlarge 
     # the region until it does bracket a root:
     if fa * fb > 0.0
-        i           = 0
-        fa_times_fb = fa * fb
-        while fa_times_fb > 0.0 && i < 10
-            # Update fa * fb:
-            a          *= 2    # Make bracket Zgr_min even more negative 
-            b          *= 1.2  # Make bracket Zgr_max slightly larger (this is already a rather strict upper limit, so don't change too much)
-            fa          = f(a)
-            fb          = f(b)
-            fa_times_fb = fa * fb 
+        for _ in dNiter_Zgr
+            δZgr *= 1.5 
+            a     = Zgr_guess - δZgr
+            b     = Zgr_guess + δZgr
 
-            # Update count:
-            i   += 1
+            fa    = GrainChargeResidual( a, τ_e, T, nHII, nHeII, nHeIII, nDII, nCII, nCIII, nOII, nOIII, nOIV,
+                                         nSII, nSIII, nSIV, ne, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, DustType, e_Lyα )
+
+            fb    = GrainChargeResidual( b, τ_e, T, nHII, nHeII, nHeIII, nDII, nCII, nCIII, nOII, nOIII, nOIV,
+                                         nSII, nSIII, nSIV, ne, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, DustType, e_Lyα )
+
+            if fa * fb ≤ 0.0
+                # In this case the bracket encloses the root 
+                break
+            end
         end
     end
 
@@ -961,16 +1214,18 @@ function FindGrainCharge( T::Float64,
     if fa * fb > 0.0
         @warn "FindGrainCharge failed to bracket root: Returning endpoint with smaller |f|."
         if abs(fa) < abs(fb)
-            return a
+            return max( a, Zgr_Min )
         else
-            return b 
+            return max( b, Zgr_Min ) 
         end
     end
 
     # Bisection loop:
     for _ in dNiter_Zgr 
         Zgr_new   = 0.5 * ( a + b )
-        fmid      = f(Zgr_new)
+
+        fmid      = GrainChargeResidual( Zgr_new, τ_e, T, nHII, nHeII, nHeIII, nDII, nCII, nCIII, nOII, nOIII, nOIV,
+                                         nSII, nSIII, nSIV, ne, J_FUV, J_LW, J_EUV1, J_EUV2, J_EUV3, DustType, e_Lyα )
 
         if 0.5 * (b - a) < max( atol_Zgr, rtol_Zgr * abs(Zgr_new) )
             # In this case it has converged, so return Zgr:
@@ -1089,13 +1344,13 @@ function HeatingRate_PhotoElectric( J_FUV::Float64,
         Qabs_Lyα     = Qabs_Sil_Lyα
 
         # Raw photoelectric yield Ya for each band,
-        # ignoring electron escape:
-        Ya_FUV       = Ya_Sil( E_FUV,  agr_Sil )
-        Ya_LW        = Ya_Sil( E_LW,   agr_Sil )
-        Ya_EUV1      = Ya_Sil( E_EUV1, agr_Sil )
-        Ya_EUV2      = Ya_Sil( E_EUV2, agr_Sil )
-        Ya_EUV3      = Ya_Sil( E_EUV3, agr_Sil )
-        Ya_Lyα       = Ya_Sil( ELyα,   agr_Sil )
+        # ignoring electron escape (already pre-computed):
+        Ya_FUV       = Ya_Sil_FUV
+        Ya_LW        = Ya_Sil_LW
+        Ya_EUV1      = Ya_Sil_EUV1
+        Ya_EUV2      = Ya_Sil_EUV2
+        Ya_EUV3      = Ya_Sil_EUV3
+        Ya_Lyα       = Ya_Sil_Lyα
 
     elseif DustType === Gra 
         # Pre-factor:
@@ -1110,13 +1365,13 @@ function HeatingRate_PhotoElectric( J_FUV::Float64,
         Qabs_Lyα     = Qabs_C_Lyα
 
         # Raw photoelectric yield Ya for each band,
-        # ignoring electron escape:
-        Ya_FUV       = Ya_C( E_FUV,  agr_C )
-        Ya_LW        = Ya_C( E_LW,   agr_C )
-        Ya_EUV1      = Ya_C( E_EUV1, agr_C )
-        Ya_EUV2      = Ya_C( E_EUV2, agr_C )
-        Ya_EUV3      = Ya_C( E_EUV3, agr_C )
-        Ya_Lyα       = Ya_C( ELyα,   agr_C )
+        # ignoring electron escape (already pre-computed):
+        Ya_FUV       = Ya_C_FUV
+        Ya_LW        = Ya_C_LW
+        Ya_EUV1      = Ya_C_EUV1
+        Ya_EUV2      = Ya_C_EUV2
+        Ya_EUV3      = Ya_C_EUV3
+        Ya_Lyα       = Ya_C_Lyα
 
     elseif DustType === PAH
         # Pre-factor:
@@ -1131,13 +1386,13 @@ function HeatingRate_PhotoElectric( J_FUV::Float64,
         Qabs_Lyα     = Qabs_PAH_Lyα
 
         # Raw photoelectric yield Ya for each band,
-        # ignoring electron escape:
-        Ya_FUV       = Ya_C( E_FUV,  agr_PAH )
-        Ya_LW        = Ya_C( E_LW,   agr_PAH )
-        Ya_EUV1      = Ya_C( E_EUV1, agr_PAH )
-        Ya_EUV2      = Ya_C( E_EUV2, agr_PAH )
-        Ya_EUV3      = Ya_C( E_EUV3, agr_PAH )
-        Ya_Lyα       = Ya_C( ELyα,   agr_PAH )
+        # ignoring electron escape (already pre-computed):
+        Ya_FUV       = Ya_PAH_FUV
+        Ya_LW        = Ya_PAH_LW
+        Ya_EUV1      = Ya_PAH_EUV1
+        Ya_EUV2      = Ya_PAH_EUV2
+        Ya_EUV3      = Ya_PAH_EUV3
+        Ya_Lyα       = Ya_PAH_Lyα
     else
         error("Unknown dust type $(DustType) in HeatingRate_PhotoElectric.")
     end
@@ -1178,7 +1433,7 @@ const G0_const::Float64   = 9 * π / 64
     divided by |ud - u|. sᵢ ≡ |ud - u| / √(2kT/mᵢ) can be 
     used to get the result. """
 @inline function G0_over_urel( si::Float64, vth::Float64 )
-    return G0_prefact * (1 / vth) * sqrt( 1 + G0_const * si * si ) 
+    return  @fastmath G0_prefact * (1.0 / vth) * sqrt( 1 + G0_const * si * si ) 
 end
 
 
@@ -1189,7 +1444,7 @@ const G2_const::Float64 = 3 * sqrt(π) / 4
 
     sᵢ ≡ |ud - u| / √(2kT/mᵢ) can be used to get the result. """
 @inline function G2_over_urel( si::Float64, vth::Float64 )
-    return 1 / ( vth * (G2_const + si^3) )
+    return  @fastmath 1.0 / ( vth * (G2_const   +   si * si * si ) )
 end
 
 
@@ -1200,6 +1455,7 @@ const vth_HeI_prefact::Float64   = sqrt( 2 * kB / mHe )
 const vth_DI_prefact::Float64    = sqrt( 2 * kB / mD )
 const vth_CI_prefact::Float64    = sqrt( 2 * kB / mC )
 const vth_OI_prefact::Float64    = sqrt( 2 * kB / mO )
+const vth_SI_prefact::Float64    = sqrt( 2 * kB / mS )
 const vth_e_prefact::Float64     = sqrt( 2 * kB / me )
 const ϕ_Sil_prefact::Float64     = (e^2) / ( agr_Sil * kB )
 const ϕ_C_prefact::Float64       = (e^2) / ( agr_C * kB )
@@ -1217,8 +1473,8 @@ const Λ_C_prefact::Float64       = (3 / (2 * agr_C * e))   * sqrt(kB / π)
 const Λ_PAH_prefact::Float64     = (3 / (2 * agr_PAH * e)) * sqrt(kB / π)
 
 """ This function computes the drag force coefficient K ≡ |⟨ngr Fdrag⟩| / | ud - u |,
-    considering drag from H I, H₂, H II, He I, He II, He III, D II, C II, and O II,
-    and given dust type/bin.
+    considering drag from H I, H₂, H II, He I, He II, He III, D II, C II, C III,
+    O II, O III, O IV, S II, S III, S IV, and given dust type/bin.
     
     The drag coeffient enters the evolution of the dust momenta:
     
@@ -1230,9 +1486,7 @@ const Λ_PAH_prefact::Float64     = (3 / (2 * agr_PAH * e)) * sqrt(kB / π)
           × Σ_i ni [G'_0(si) + Zi² ϕs² ln|Λs/Zi| G'_2(si)]
 
     NOTE: We ignore drag from minor neutral species, since they are always 
-          negligible compared to H I, H₂, and He I.
-    
-    """
+          negligible compared to H I, H₂, and He I. """
 function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/bin
                                    ρd_bin::Float64, # Dust density in this type/bin
                                         T::Float64, # Gas temperature 
@@ -1245,7 +1499,13 @@ function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/
                                    nHeIII::Float64, # He III number density 
                                      nDII::Float64, # D II number density 
                                      nCII::Float64, # C II number density 
+                                    nCIII::Float64, # C III number density 
                                      nOII::Float64, # O II number density 
+                                    nOIII::Float64, # O III number density 
+                                     nOIV::Float64, # O IV number density 
+                                     nSII::Float64, # S II number density 
+                                    nSIII::Float64, # S III number density 
+                                     nSIV::Float64, # S IV number density 
                                        ne::Float64, # e⁻ number density 
                                      ud_r::Float64, # Dust velocity in r-direction for this bin/type 
                                       u_r::Float64, # Gas velocity in r-direction 
@@ -1267,6 +1527,7 @@ function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/
     vth_DII    = @fastmath vth_DI_prefact  * sqrt_T
     vth_CII    = @fastmath vth_CI_prefact  * sqrt_T
     vth_OII    = @fastmath vth_OI_prefact  * sqrt_T
+    vth_SII    = @fastmath vth_SI_prefact  * sqrt_T
     vth_e      = @fastmath vth_e_prefact   * sqrt_T
 
     # Evaluate sᵢ ≡ |ud - u| / vth for all major species
@@ -1277,6 +1538,7 @@ function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/
     s_DII      = @fastmath urel / vth_DII
     s_CII      = @fastmath urel / vth_CII
     s_OII      = @fastmath urel / vth_OII
+    s_SII      = @fastmath urel / vth_SII
     s_e        = @fastmath urel / vth_e
 
     # Compute G₀/urel (for both neutrals & ions):
@@ -1288,7 +1550,13 @@ function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/
     G̃0_HeIII   = G̃0_HeI
     G̃0_DII     = G0_over_urel( s_DII, vth_DII )
     G̃0_CII     = G0_over_urel( s_CII, vth_CII )
+    G̃0_CIII    = G̃0_CII
     G̃0_OII     = G0_over_urel( s_OII, vth_OII )
+    G̃0_OIII    = G̃0_OII 
+    G̃0_OIV     = G̃0_OII
+    G̃0_SII     = G0_over_urel( s_SII, vth_SII )
+    G̃0_SIII    = G̃0_SII
+    G̃0_SIV     = G̃0_SII
     G̃0_e       = G0_over_urel( s_e,  vth_e )
 
     # Compute G₂/urel (for ions & electrons):
@@ -1297,7 +1565,13 @@ function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/
     G̃2_HeIII   = G̃2_HeII
     G̃2_DII     = G2_over_urel( s_DII, vth_DII )
     G̃2_CII     = G2_over_urel( s_CII, vth_CII )
+    G̃2_CIII    = G̃2_CII
     G̃2_OII     = G2_over_urel( s_OII, vth_OII )
+    G̃2_OIII    = G̃2_OII
+    G̃2_OIV     = G̃2_OII
+    G̃2_SII     = G2_over_urel( s_SII, vth_SII )
+    G̃2_SIII    = G̃2_SII
+    G̃2_SIV     = G̃2_SII
     G̃2_e       = G2_over_urel( s_e,  vth_e )
 
     # Evaluate ϕ ≡ Z_gr * e² / a_gr * kB * T,
@@ -1365,14 +1639,40 @@ function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/
 
     HeIII_contr     = @fastmath nHeIII * ( G̃0_HeIII  +  4 * ϕ_sq_logΛ_HeIII * G̃2_HeIII )
 
-    # D II contribution (Z = 1, Z² = 1)::
+    # D II contribution (Z = 1, Z² = 1):
     DII_contr       = @fastmath nDII * ( G̃0_DII  +  ϕ_sq_logΛ * G̃2_DII )
 
-    # C II contribution (Z = 1, Z² = 1)::
+    # C II contribution (Z = 1, Z² = 1):
     CII_contr       = @fastmath nCII * ( G̃0_CII  +  ϕ_sq_logΛ * G̃2_CII )
 
-    # O II contribution (Z = 1, Z² = 1)::
+    # C III contribution (Z = 2, Z² = 4), with ϕ² log(Λ) same as for He III:
+    CIII_contr      = @fastmath nCIII * ( G̃0_CIII  +  4 * ϕ_sq_logΛ_HeIII * G̃2_CIII )
+
+    # O II contribution (Z = 1, Z² = 1):
     OII_contr       = @fastmath nOII * ( G̃0_OII  +  ϕ_sq_logΛ * G̃2_OII )
+
+    # O III contribution (Z = 2, Z² = 4), with ϕ² log(Λ) same as for He III:
+    OIII_contr      = @fastmath nOIII * ( G̃0_OIII  +  4 * ϕ_sq_logΛ_HeIII * G̃2_OIII )
+
+    # O IV contribution (Z = 3, Z² = 9):
+    if abs(Zgr_bin) > Zgr_th_Kdrag
+        # Factor 1 / Z = 1/3 is used:
+        absΛ_OneThird   = max( abs(Λ * OneThird), 1.0 )      # Ensure that ln(Λ / 3) > 0
+        ϕ_sq_logΛ_OIV   = @fastmath ϕ_sq * log( absΛ_OneThird )
+    else
+        ϕ_sq_logΛ_OIV   = 0.0
+    end
+
+    OIV_contr       = @fastmath nOIV * ( G̃0_OIV  +  9 * ϕ_sq_logΛ_OIV * G̃2_OIV )
+
+    # S II contribution (Z = 1, Z² = 1):
+    SII_contr       = @fastmath nSII * ( G̃0_SII  +  ϕ_sq_logΛ * G̃2_SII )
+
+    # S III contribution (Z = 2, Z² = 4), with ϕ² log(Λ) same as for He III:
+    SIII_contr      = @fastmath nSIII * ( G̃0_SIII  +  4 * ϕ_sq_logΛ_HeIII * G̃2_SIII )
+
+    # S IV contribution (Z = 3, Z² = 9), with ϕ² log(Λ) same as for O IV:
+    SIV_contr       = @fastmath nSIV * ( G̃0_SIV  +  9 * ϕ_sq_logΛ_OIV * G̃2_SIV )
 
     # e⁻ contribution (Z = - 1, Z² = 1):
     e_contr         = @fastmath ne * ( G̃0_e  +  ϕ_sq_logΛ * G̃2_e )
@@ -1382,7 +1682,10 @@ function ComputeDragCoefficientK( Zgr_bin::Float64, # Grain charge of this type/
                                                  + H2_contr   + HeI_contr 
                                                  + HeII_contr + HeIII_contr 
                                                  + DII_contr  + CII_contr
-                                                 + OII_contr
+                                                 + CIII_contr + OII_contr  
+                                                 + OIII_contr + OIV_contr
+                                                 + SII_contr  + SIII_contr 
+                                                 + SIV_contr
                                                  + e_contr )
 
     return K_drag
@@ -1511,7 +1814,7 @@ const tgr0_PAH_prefact::Float64 = agr_PAH * ρgr_C   * f_limit_PAH / ( 3 * vrel_
         τ_i = agr_PAH_kB_over_e_squared * T 
         ν_i = Zgr
     elseif DustType === Sil 
-        # In this case, the relevant ion is Sil II (and so q_i = 1):
+        # In this case, the relevant ion is Si II (and so q_i = 1):
         τ_i = agr_Sil_kB_over_e_squared * T 
         ν_i = Zgr   
         # NOTE: Since we don't follow Si chemistry, we assume that xSII = xCII.
@@ -1524,11 +1827,11 @@ const tgr0_PAH_prefact::Float64 = agr_PAH * ρgr_C   * f_limit_PAH / ( 3 * vrel_
     # carbon grains, so for simplicity assume the same sticking coefficient.
 
     if DustType === Sil
-        tgr0 = tgr0_Sil_prefact / ( sqrt(T) * Stick_C * ρdplusZ )
+        tgr0 = @fastmath tgr0_Sil_prefact / ( sqrt(T) * Stick_C * ρdplusZ )
     elseif DustType === Gra 
-        tgr0 = tgr0_C_prefact / ( sqrt(T) * Stick_C * ρdplusZ )
+        tgr0 = @fastmath tgr0_C_prefact / ( sqrt(T) * Stick_C * ρdplusZ )
     elseif DustType === PAH
-        tgr0 = tgr0_PAH_prefact / ( sqrt(T) * Stick_C * ρdplusZ )
+        tgr0 = @fastmath tgr0_PAH_prefact / ( sqrt(T) * Stick_C * ρdplusZ )
     end
 
     return tgr0 
@@ -1552,13 +1855,13 @@ const tsubl_C_0::Float64       = 1.36 / 3     # Pre-factor for graphite/carbonac
 
     if DustType === Sil 
         # Sublimation time-scale for silicate dust:
-        tsubl = tsubl_Sil_0 * agr_Sil_over_01 * exp( ΔTSil_subl * (1 / Td  -  inv_Td_Sil_subl) )
+        tsubl = @fastmath tsubl_Sil_0 * agr_Sil_over_01 * exp( ΔTSil_subl * (1 / Td  -  inv_Td_Sil_subl) )
     elseif DustType === Gra 
         # Sublimation time-scale for graphite dust:
-        tsubl = tsubl_C_0 * agr_C_over_01 * exp( ΔTC_subl * (1 / Td  -  inv_Td_C_subl) )
+        tsubl = @fastmath tsubl_C_0 * agr_C_over_01 * exp( ΔTC_subl * (1 / Td  -  inv_Td_C_subl) )
     elseif DustType === PAH 
         # Sublimation time-scale for PAH dust:
-        tsubl = tsubl_C_0 * agr_PAH_over_01 * exp( ΔTC_subl * (1 / Td  -  inv_Td_C_subl) )
+        tsubl = @fastmath tsubl_C_0 * agr_PAH_over_01 * exp( ΔTC_subl * (1 / Td  -  inv_Td_C_subl) )
     end
 
     # Return time-scale, and limit it to avoid way too short time-steps in the 
@@ -1621,6 +1924,7 @@ const χ_C_Micelotta10::Float64  = 1e-4   # nC  / nH assumed by Micelotta et al.
                                           nHeII::Float64,
                                          nHeIII::Float64,
                                            nCII::Float64,
+                                          nCIII::Float64,
                                               T::Float64,
                                        DustType::Union{Val{:Sil}, Val{:Gra}, Val{:PAH}} )
 
@@ -1644,13 +1948,13 @@ const χ_C_Micelotta10::Float64  = 1e-4   # nC  / nH assumed by Micelotta et al.
                       + asput_Choban26_Sil[5] * x4  +  asput_Choban26_Sil[6] * x5 )
 
         # Get Ytot: 
-        Ytot = 10^y 
+        Ytot = @fastmath 10^y 
 
         # Get the sputtering time-scale t_sputter = agr_Sil / (3 nHII Ytot) in years:
-        t_sputter_yrs = t_sputter_th_Sil_prefact / (nHII * Ytot)
+        t_sputter_yrs = @fastmath t_sputter_th_Sil_prefact / (nHII * Ytot)
 
         # Convert to seconds and return:
-        return t_sputter_yrs * yr 
+        return @fastmath t_sputter_yrs * yr 
 
     elseif DustType === Gra 
         # If temperature is low (yield is negligible & fit breaks down),
@@ -1672,13 +1976,13 @@ const χ_C_Micelotta10::Float64  = 1e-4   # nC  / nH assumed by Micelotta et al.
                       + asput_Choban26_C[5] * x4  +  asput_Choban26_C[6] * x5 )
 
         # Get Ytot: 
-        Ytot = 10^y 
+        Ytot = @fastmath 10^y 
 
         # Get the sputtering time-scale t_sputter = agr_C / (3 nHII Ytot) in years:
-        t_sputter_yrs = t_sputter_th_C_prefact / (nHII * Ytot)
+        t_sputter_yrs = @fastmath t_sputter_th_C_prefact / (nHII * Ytot)
 
         # Convert to seconds and return:
-        return t_sputter_yrs * yr 
+        return @fastmath t_sputter_yrs * yr 
 
     elseif DustType === PAH
         # If temperature is below ~ 4000 K, PAH sputtering is negligible 
@@ -1697,10 +2001,12 @@ const χ_C_Micelotta10::Float64  = 1e-4   # nC  / nH assumed by Micelotta et al.
 
         # Get abundance ratios relative to H, to scale relative to the assumed 
         # ratios assumed by Micelotta+:
-        nHe_ions = nHeII + nHeIII 
         if nHII > 0.0
-            χ_He = @fastmath nHe_ions / nHII 
-            χ_C  = @fastmath nCII     / nHII 
+            nHe_ions = @fastmath nHeII + nHeIII 
+            nC_ions  = @fastmath nCII  + nCIII
+            inv_nHII = @fastmath 1.0 / nHII
+            χ_He     = @fastmath nHe_ions * inv_nHII 
+            χ_C      = @fastmath nC_ions  * inv_nHII 
         else
             χ_He = 0.0
             χ_C  = 0.0
@@ -1797,15 +2103,16 @@ function Compute_tsputter_nonthermal( nH::Float64,
             t_sputter0 = t_sputter_nonthermal_0_PAH
         end
 
-        x    = log10(urel / kms); x2 = x*x; x3 = x2*x; x4 = x3*x; x5 = x4*x 
-        y    = a0 + a1*x + a2*x2 + a3*x3 + a4*x4 + a5*x5 
+        x    = @fastmath log10(urel / kms)
+        x2   = @fastmath x*x; x3 = @fastmath x2*x; x4 = @fastmath x3*x; x5 = @fastmath x4*x 
+        y    = @fastmath a0 + a1*x + a2*x2 + a3*x3 + a4*x4 + a5*x5 
         Ytot = max( 10^y, 0.0 )  
 
         # Normalize Ytot by 10⁻⁶ μm yr⁻¹ cm³ as done by Hu+ (2019):
-        Ytot_norm = 1e6 * Ytot   # = Ytot / 10⁻⁶ μm yr⁻¹ cm³
+        Ytot_norm = @fastmath 1e6 * Ytot   # = Ytot / 10⁻⁶ μm yr⁻¹ cm³
 
         # The non-thermal sputtering time:
-        t_sputter = t_sputter0 * ( 1 / nH ) * ( 1 / Ytot_norm )
+        t_sputter = @fastmath t_sputter0 * ( 1 / nH ) * ( 1 / Ytot_norm )
 
         return t_sputter
     else
@@ -1923,17 +2230,18 @@ const inv_NC_PAH::Float64           = 1 / NC_PAH                  # 1 / number o
     end
 
     # Compute kdiss_C2H2, evaluated at T = Tav = √(T0 × Tmax):
-    Tav        = sqrt( Teff_0 * Teff_nmax )   # Geometric average Teff 
-    k0_C2H2    = k0_diss_C2H2_prefact * Tav 
-    kdiss_C2H2 = k0_C2H2 * exp( - (Ebind_PAH_C2H2_eV * eV) / (kB * Tav) )
+    Tav        = @fastmath sqrt( Teff_0 * Teff_nmax )   # Geometric average Teff 
+    inv_kTav   = @fastmath 1.0 / (kB * Tav)
+    k0_C2H2    = @fastmath k0_diss_C2H2_prefact * Tav 
+    kdiss_C2H2 = @fastmath k0_C2H2 * exp( - (Ebind_PAH_C2H2_eV * eV) * inv_kTav )
 
     # Compute kdiss_H, evaluated at T = Tav:
-    k0_H       = k0_diss_H_prefact * Tav 
-    kdiss_H    = k0_H * exp( - (Ebind_PAH_H_eV * eV) / (kB * Tav) )
+    k0_H       = @fastmath k0_diss_H_prefact * Tav 
+    kdiss_H    = @fastmath k0_H * exp( - (Ebind_PAH_H_eV * eV) * inv_kTav )
 
     # Compute kdiss_H2, evaluated at T = Tav:
-    k0_H2      = k0_diss_H2_prefact * Tav 
-    kdiss_H2   = k0_H2 * exp( - (Ebind_PAH_H2_eV * eV) / (kB * Tav) )
+    k0_H2      = @fastmath k0_diss_H2_prefact * Tav 
+    kdiss_H2   = @fastmath k0_H2 * exp( - (Ebind_PAH_H2_eV * eV) * inv_kTav )
 
     # Average C₂H₂ dissociation probability for a single photon event:
     pdiss_av   = kdiss_C2H2 / ( k_IR_PAH  +  kdiss_C2H2  +  kdiss_H  +  kdiss_H2 )
@@ -2015,12 +2323,12 @@ const Integral_prefact_Lyα_PAH_diss::Float64  = c      * inv_ELyα   * Qabs_PAH
     # Compute 1 - (probability of photoelectric emission), for each band:
     hν_pet, _ = Compute_hν_pet_and_Emin( Zgr_PAH, PAH )  # Threshold for photoelectric emission 
 
-    FUV_NoPE  = max( 1.0 - (E_FUV  > hν_pet) * Ya_C( E_FUV,  agr_PAH ), 0.0 )
-    LW_NoPE   = max( 1.0 - (E_LW   > hν_pet) * Ya_C( E_LW,   agr_PAH ), 0.0 )
-    EUV1_NoPE = max( 1.0 - (E_EUV1 > hν_pet) * Ya_C( E_EUV1, agr_PAH ), 0.0 )
-    EUV2_NoPE = max( 1.0 - (E_EUV2 > hν_pet) * Ya_C( E_EUV2, agr_PAH ), 0.0 )
-    EUV3_NoPE = max( 1.0 - (E_EUV3 > hν_pet) * Ya_C( E_EUV3, agr_PAH ), 0.0 )
-    Lyα_NoPE  = max( 1.0 - (ELyα   > hν_pet) * Ya_C( ELyα,   agr_PAH ), 0.0 )
+    FUV_NoPE  = max( 1.0 - (E_FUV  > hν_pet) * Ya_PAH_FUV,  0.0 )
+    LW_NoPE   = max( 1.0 - (E_LW   > hν_pet) * Ya_PAH_LW,   0.0 )
+    EUV1_NoPE = max( 1.0 - (E_EUV1 > hν_pet) * Ya_PAH_EUV1, 0.0 )
+    EUV2_NoPE = max( 1.0 - (E_EUV2 > hν_pet) * Ya_PAH_EUV2, 0.0 )
+    EUV3_NoPE = max( 1.0 - (E_EUV3 > hν_pet) * Ya_PAH_EUV3, 0.0 )
+    Lyα_NoPE  = max( 1.0 - (ELyα   > hν_pet) * Ya_PAH_Lyα,  0.0 )
 
     # Compute ∫dν [4πJ(ν)/hν] Qabs Pdiss ≈ ∑_B [4πJ_B/E_B] Qabs(E_B) Pdiss(E_B):
     Integral  = @fastmath ( Integral_prefact_FUV_PAH_diss  * FUV_NoPE  * J_FUV
@@ -2050,6 +2358,7 @@ const t_growth_destruction_min::Float64 = 0.1 * yr
                                                 nHeII::Float64,
                                                nHeIII::Float64,
                                                  nCII::Float64,
+                                                nCIII::Float64,
                                                     T::Float64, 
                                                    Td::Float64,
                                                  urel::Float64,
@@ -2073,7 +2382,7 @@ const t_growth_destruction_min::Float64 = 0.1 * yr
     tdest_subl      = Compute_tsubl( Td, DustType )
 
     # Thermal sputtering time-scale:
-    tdest_sputt_th  = Compute_tsputter_thermal( nHII, nHeII, nHeIII, nCII, T, DustType )
+    tdest_sputt_th  = Compute_tsputter_thermal( nHII, nHeII, nHeIII, nCII, nCIII, T, DustType )
 
     # Non-thermal sputtering time-scale:
     tdest_sputt_nth = Compute_tsputter_nonthermal( nH, urel, DustType )
@@ -2156,10 +2465,9 @@ end
 #######                                                                          #######
 ########################################################################################
 
-
-""" Load log-log interpolations of the Planck-mean (κP) and Rosseland-mean (κR)
+""" Load look-up tables of the Planck-mean (κP) and Rosseland-mean (κR)
     dust opacities from a saved file (kappa_thermal_*.txt produced by
-    ComputeDustOpacities.jl). Returns two interpolants on log10(T). """
+    ComputeDustOpacities.jl). Returns two LUTs on log10(T). """
 function LoadκMeansInterpolations( FileName::String )
 
     Data  = readdlm(FileName, comments = true)
@@ -2168,11 +2476,9 @@ function LoadκMeansInterpolations( FileName::String )
     κR    = Data[:, 3]
 
     logT  = log10.(T)
-    logκP = log10.(κP)
-    logκR = log10.(κR)
 
-    itpP  = LinearInterpolation(logT, logκP, extrapolation_bc = Flat())
-    itpR  = LinearInterpolation(logT, logκR, extrapolation_bc = Flat())
+    itpP  = CreateLUTFromData( logT, κP )
+    itpR  = CreateLUTFromData( logT, κR )
 
     return itpP, itpR
 end

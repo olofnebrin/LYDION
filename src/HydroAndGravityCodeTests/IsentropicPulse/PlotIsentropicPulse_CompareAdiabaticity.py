@@ -6,10 +6,10 @@ from matplotlib.ticker import AutoMinorLocator, LogLocator, NullFormatter
 
 # ---------------- User inputs ----------------
 script_dir  = os.path.dirname(os.path.abspath(__file__))
-N           = [32, 64, 128, 256, 1024]          # Grid resolution(s) to plot
+N           = [32, 64, 128, 256, 512, 1024]    # Grid resolution(s) to plot
 gamma       = 5.0/3.0
 Axis        = "r"                              # kept for compatibility (not used below)
-ErrorNorm   = "L2"                             # "L1" or "L2"
+ErrorNorm   = "L1"                             # "L1" or "L2"
 SaveFigure  = True
 OutName     = os.path.join(script_dir, "IsentropicPulseTest.pdf")
 # ---------------------------------------------
@@ -169,7 +169,7 @@ colors  = ["limegreen", "dodgerblue", "crimson", "gray"]
 markers = ["o", "s", "D", "^"]
 ms_num  = 8
 lw_Ana  = 3.0
-alpha   = 0.8
+alpha   = 0.6
 
 Err = np.zeros(len(N), dtype=np.float64)
 
@@ -199,7 +199,7 @@ ax_rho.plot(R_ref, Rho_ref, color='black', label=f"ref: N = {N_ref}",
 # --- rho panel ---
 ax_rho.set_ylabel(r"$\rho$", labelpad=20)
 ax_rho.set_xlabel(r"Radius $r$", labelpad=20)
-ax_rho.set_xlim(0.0, 2.0)
+ax_rho.set_xlim(0.0, 1.0)
 ax_rho.xaxis.set_minor_locator(AutoMinorLocator(4))
 ax_rho.yaxis.set_minor_locator(AutoMinorLocator(5))
 ax_rho.legend(loc="upper right")

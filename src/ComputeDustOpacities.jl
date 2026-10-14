@@ -160,22 +160,20 @@ const λ_bands_lo_cm = [ h * c / E_hi for E_hi in E_bands_hi ]  # short-λ edge 
 const λ_bands_hi_cm = [ h * c / E_lo for E_lo in E_bands_lo ]  # long-λ edge of each band
 
 
-"""
-    ReadDraineDustFile(filepath::String; isPAH::Bool=false)
+""" ReadDraineDustFile(filepath::String; isPAH::Bool=false)
 
-Parse a Draine optical properties file (e.g. Gra_81, suvSil_81, or PAH_30.txt).
+    Parse a Draine optical properties file (e.g. Gra_81, suvSil_81, or PAH_30.txt).
 
-The PAH file differs from the graphite/silicate files in two ways:
-  - 5 data columns: w, Q_ext, Q_abs, Q_sca, g  (vs. 4: w, Q_abs, Q_sca, g)
-  - NWAV = 1201  (vs. 241)
-  - NRAD = 30    (vs. 81)
+    The PAH file differs from the graphite/silicate files in two ways:
+      - 5 data columns: w, Q_ext, Q_abs, Q_sca, g  (vs. 4: w, Q_abs, Q_sca, g)
+      - NWAV = 1201  (vs. 241)
+      - NRAD = 30    (vs. 81)
 
-Returns:
-  - a_grid_cm  :: Vector{Float64}  -- grain radii in cm  (ascending)
-  - λ_grid_cm  :: Vector{Float64}  -- wavelengths in cm  (ascending)
-  - Q_abs_grid :: Matrix{Float64}  -- Q_abs[i_a, i_λ]
-  - Q_F_grid   :: Matrix{Float64}  -- Q_F[i_a, i_λ] = Q_abs + (1-g)*Q_sca
-"""
+    Returns:
+      - a_grid_cm  :: Vector{Float64}  -- grain radii in cm  (ascending)
+      - λ_grid_cm  :: Vector{Float64}  -- wavelengths in cm  (ascending)
+      - Q_abs_grid :: Matrix{Float64}  -- Q_abs[i_a, i_λ]
+      - Q_F_grid   :: Matrix{Float64}  -- Q_F[i_a, i_λ] = Q_abs + (1-g)*Q_sca  """
 function ReadDraineDustFile( filepath::String; isPAH::Bool = false )
 
     lines = readlines(filepath)
@@ -274,13 +272,12 @@ end
 """ BuildDustInterpolations(filepath::String; isPAH::Bool=false)
 
   Returns two 2D interpolation functions on (a_cm, λ_cm):
-    Q_abs_itp(a_cm, λ_cm)  ->  Q_abs(a, λ)
-    Q_F_itp(a_cm, λ_cm)    ->  Q_F(a, λ) = Q_abs + (1-g)*Q_sca
+    Q_abs_itp(a_cm, λ_cm)  →  Q_abs(a, λ)
+    Q_F_itp(a_cm, λ_cm)    →  Q_F(a, λ) = Q_abs + (1-g)*Q_sca
 
   Interpolation is bilinear in (log a, log λ), which is natural since both
   Q values vary smoothly and by many orders of magnitude across the grid.
-  Extrapolation outside the grid uses flat (constant) boundary conditions.
-"""
+  Extrapolation outside the grid uses flat (constant) boundary conditions. """
 function BuildDustInterpolations( filepath::String; isPAH::Bool = false )
 
     # Read data from Draine file:
@@ -328,8 +325,7 @@ Arguments:
 
 Returns:
   - κ_abs  :: Vector{Float64} (length N_bands) -- absorption opacity (cm² g⁻¹)
-  - κ_F    :: Vector{Float64} (length N_bands) -- flux-mean opacity   (cm² g⁻¹)
-"""
+  - κ_F    :: Vector{Float64} (length N_bands) -- flux-mean opacity   (cm² g⁻¹) """
 function ComputeBandOpacities( Q_abs_itp,
                                Q_F_itp,
                                ∂ngr_∂a::Function,
@@ -400,11 +396,10 @@ const λ_Lya_cm    = c / νLyα   # Central Lyα wavelength in cm
 
 """ SaveOpacities(κ_abs, κ_F, filepath, species, Teff)
 
-  Write opacity table to a plain-text file. Columns are:
+    Write opacity table to a plain-text file. Columns are:
     Band  E_low (eV)  E_high (eV)  κ_abs (cm² g⁻¹)  κ_F (cm² g⁻¹)
 
-  The last row is always the Lyα pseudo-band.
-"""
+    The last row is always the Lyα pseudo-band. """
 function SaveOpacities( κ_abs::Vector{Float64},
                           κ_F::Vector{Float64},
                      filepath::String,
@@ -446,8 +441,7 @@ The band is only 0.02 eV wide, so the BB-weighted average of Q reduces
 to a direct evaluation at the Lyα line centre λ_Lya = c / νLyα.
 
 Arguments and return values are the same as ComputeBandOpacities, but
-returns a scalar pair (κ_abs_Lya, κ_F_Lya) instead of a vector.
-"""
+returns a scalar pair (κ_abs_Lya, κ_F_Lya) instead of a vector. """
 function ComputeLyαOpacity( Q_abs_itp,
                              Q_F_itp,
                              ∂ngr_∂a::Function,
@@ -477,8 +471,7 @@ Compute and save grain size statistics for each dust species:
   - Mass fraction of total dust in each species: f_s = M_s / M_tot
   - Black-body photon number-weighted band-averaged Q_abs evaluated 
     at the area-weighted mean grain size for each species, for 
-    use in e.g. grain charging (Dust.jl)
-"""
+    use in e.g. grain charging (Dust.jl) """
 function ComputeGrainSizeStats( Q_abs_PAH_itp,
                                 Q_abs_C_itp,
                                 Q_abs_Sil_itp,
@@ -597,8 +590,7 @@ then take the BB-weighted means over λ:
 
   1/κ_R(T) = ∫ (1/κ_F(λ)) (∂B_λ/∂T) dλ  /  ∫ (∂B_λ/∂T) dλ
 
-where κ_abs(λ) and κ_F(λ) are in cm² per gram of dust of this species.
-"""
+where κ_abs(λ) and κ_F(λ) are in cm² per gram of dust of this species. """
 function ComputeThermalOpacities( Q_abs_itp,
                                   Q_F_itp,
                                   ∂ngr_∂a::Function,
@@ -724,8 +716,7 @@ Arguments:
 Output files:
   - kappa_graphite.txt  : graphite grains, a ∈ [a_split_C, a_max]
   - kappa_PAH.txt       : PAH grains,      a ∈ [a_min_PAH, a_split_C)
-  - kappa_silicate.txt  : silicate grains, a ∈ [a_min_Sil, a_max]
-"""
+  - kappa_silicate.txt  : silicate grains, a ∈ [a_min_Sil, a_max] """
 function RunComputeDustOpacities( path_Gra::String,
                                   path_Sil::String,
                                   path_PAH::String,

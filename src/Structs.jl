@@ -1,13 +1,26 @@
 module Structs 
 
+# Stellar/IR RT band indices:
+const iopt_RT::Int          = 1
+const iFUV_RT::Int          = 2
+const iLW_RT::Int           = 3
+const iEUV1_RT::Int         = 4
+const iEUV2_RT::Int         = 5
+const iEUV3_RT::Int         = 6
+const iIR_RT::Int           = 7
+const Nbands_RT::Int        = 7
+const dNbands_RT::UnitRange = 1:Nbands_RT
+
 
 export LyαArrays, StellarRTArrays, HydrodynamicsState, ChemistryState,
-       GhostPaddedGrid, StellarRTArrays, GeometryCylindrical, GeometryCartesian,
-       GravityState, GravityCoeffs, DustState
+       GhostPaddedGrid, StellarBandAverages, GeometryCylindrical, 
+       GeometryCartesian, GravityState, GravityCoeffs, DustState,
+       iopt_RT, iFUV_RT, iLW_RT, iEUV1_RT, iEUV2_RT, iEUV3_RT, iIR_RT, 
+       Nbands_RT, dNbands_RT
 
 
 """ A useful struct for storing all Lyα related arrays/quantities/settings. """
-mutable struct LyαArrays 
+mutable struct LyαArrays{FluxMethod}
     # Lyα reduced speed of light:
     c̃_Lyα::Float64
 
@@ -20,9 +33,6 @@ mutable struct LyαArrays
     # H ≡ ∫dΩ I n̂ / 4π arrays
     H_r_Lyα::Array{Float64, 3};        H_Z_Lyα::Array{Float64, 3}
     H_r_Lyα_old::Array{Float64, 3};    H_Z_Lyα_old::Array{Float64, 3}
-
-    # Eddington tensor components:
-    D_rr_Lyα::Array{Float32, 3};  D_ZZ_Lyα::Array{Float32, 3};  D_rZ_Lyα::Array{Float32, 3}
 
     # ϕϕ-component of radiation pressure tensor K = D × J at interfaces, 
     # needed for geometric source term. To reduce memory storage, we make them scratch 
@@ -108,97 +118,100 @@ mutable struct LyαArrays
     dN_ν::UnitRange{Int}
     dN_ν_int::UnitRange{Int}
 
+    # Flux method for M1 transport, HLL or GLF:
+    FluxMethod::Val{FluxMethod}
+
+end
+
+
+""" A struct for storing spectrum-averaged stellar band quantities, just for 
+    H I (and D I), He I, He II. Other species (eq. H₂, O I, CHₓ) use 
+    default values always for simplicity.
+
+    The "_N" cross-sections are photon-number weighted and should be used
+    for photoionization and photoheating rates.
+
+    The "_E" cross-sections are energy-weighted and should be used for
+    absorption/damping of J and H. """
+struct StellarBandAverages
+    # Mean photon energies in each stellar band:
+    E_opt::Float64
+    E_FUV::Float64
+    E_LW::Float64
+    E_EUV1::Float64
+    E_EUV2::Float64
+    E_EUV3::Float64
+
+    # Inverse mean photon energies:
+    inv_E_opt::Float64
+    inv_E_FUV::Float64
+    inv_E_LW::Float64
+    inv_E_EUV1::Float64
+    inv_E_EUV2::Float64
+    inv_E_EUV3::Float64
+
+    # Photon-number weighted cross-sections:
+    σHI_EUV1_N::Float64
+    σHI_EUV2_N::Float64
+    σHI_EUV3_N::Float64
+
+    σHeI_EUV2_N::Float64
+    σHeI_EUV3_N::Float64
+    σHeII_EUV3_N::Float64
+
+    # Energy-weighted cross-sections:
+    σHI_EUV1_E::Float64
+    σHI_EUV2_E::Float64
+    σHI_EUV3_E::Float64
+
+    σHeI_EUV2_E::Float64
+    σHeI_EUV3_E::Float64
+    σHeII_EUV3_E::Float64
+
+    # Photoheating excess energies:
+    hHI_EUV1::Float64
+    hHI_EUV2::Float64
+    hHI_EUV3::Float64
+
+    hHeI_EUV2::Float64
+    hHeI_EUV3::Float64
+    hHeII_EUV3::Float64
 end
 
 
 """ A struct for organizing stellar RT arrays, and the stellar mass density. """
-mutable struct StellarRTArrays
+mutable struct StellarRTArrays{FluxMethod}
     # Stellar RT reduced speed of light:
     c̃::Float64
 
-    # Intensities (latest & old) for all bands: 
-    J_IR::Array{Float64, 2};      J_IR_old::Array{Float64, 2}
-    J_opt::Array{Float64, 2};     J_opt_old::Array{Float64, 2}
-    J_FUV::Array{Float64, 2};     J_FUV_old::Array{Float64, 2}
-    J_LW::Array{Float64, 2};      J_LW_old::Array{Float64, 2}
-    J_EUV1::Array{Float64, 2};    J_EUV1_old::Array{Float64, 2}
-    J_EUV2::Array{Float64, 2};    J_EUV2_old::Array{Float64, 2}
-    J_EUV3::Array{Float64, 2};    J_EUV3_old::Array{Float64, 2}
+    # Minimum RSL:
+    c̃_min::Float64
+
+    # Intensities (latest & old) for all bands, 
+    # layout J[bin,i,j] where bin ∈ 1:7 is opt, FUV, 
+    # LW, EUV1, EUV2, EUV3, IR: 
+    J::Array{Float64, 3}
+    J_old::Array{Float64, 3}
 
     # H ≡ ∫dΩ I n̂ / 4π arrays for all bands:
-    H_r_IR::Array{Float64, 2};         H_Z_IR::Array{Float64, 2}
-    H_r_IR_old::Array{Float64, 2};     H_Z_IR_old::Array{Float64, 2}
-
-    H_r_opt::Array{Float64, 2};        H_Z_opt::Array{Float64, 2}
-    H_r_opt_old::Array{Float64, 2};    H_Z_opt_old::Array{Float64, 2}
-
-    H_r_FUV::Array{Float64, 2};        H_Z_FUV::Array{Float64, 2}
-    H_r_FUV_old::Array{Float64, 2};    H_Z_FUV_old::Array{Float64, 2}
-
-    H_r_LW::Array{Float64, 2};         H_Z_LW::Array{Float64, 2}
-    H_r_LW_old::Array{Float64, 2};     H_Z_LW_old::Array{Float64, 2}
-
-    H_r_EUV1::Array{Float64, 2};       H_Z_EUV1::Array{Float64, 2}
-    H_r_EUV1_old::Array{Float64, 2};   H_Z_EUV1_old::Array{Float64, 2}
-
-    H_r_EUV2::Array{Float64, 2};       H_Z_EUV2::Array{Float64, 2}
-    H_r_EUV2_old::Array{Float64, 2};   H_Z_EUV2_old::Array{Float64, 2}
-
-    H_r_EUV3::Array{Float64, 2};       H_Z_EUV3::Array{Float64, 2}
-    H_r_EUV3_old::Array{Float64, 2};   H_Z_EUV3_old::Array{Float64, 2}
-
-    # Eddington tensor componens for all bands:
-    D_rr_IR::Array{Float32, 2};   D_ZZ_IR::Array{Float32, 2};   D_rZ_IR::Array{Float32, 2}
-    D_rr_opt::Array{Float32, 2};  D_ZZ_opt::Array{Float32, 2};  D_rZ_opt::Array{Float32, 2}
-    D_rr_FUV::Array{Float32, 2};  D_ZZ_FUV::Array{Float32, 2};  D_rZ_FUV::Array{Float32, 2}
-    D_rr_LW::Array{Float32, 2};   D_ZZ_LW::Array{Float32, 2};   D_rZ_LW::Array{Float32, 2}
-    D_rr_EUV1::Array{Float32, 2}; D_ZZ_EUV1::Array{Float32, 2}; D_rZ_EUV1::Array{Float32, 2}
-    D_rr_EUV2::Array{Float32, 2}; D_ZZ_EUV2::Array{Float32, 2}; D_rZ_EUV2::Array{Float32, 2}
-    D_rr_EUV3::Array{Float32, 2}; D_ZZ_EUV3::Array{Float32, 2}; D_rZ_EUV3::Array{Float32, 2}
+    H_r::Array{Float64, 3}
+    H_Z::Array{Float64, 3}
+    H_r_old::Array{Float64, 3}
+    H_Z_old::Array{Float64, 3}
 
     # ϕϕ-component of radiation pressure tensor K = D × J at interfaces, 
     # needed for geometric source term:
-    K_ϕϕ_iphalf_IR::Array{Float64, 2};     K_ϕϕ_imhalf_IR::Array{Float64, 2}
-    K_ϕϕ_iphalf_opt::Array{Float64, 2};    K_ϕϕ_imhalf_opt::Array{Float64, 2}
-    K_ϕϕ_iphalf_FUV::Array{Float64, 2};    K_ϕϕ_imhalf_FUV::Array{Float64, 2}
-    K_ϕϕ_iphalf_LW::Array{Float64, 2};     K_ϕϕ_imhalf_LW::Array{Float64, 2}
-    K_ϕϕ_iphalf_EUV1::Array{Float64, 2};   K_ϕϕ_imhalf_EUV1::Array{Float64, 2}
-    K_ϕϕ_iphalf_EUV2::Array{Float64, 2};   K_ϕϕ_imhalf_EUV2::Array{Float64, 2}
-    K_ϕϕ_iphalf_EUV3::Array{Float64, 2};   K_ϕϕ_imhalf_EUV3::Array{Float64, 2}
+    K_ϕϕ_iphalf::Array{Float64, 3}
+    K_ϕϕ_imhalf::Array{Float64, 3}
 
     # Flux components for all bands: 
-    F_r_IR::Array{Float64, 2};      F_Z_IR::Array{Float64, 2}
-    F_r_Hr_IR::Array{Float64, 2};   F_Z_Hr_IR::Array{Float64, 2}
-    F_r_HZ_IR::Array{Float64, 2};   F_Z_HZ_IR::Array{Float64, 2}
-
-    F_r_opt::Array{Float64, 2};     F_Z_opt::Array{Float64, 2}
-    F_r_Hr_opt::Array{Float64, 2};  F_Z_Hr_opt::Array{Float64, 2}
-    F_r_HZ_opt::Array{Float64, 2};  F_Z_HZ_opt::Array{Float64, 2}
-
-    F_r_FUV::Array{Float64, 2};     F_Z_FUV::Array{Float64, 2}
-    F_r_Hr_FUV::Array{Float64, 2};  F_Z_Hr_FUV::Array{Float64, 2}
-    F_r_HZ_FUV::Array{Float64, 2};  F_Z_HZ_FUV::Array{Float64, 2}
-
-    F_r_LW::Array{Float64, 2};      F_Z_LW::Array{Float64, 2}
-    F_r_Hr_LW::Array{Float64, 2};   F_Z_Hr_LW::Array{Float64, 2}
-    F_r_HZ_LW::Array{Float64, 2};   F_Z_HZ_LW::Array{Float64, 2}
-
-    F_r_EUV1::Array{Float64, 2};    F_Z_EUV1::Array{Float64, 2}
-    F_r_Hr_EUV1::Array{Float64, 2}; F_Z_Hr_EUV1::Array{Float64, 2}
-    F_r_HZ_EUV1::Array{Float64, 2}; F_Z_HZ_EUV1::Array{Float64, 2}
-
-    F_r_EUV2::Array{Float64, 2};    F_Z_EUV2::Array{Float64, 2}
-    F_r_Hr_EUV2::Array{Float64, 2}; F_Z_Hr_EUV2::Array{Float64, 2}
-    F_r_HZ_EUV2::Array{Float64, 2}; F_Z_HZ_EUV2::Array{Float64, 2}
-
-    F_r_EUV3::Array{Float64, 2};    F_Z_EUV3::Array{Float64, 2}
-    F_r_Hr_EUV3::Array{Float64, 2}; F_Z_Hr_EUV3::Array{Float64, 2}
-    F_r_HZ_EUV3::Array{Float64, 2}; F_Z_HZ_EUV3::Array{Float64, 2}
+    F_r::Array{Float64, 3};     F_Z::Array{Float64, 3}
+    F_r_Hr::Array{Float64, 3};  F_Z_Hr::Array{Float64, 3}
+    F_r_HZ::Array{Float64, 3};  F_Z_HZ::Array{Float64, 3}
 
     # Flux opacities for all bands, for the asymptotic diffusion fix (only 
     # relevant for IR):
-    α_F_IR::Array{Float64, 2}
-    α_F_stellar::Array{Float64, 2}
+    α_F::Array{Float64, 3}
 
     # Luminosities in all bands, over infinite space (i.e. the full luminosity of the star):
     Lum_IR::Float64
@@ -268,6 +281,9 @@ mutable struct StellarRTArrays
     # On-the-spot approximation (Case B) or modelling of recombination photons:
     OTS::Bool
 
+    # Flux method for M1, either HLL or GLF:
+    FluxMethod::Val{FluxMethod}
+
 end
 
 
@@ -276,7 +292,8 @@ end
     species tracked in the code. """
 mutable struct ChemistryState{T<:AbstractFloat}
 
-    # Primordial species (H I, H II, He II, He III, D I, D II, HD): 
+    # Primordial species (H I, H II, H₂, He I, He II, He III, 
+    # D I, D II, HD): 
     xHI_adv::Array{T, 2}
     xHI_adv_old::Array{T, 2}
 
@@ -304,12 +321,16 @@ mutable struct ChemistryState{T<:AbstractFloat}
     xHD::Array{T, 2}
     xHD_old::Array{T, 2}
 
-    # Metals (C I, C II, CHₓ, CO, O I, O II, OHₓ): 
+    # Metals (C I, C II, C III, CHₓ, CO, O I, O II, O III, O IV, OHₓ, 
+    # S I, S II, S III, S IV): 
     xCI::Array{T, 2}
     xCI_old::Array{T, 2}
 
     xCII::Array{T, 2} 
     xCII_old::Array{T, 2}
+
+    xCIII::Array{T, 2} 
+    xCIII_old::Array{T, 2}
 
     xCHx_adv::Array{T, 2}       # CHₓ is only advected for accuracy, but otherwise obtained from conservation 
     xCHx_adv_old::Array{T, 2}
@@ -323,8 +344,26 @@ mutable struct ChemistryState{T<:AbstractFloat}
     xOII::Array{T, 2} 
     xOII_old::Array{T, 2}
 
+    xOIII::Array{T, 2} 
+    xOIII_old::Array{T, 2}
+
+    xOIV::Array{T, 2} 
+    xOIV_old::Array{T, 2}
+
     xOHx_adv::Array{T, 2}       # OHₓ is only advected for accuracy, but otherwise obtained from conservation 
     xOHx_adv_old::Array{T, 2}
+
+    xSI_adv::Array{T, 2}        # S I is only advected for accuracy, but otherwise obtained from conservation 
+    xSI_adv_old::Array{T, 2}
+
+    xSII::Array{T, 2} 
+    xSII_old::Array{T, 2}
+
+    xSIII::Array{T, 2} 
+    xSIII_old::Array{T, 2}
+
+    xSIV::Array{T, 2} 
+    xSIV_old::Array{T, 2}
 
     # Gas-phase metallicities:
     ZC::Array{T, 2}        # Carbon gas metallicity 
@@ -747,6 +786,50 @@ struct GeometryCartesian{T<:AbstractFloat}
 
     w_plus_j_p1::Array{T, 1}      # length N_Y
     w_minus_j_p1::Array{T, 1}     # length N_Y
+
+    # Below are various intervals & inverse intervals 
+    # that are needed in the M1 advection. It is efficient to 
+    # compute them once and store them, especially for the Lyα RT
+    # to avoid lots of repeated calculations:
+
+    ΔX_L::Array{T, 1}           # X[i+1]    - XCoM[i] for interior cells 
+    ΔX_R::Array{T, 1}           # XCoM[i+1] - X[i+1]  for interior cells 
+    inv_dX_i_im1::Array{T, 1}   # 1 / ( XCoM[i]   - XCoM[i-1] ) for interior cells 
+    inv_dX_ip1_i::Array{T, 1}   # 1 / ( XCoM[i+1] - XCoM[i]   ) for interior cells 
+    inv_dX_ip2_ip1::Array{T, 1} # 1 / ( XCoM[i+2] - XCoM[i+1] ) for interior cells 
+
+    # Corresponding values at inner & outer X-boundaries:
+    inv_dX_i_im1_InnerBoundary::T
+    inv_dX_ip1_i_InnerBoundary::T
+    inv_dX_ip2_ip1_InnerBoundary::T
+    ΔX_L_InnerBoundary::T
+    ΔX_R_InnerBoundary::T
+
+    inv_dX_i_im1_OuterBoundary::T
+    inv_dX_ip1_i_OuterBoundary::T
+    inv_dX_ip2_ip1_OuterBoundary::T
+    ΔX_L_OuterBoundary::T 
+    ΔX_R_OuterBoundary::T
+
+    # Similarly for Y-intervals:
+    ΔY_L::Array{T, 1}           # Y[j+1]    - YCoM[j] for interior cells 
+    ΔY_R::Array{T, 1}           # YCoM[j+1] - Y[j+1]  for interior cells 
+    inv_dY_j_jm1::Array{T, 1}   # 1 / ( YCoM[j]   - YCoM[j-1] ) for interior cells 
+    inv_dY_jp1_j::Array{T, 1}   # 1 / ( YCoM[j+1] - YCoM[j]   ) for interior cells 
+    inv_dY_jp2_jp1::Array{T, 1} # 1 / ( YCoM[j+2] - YCoM[j+1] ) for interior cells 
+
+    # Corresponding values at inner & outer Y-boundaries:
+    inv_dY_j_jm1_InnerBoundary::T
+    inv_dY_jp1_j_InnerBoundary::T
+    inv_dY_jp2_jp1_InnerBoundary::T
+    ΔY_L_InnerBoundary::T
+    ΔY_R_InnerBoundary::T
+
+    inv_dY_j_jm1_OuterBoundary::T
+    inv_dY_jp1_j_OuterBoundary::T
+    inv_dY_jp2_jp1_OuterBoundary::T
+    ΔY_L_OuterBoundary::T
+    ΔY_R_OuterBoundary::T
 end
 
 

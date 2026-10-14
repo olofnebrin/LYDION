@@ -19,7 +19,7 @@ import cmastro
 
 
 # ---------------- user inputs ----------------    
-filename = "DTypeTest.h5" 
+filename = "DTypeTest_128x128_RSL0.01_sigmastar3.0_OTStrue.h5" 
 frameskip = 1                 
 save_mp4 = True               
 outname = "DTypeTest_Animation.mp4"

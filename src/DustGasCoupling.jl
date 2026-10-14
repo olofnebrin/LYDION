@@ -6,7 +6,7 @@
 
 """
 
-const urel_max::Float64         = 100 * kms    # Maximum relative velocity of dust (fast-moving dust is destroyed anyway)
+const urel_max::Float64         = 500 * kms    # Maximum relative velocity of dust (fast-moving dust is destroyed anyway)
 const urel_max_squared::Float64 = urel_max * urel_max 
 
 """ This function caps the relative velocities, if the candidate updated 

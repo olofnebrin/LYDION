@@ -25,18 +25,25 @@
 
 """
 
+
 using .ConstantsAndFunctions  # Needed constants & functions
 using DelimitedFiles          # For reading data from files
 
-# Export functions:
+# Include file containing metal photoionization cross-sections:
+include(joinpath(@__DIR__, "MetalPhotoionizationCrossSectionAverages.jl"))
+
+# Export functions & default band struct:
 export dNdt_opt, L_opt, dNdt_FUV, L_FUV, dNdt_LW, L_LW,
        dNdt_EUV1, L_EUV1, dNdt_EUV2, L_EUV2, dNdt_EUV3, L_EUV3, L_bol,
        ClusterEmissionRates,
-       HeatingRate_LW, HeatingRate_EUV1, HeatingRate_EUV2, HeatingRate_EUV3, 
+       HeatingRate_FUV, HeatingRate_LW, HeatingRate_EUV1, HeatingRate_EUV2, HeatingRate_EUV3, 
        HeatingRate_Compton,
-       IonRate_HI, IonRate_H2, IonRate_HeI, IonRate_HeII, IonRate_OI, IonRate_CI,
+       IonRate_HI, IonRate_H2, IonRate_HeI, IonRate_HeII, 
+       IonRate_CI, IonRate_CII, IonRate_OI, IonRate_OII, IonRate_OIII, 
+       IonRate_SI, IonRate_SII, IonRate_SIII,
        PhotoDissRate_H2, PhotoDetachRate_Hminus, PhotoDissRate_HD, PhotoDissRate_CO,
-       PhotoDissRate_OHₓ, PhotoDissRate_CHₓ, StromGrenRadius
+       PhotoDissRate_OHₓ, PhotoDissRate_CHₓ, StromGrenRadius,
+       DefaultStellarBandAverages, GetBBStellarAverages
 
 # Average stellar radiation pressure-weighted photon energy (erg): 
 # p = ( ∫dν 4πJσ ) / ( ∫dν 4πJσ/hν ) ,
@@ -75,7 +82,6 @@ const σH2_LW_pump  = 6.94 * σH2_LW_diss         # UV pumping of H₂, as given
 const σH2_LW       = σH2_LW_diss + σH2_LW_pump  # Total LW absorption cross-section for H₂, from photodissociation + UV pumping 
 const σHD_LW       = (1.55/1.39) * σH2_LW_diss 
 const σHminus_LW   = 7.3e-18
-const σCI_LW       = 17.2e-18
 const σOH_LW       = 4.02e-18
 const σCH_LW       = 1.18e-18
 const σCO_LW       = 17.3e-18 
@@ -83,46 +89,40 @@ const σCO_LW       = 17.3e-18
 const σHI_EUV1     = 3.37e-18
 const σH2_EUV1     = 5.09e-18 
 const σHminus_EUV1 = 3.2e-18
-const σCI_EUV1     = 12.1e-18
-const σOI_EUV1     = 7.86e-18
 
 const σHI_EUV2     = 0.79e-18
 const σH2_EUV2     = 2.42e-18
 const σHeI_EUV2    = 5.10e-18
 const σHminus_EUV2 = 0.71e-18
-const σCI_EUV2     = 5.68e-18
-const σOI_EUV2     = 10.8e-18
 
 const σHI_EUV3     = 0.11e-18
 const σH2_EUV3     = 0.32e-18
 const σHeI_EUV3    = 0.77e-18
 const σHeII_EUV3   = 1.42e-18
 const σHminus_EUV3 = 0.092e-18
-const σCI_EUV3     = 1.61e-18
-const σOI_EUV3     = 4.73e-18
 
-# Radiation pressure/flux-weighted cross-sections, which differ slightly from photon 
+# Radiation pressure/flux/energy-weighted cross-sections, which differ slightly from photon 
 # number-weighted cross-sections:
-const σHI_EUV1_F   = σHI_EUV1 * pHI_EUV1 / E_EUV1
-const σH2_EUV1_F   = σH2_EUV1 * pH2_EUV1 / E_EUV1
+const σHI_EUV1_E   = σHI_EUV1 * pHI_EUV1 / E_EUV1
+const σH2_EUV1_E   = σH2_EUV1 * pH2_EUV1 / E_EUV1
 
-const σHI_EUV2_F   = σHI_EUV2  * pHI_EUV2 / E_EUV2 
-const σH2_EUV2_F   = σH2_EUV2  * pH2_EUV2 / E_EUV2 
-const σHeI_EUV2_F  = σHeI_EUV2 * pHeI_EUV2 / E_EUV2 
+const σHI_EUV2_E   = σHI_EUV2  * pHI_EUV2 / E_EUV2 
+const σH2_EUV2_E   = σH2_EUV2  * pH2_EUV2 / E_EUV2 
+const σHeI_EUV2_E  = σHeI_EUV2 * pHeI_EUV2 / E_EUV2 
 
-const σHI_EUV3_F   = σHI_EUV3   * pHI_EUV3   / E_EUV3 
-const σH2_EUV3_F   = σH2_EUV3   * pH2_EUV3   / E_EUV3 
-const σHeI_EUV3_F  = σHeI_EUV3  * pHeI_EUV3  / E_EUV3 
-const σHeII_EUV3_F = σHeII_EUV3 * pHeII_EUV3 / E_EUV3
+const σHI_EUV3_E   = σHI_EUV3   * pHI_EUV3   / E_EUV3 
+const σH2_EUV3_E   = σH2_EUV3   * pH2_EUV3   / E_EUV3 
+const σHeI_EUV3_E  = σHeI_EUV3  * pHeI_EUV3  / E_EUV3 
+const σHeII_EUV3_E = σHeII_EUV3 * pHeII_EUV3 / E_EUV3
 
 export σHminus_opt, σCH_opt,
        σHminus_FUV, σOH_FUV, σCH_FUV,
-       σHI_LW, σH2_LW, σHD_LW, σHminus_LW, σCI_LW, σOH_LW, σCH_LW, σCO_LW,
-       σHI_EUV1, σH2_EUV1, σHminus_EUV1, σCI_EUV1, σOI_EUV1,
-       σHI_EUV2, σH2_EUV2, σHeI_EUV2, σHminus_EUV2, σCI_EUV2, σOI_EUV2,
-       σHI_EUV3, σH2_EUV3, σHeI_EUV3, σHeII_EUV3, σHminus_EUV3, σCI_EUV3, σOI_EUV3,
-       σHI_EUV1_F, σH2_EUV1_F,  σHI_EUV2_F, σH2_EUV2_F, σHeI_EUV2_F,  
-       σHI_EUV3_F, σH2_EUV3_F, σHeI_EUV3_F, σHeII_EUV3_F
+       σHI_LW, σH2_LW, σHD_LW, σHminus_LW, σOH_LW, σCH_LW, σCO_LW,
+       σHI_EUV1, σH2_EUV1, σHminus_EUV1, 
+       σHI_EUV2, σH2_EUV2, σHeI_EUV2, σHminus_EUV2,
+       σHI_EUV3, σH2_EUV3, σHeI_EUV3, σHeII_EUV3, σHminus_EUV3, 
+       σHI_EUV1_E, σH2_EUV1_E,  σHI_EUV2_E, σH2_EUV2_E, σHeI_EUV2_E,  
+       σHI_EUV3_E, σH2_EUV3_E, σHeI_EUV3_E, σHeII_EUV3_E
 
 # Mean photo-heating energy (erg) in each band:
 
@@ -142,6 +142,21 @@ const hHeII_EUV3 = 2.03  * eV   # See ref. 2
 
 export hHI_EUV1, hH2_EUV1, hHI_EUV2, hH2_EUV2, hHeI_EUV2,
        hHI_EUV3, hH2_EUV3, hHeI_EUV3, hHeII_EUV3
+
+# Make a struct for the default H & He cross-sections & heating energies:
+const DefaultStellarBandAverages = StellarBandAverages(
+    E_opt, E_FUV, E_LW, E_EUV1, E_EUV2, E_EUV3,
+    inv_E_opt, inv_E_FUV, inv_E_LW, inv_E_EUV1, inv_E_EUV2, inv_E_EUV3,
+
+    σHI_EUV1,  σHI_EUV2,  σHI_EUV3,
+    σHeI_EUV2, σHeI_EUV3, σHeII_EUV3,
+
+    σHI_EUV1_E,  σHI_EUV2_E,  σHI_EUV3_E,
+    σHeI_EUV2_E, σHeI_EUV3_E, σHeII_EUV3_E,
+
+    hHI_EUV1,  hHI_EUV2,  hHI_EUV3,
+    hHeI_EUV2, hHeI_EUV3, hHeII_EUV3
+)
 
 
 # Below are photon emission rates and luminosities in the
@@ -218,9 +233,10 @@ end
 """ The optical luminosity L_opt (L⊙) of a star of ZAMS mass mstarZAMS (M⊙)
     and metallicity Zstar_Zsun (in Solar units). """
 function L_opt( mstarZAMS::Float64, 
-               Zstar_Zsun::Float64 = 1.0
+               Zstar_Zsun::Float64 = 1.0,
+                        A::StellarBandAverages = DefaultStellarBandAverages 
                )
-    dNdt_opt(mstarZAMS, Zstar_Zsun) * E_opt / Lsun
+    dNdt_opt(mstarZAMS, Zstar_Zsun) * A.E_opt / Lsun
 end
 
 
@@ -285,9 +301,10 @@ end
 """ The far-UV luminosity L_FUV (L⊙) of a star of ZAMS mass mstarZAMS (M⊙)
     and metallicity Zstar_Zsun (in Solar units). """
 function L_FUV( mstarZAMS::Float64,
-               Zstar_Zsun::Float64 = 1.0
+               Zstar_Zsun::Float64 = 1.0,
+                        A::StellarBandAverages = DefaultStellarBandAverages 
                 )
-    dNdt_FUV(mstarZAMS, Zstar_Zsun) * E_FUV / Lsun
+    dNdt_FUV(mstarZAMS, Zstar_Zsun) * A.E_FUV / Lsun
 end
 
 
@@ -352,9 +369,10 @@ end
 """ The Lyman-Werner luminosity L_LW (L⊙) of a star of ZAMS mass mstarZAMS (M⊙)
     and metallicity Zstar_Zsun (in Solar units). """
 function L_LW( mstarZAMS::Float64, 
-              Zstar_Zsun::Float64 = 1.0 
+              Zstar_Zsun::Float64 = 1.0,
+                       A::StellarBandAverages = DefaultStellarBandAverages 
               )
-    dNdt_LW(mstarZAMS, Zstar_Zsun) * E_LW / Lsun
+    dNdt_LW(mstarZAMS, Zstar_Zsun) * A.E_LW / Lsun
 end
 
 
@@ -419,16 +437,17 @@ end
 """ The H I ionizing luminosity L_EUV1 (L⊙) of a star of ZAMS mass mstarZAMS (M⊙)
     and metallicity Zstar_Zsun (in Solar units). """
 function L_EUV1( mstarZAMS::Float64, 
-                Zstar_Zsun::Float64 = 1.0
+                Zstar_Zsun::Float64 = 1.0,
+                         A::StellarBandAverages = DefaultStellarBandAverages
                  )
-    dNdt_EUV1(mstarZAMS, Zstar_Zsun) * E_EUV1 / Lsun
+    dNdt_EUV1(mstarZAMS, Zstar_Zsun) * A.E_EUV1 / Lsun
 end
 
 
-""" The He I ionizing photon output dN_opt/dt (s⁻¹) from a star of ZAMS 
+""" The He I ionizing photon output dN_EUV2/dt (s⁻¹) from a star of ZAMS 
     mass mstarZAMS (M⊙) and metallicity Zstar_Zsun (in Solar units). """
 function dNdt_EUV2( mstarZAMS::Float64,
-                   Zstar_Zsun::Float64 = 1.0 
+                   Zstar_Zsun::Float64 = 1.0
                    )
     x = log10( mstarZAMS )
     # Limits on metallicity used in the fit:
@@ -486,9 +505,10 @@ end
 """ The He I ionizing luminosity L_EUV2 (L⊙) of a star of ZAMS mass mstarZAMS (M⊙)
     and metallicity Zstar_Zsun (in Solar units). """
 function L_EUV2( mstarZAMS::Float64,
-                Zstar_Zsun::Float64 = 1.0
+                Zstar_Zsun::Float64 = 1.0,
+                         A::StellarBandAverages = DefaultStellarBandAverages
                  )
-    dNdt_EUV2(mstarZAMS, Zstar_Zsun) * E_EUV2 / Lsun
+    dNdt_EUV2(mstarZAMS, Zstar_Zsun) * A.E_EUV2 / Lsun
 end
 
 
@@ -553,19 +573,21 @@ end
 """ The He II ionizing luminosity L_EUV3 (L⊙) of a star of ZAMS mass mstarZAMS (M⊙)
     and metallicity Zstar_Zsun (in Solar units). """
 function L_EUV3( mstarZAMS::Float64,
-                Zstar_Zsun::Float64 = 1.0 
+                Zstar_Zsun::Float64 = 1.0,
+                         A::StellarBandAverages = DefaultStellarBandAverages 
                  )
-    dNdt_EUV3(mstarZAMS, Zstar_Zsun) * E_EUV3 / Lsun
+    dNdt_EUV3(mstarZAMS, Zstar_Zsun) * A.E_EUV3 / Lsun
 end
 
 
 """ The bolometric luminosity L_bol (L⊙) of a star of mass mstar (M⊙)
     and metallicity Zstar_Zsun (in Solar units). """
 function L_bol( mstarZAMS::Float64, 
-               Zstar_Zsun::Float64 = 1.0 
+               Zstar_Zsun::Float64 = 1.0,
+                        A::StellarBandAverages = DefaultStellarBandAverages 
                )
-    L_opt(mstarZAMS, Zstar_Zsun) + L_FUV(mstarZAMS, Zstar_Zsun) + L_LW(mstarZAMS, Zstar_Zsun) +
-    L_EUV1(mstarZAMS, Zstar_Zsun) + L_EUV2(mstarZAMS, Zstar_Zsun) + L_EUV3(mstarZAMS, Zstar_Zsun)
+    L_opt(mstarZAMS, Zstar_Zsun, A) + L_FUV(mstarZAMS, Zstar_Zsun, A) + L_LW(mstarZAMS, Zstar_Zsun, A) +
+    L_EUV1(mstarZAMS, Zstar_Zsun, A) + L_EUV2(mstarZAMS, Zstar_Zsun, A) + L_EUV3(mstarZAMS, Zstar_Zsun, A)
 end
 
 ################################################################################
@@ -717,17 +739,48 @@ end
 #######                                                                  #######
 ################################################################################
 
+# Pre-compute σ_N × h for metals in the FUV band:
+const σSI_FUV_N_hSI_FUV::Float64 = σSI_FUV_N * hSI_FUV
+
+""" Heating rate (erg cm⁻³ s⁻¹) from absorptions of stellar photons 
+    in the FUV-band. This is only provided by metal ions that are 
+    easily photoionized. """
+@inline function HeatingRate_FUV( J_FUV::Float64, 
+                                    nSI::Float64,
+                                      A::StellarBandAverages = DefaultStellarBandAverages 
+                                  )
+
+    @fastmath ( Four_π * J_FUV * A.inv_E_FUV) * ( nSI * σSI_FUV_N_hSI_FUV )
+end
+
+
+# Pre-compute σ_N × h for metals & H₂ in the LW band:
+const σH2_LW_diss_hH2_LW::Float64 = σH2_LW_diss * hH2_LW 
+const σCI_LW_N_hCI_LW::Float64    = σCI_LW_N    * hCI_LW
+const σSI_LW_N_hSI_LW::Float64    = σSI_LW_N    * hSI_LW
+
 const Crad::Float64 = 2e-7  # Typical radiative de-excitation rate for H₂ (see ref. 3)
 
 """ Heating rate (erg cm⁻³ s⁻¹) from absorptions of stellar photons 
     in the LW-band. """
-@inline function HeatingRate_LW( J_LW::Float64,
-                                  nH2::Float64,
-                                  nHI::Float64,
-                                    T::Float64 
-                                  )
+@inline function HeatingRate_LW( SelfShielding::Float64, # Self-shielding for H₂
+                                          J_LW::Float64,
+                                           nH2::Float64,
+                                           nHI::Float64,
+                                           nCI::Float64,
+                                           nSI::Float64,
+                                             T::Float64,
+                                             A::StellarBandAverages = DefaultStellarBandAverages 
+                               )
+
+    # 4πJ_LW / E_LW (used multiple times):
+    Four_π_J_LW_over_E_LW    = @fastmath Four_π * J_LW * A.inv_E_LW
+
+    # H₂ line absorption is self-shielded:
+    Four_π_J_LW_over_E_LW_H2 = @fastmath SelfShielding * Four_π_J_LW_over_E_LW
+
     # Heating from photodissociation of H₂:
-    HeatingRate_PhotoDissH2 = @fastmath ( Four_π * J_LW * inv_E_LW) * nH2 * σH2_LW_diss * hH2_LW 
+    HeatingRate_PhotoDissH2  = @fastmath Four_π_J_LW_over_E_LW_H2 * nH2 * σH2_LW_diss_hH2_LW 
 
     # Average energy injected per UV pumping event (i.e. no photodissociation):
     T          = clamp( T, 10.0, 1e5 )
@@ -736,35 +789,92 @@ const Crad::Float64 = 2e-7  # Typical radiative de-excitation rate for H₂ (see
     E_H2_pump  = @fastmath 2 * eV * Cdex / (Cdex + Crad)
 
     # Heating from vibrational excitation (but not photodissociation) of H₂:
-    HeatingRate_PumpH2  = @fastmath ( Four_π * J_LW * inv_E_LW) * nH2 * σH2_LW_pump * E_H2_pump
+    HeatingRate_PumpH2  = @fastmath Four_π_J_LW_over_E_LW_H2 * nH2 * σH2_LW_pump * E_H2_pump
 
-    return HeatingRate_PhotoDissH2 + HeatingRate_PumpH2
+    # Heating rate from photoionization of C I:
+    HeatingRate_CI = @fastmath Four_π_J_LW_over_E_LW * ( nCI * σCI_LW_N_hCI_LW )
+
+    # Heating rate from photoionization of S I:
+    HeatingRate_SI = @fastmath Four_π_J_LW_over_E_LW * ( nSI * σSI_LW_N_hSI_LW )
+
+    return HeatingRate_PhotoDissH2 + HeatingRate_PumpH2 + HeatingRate_CI + HeatingRate_SI
 end
 
+
+# Pre-compute σ_N × h for metals & H₂ in the EUV1 band:
+const σH2_EUV1_hH2_EUV1::Float64     = σH2_EUV1    * hH2_EUV1
+const σCI_EUV1_N_hCI_EUV1::Float64   = σCI_EUV1_N  * hCI_EUV1
+const σCII_EUV1_N_hCII_EUV1::Float64 = σCII_EUV1_N * hCII_EUV1
+const σOI_EUV1_N_hOI_EUV1::Float64   = σOI_EUV1_N  * hOI_EUV1
+const σSI_EUV1_N_hSI_EUV1::Float64   = σSI_EUV1_N  * hSI_EUV1
+const σSII_EUV1_N_hSII_EUV1::Float64 = σSII_EUV1_N * hSII_EUV1
 
 """ Heating rate (erg cm⁻³ s⁻¹) from absorptions of stellar photons 
     in the EUV1-band. """
 @inline function HeatingRate_EUV1( J_EUV1::Float64, 
                                       nHI::Float64, 
-                                      nH2::Float64 
+                                      nH2::Float64,
+                                      nCI::Float64,
+                                     nCII::Float64,
+                                      nOI::Float64,
+                                      nSI::Float64,
+                                     nSII::Float64,
+                                        A::StellarBandAverages = DefaultStellarBandAverages 
                                   )
 
-    @fastmath ( Four_π * J_EUV1 * inv_E_EUV1) * ( nHI * σHI_EUV1 * hHI_EUV1  +  nH2 * σH2_EUV1 * hH2_EUV1 )
+    @fastmath ( Four_π * J_EUV1 * A.inv_E_EUV1) * ( nHI  * A.σHI_EUV1_N * A.hHI_EUV1  +  nH2  * σH2_EUV1_hH2_EUV1
+                                                  + nCI  * σCI_EUV1_N_hCI_EUV1        +  nCII * σCII_EUV1_N_hCII_EUV1
+                                                  + nOI  * σOI_EUV1_N_hOI_EUV1        +  nSI  * σSI_EUV1_N_hSI_EUV1
+                                                  + nSII * σSII_EUV1_N_hSII_EUV1 )
 end
 
+
+# Pre-compute σ_N × h for metals and H₂ in the EUV2 band: 
+const σH2_EUV2_hH2_EUV2::Float64       = σH2_EUV2     * hH2_EUV2
+const σCI_EUV2_N_hCI_EUV2::Float64     = σCI_EUV2_N   * hCI_EUV2
+const σCII_EUV2_N_hCII_EUV2::Float64   = σCII_EUV2_N  * hCII_EUV2
+const σOI_EUV2_N_hOI_EUV2::Float64     = σOI_EUV2_N   * hOI_EUV2
+const σOII_EUV2_N_hOII_EUV2::Float64   = σOII_EUV2_N  * hOII_EUV2
+const σSI_EUV2_N_hSI_EUV2::Float64     = σSI_EUV2_N   * hSI_EUV2
+const σSII_EUV2_N_hSII_EUV2::Float64   = σSII_EUV2_N  * hSII_EUV2
+const σSIII_EUV2_N_hSIII_EUV2::Float64 = σSIII_EUV2_N * hSIII_EUV2
 
 """ Heating rate (erg cm⁻³ s⁻¹) from absorptions of stellar photons 
     in the EUV2-band. """
 @inline function HeatingRate_EUV2( J_EUV2::Float64, 
                                       nHI::Float64, 
                                       nH2::Float64,
-                                     nHeI::Float64
+                                     nHeI::Float64,
+                                      nCI::Float64,
+                                     nCII::Float64,
+                                      nOI::Float64,
+                                     nOII::Float64,
+                                      nSI::Float64,
+                                     nSII::Float64,
+                                    nSIII::Float64,
+                                        A::StellarBandAverages = DefaultStellarBandAverages 
                                   )
 
-    @fastmath ( Four_π * J_EUV2 * inv_E_EUV2) * ( 
-    nHI * σHI_EUV2 * hHI_EUV2  +  nH2 * σH2_EUV2 * hH2_EUV2  +  nHeI * σHeI_EUV2 * hHeI_EUV2 )
+    @fastmath ( Four_π * J_EUV2 * A.inv_E_EUV2) * ( 
+      nHI   * A.σHI_EUV2_N * A.hHI_EUV2  +  nH2  * σH2_EUV2_hH2_EUV2      +  nHeI * A.σHeI_EUV2_N * A.hHeI_EUV2
+
+      # Metal contributions: 
+    + nCI   * σCI_EUV2_N_hCI_EUV2    +  nCII * σCII_EUV2_N_hCII_EUV2  +  nOI  * σOI_EUV2_N_hOI_EUV2
+    + nOII  * σOII_EUV2_N_hOII_EUV2  +  nSI  * σSI_EUV2_N_hSI_EUV2    +  nSII * σSII_EUV2_N_hSII_EUV2
+    + nSIII * σSIII_EUV2_N_hSIII_EUV2 )
 end
 
+
+# Pre-compute σ_N × h for metals and H₂ in the EUV3 band: 
+const σH2_EUV3_hH2_EUV3::Float64       = σH2_EUV3     * hH2_EUV3
+const σCI_EUV3_N_hCI_EUV3::Float64     = σCI_EUV3_N   * hCI_EUV3
+const σCII_EUV3_N_hCII_EUV3::Float64   = σCII_EUV3_N  * hCII_EUV3
+const σOI_EUV3_N_hOI_EUV3::Float64     = σOI_EUV3_N   * hOI_EUV3
+const σOII_EUV3_N_hOII_EUV3::Float64   = σOII_EUV3_N  * hOII_EUV3
+const σOIII_EUV3_N_hOIII_EUV3::Float64 = σOIII_EUV3_N * hOIII_EUV3
+const σSI_EUV3_N_hSI_EUV3::Float64     = σSI_EUV3_N   * hSI_EUV3
+const σSII_EUV3_N_hSII_EUV3::Float64   = σSII_EUV3_N  * hSII_EUV3
+const σSIII_EUV3_N_hSIII_EUV3::Float64 = σSIII_EUV3_N * hSIII_EUV3
 
 """ Heating rate (erg cm⁻³ s⁻¹) from absorptions of stellar photons 
     in the EUV3-band. """
@@ -772,12 +882,26 @@ end
                                       nHI::Float64, 
                                       nH2::Float64,
                                      nHeI::Float64,
-                                    nHeII::Float64
+                                    nHeII::Float64,
+                                      nCI::Float64,
+                                     nCII::Float64,
+                                      nOI::Float64,
+                                     nOII::Float64,
+                                    nOIII::Float64,
+                                      nSI::Float64,
+                                     nSII::Float64,
+                                    nSIII::Float64,
+                                        A::StellarBandAverages = DefaultStellarBandAverages
                                   )
 
-    @fastmath ( Four_π * J_EUV3 * inv_E_EUV3) * ( 
-        nHI * σHI_EUV3 * hHI_EUV3  +  nH2 * σH2_EUV3 * hH2_EUV3  
-    +  nHeI * σHeI_EUV3 * hHeI_EUV3  + nHeII * σHeII_EUV3 * hHeII_EUV3 )
+    @fastmath ( Four_π * J_EUV3 * A.inv_E_EUV3) * ( 
+        nHI * A.σHI_EUV3_N  * A.hHI_EUV3   +  nH2   * σH2_EUV3_hH2_EUV3  
+    +  nHeI * A.σHeI_EUV3_N * A.hHeI_EUV3  +  nHeII * A.σHeII_EUV3_N * A.hHeII_EUV3
+    
+    # Metal contribution:
+    +  nCI * σCI_EUV3_N_hCI_EUV3  +  nCII * σCII_EUV3_N_hCII_EUV3
+    +  nOI * σOI_EUV3_N_hOI_EUV3  +  nOII * σOII_EUV3_N_hOII_EUV3  +  nOIII * σOIII_EUV3_N_hOIII_EUV3
+    +  nSI * σSI_EUV3_N_hSI_EUV3  +  nSII * σSII_EUV3_N_hSII_EUV3  +  nSIII * σSIII_EUV3_N_hSIII_EUV3 )
 end
 
 
@@ -795,18 +919,19 @@ const ConstantComptonHeating::Float64 = σT / (me * c)  # Convenient constant
                                      J_EUV3::Float64,
                                          ne::Float64,
                                           T::Float64,
-                                      e_Lyα::Float64 = 0.0
+                                      e_Lyα::Float64 = 0.0,
+                                          A::StellarBandAverages = DefaultStellarBandAverages
                                        )
     # Convenient variable:
     Four_kBT             = @fastmath 4 * kB * T
 
     # Heating/cooling rate, considering the stellar intensity in all bands: 
-    HeatingRate_Compton  = @fastmath Four_π_over_c * ne * ConstantComptonHeating * (  J_opt  * (E_opt  - Four_kBT)
-                                                                                    + J_FUV  * (E_FUV  - Four_kBT)
-                                                                                    + J_LW   * (E_LW   - Four_kBT)
-                                                                                    + J_EUV1 * (E_EUV1 - Four_kBT)
-                                                                                    + J_EUV2 * (E_EUV2 - Four_kBT)
-                                                                                    + J_EUV3 * (E_EUV3 - Four_kBT) )
+    HeatingRate_Compton  = @fastmath Four_π_over_c * ne * ConstantComptonHeating * (  J_opt  * (A.E_opt  - Four_kBT)
+                                                                                    + J_FUV  * (A.E_FUV  - Four_kBT)
+                                                                                    + J_LW   * (A.E_LW   - Four_kBT)
+                                                                                    + J_EUV1 * (A.E_EUV1 - Four_kBT)
+                                                                                    + J_EUV2 * (A.E_EUV2 - Four_kBT)
+                                                                                    + J_EUV3 * (A.E_EUV3 - Four_kBT) )
 
     # Add contribution from Lyα photons:
     if e_Lyα > 0.0
@@ -827,15 +952,15 @@ end
 
 """ H₂ photodissociation rate (s⁻¹) 
     from absorptions of stellar Lyman-Werner photons. """
-@inline function PhotoDissRate_H2( J_LW::Float64 )
-    @fastmath Four_π * J_LW * σH2_LW_diss * inv_E_LW
+@inline function PhotoDissRate_H2( J_LW::Float64, A::StellarBandAverages = DefaultStellarBandAverages )
+    @fastmath Four_π * J_LW * σH2_LW_diss * A.inv_E_LW
 end
 
 
 """ CO photodissociation rate (s⁻¹) 
     from absorptions of stellar Lyman-Werner photons. """
-@inline function PhotoDissRate_CO( J_LW::Float64 )
-    @fastmath Four_π * J_LW * σCO_LW * inv_E_LW
+@inline function PhotoDissRate_CO( J_LW::Float64, A::StellarBandAverages = DefaultStellarBandAverages )
+    @fastmath Four_π * J_LW * σCO_LW * A.inv_E_LW
 end
 
 
@@ -843,9 +968,10 @@ end
     from absorptions of stellar photons & Lyα photons. """
 @inline function PhotoDissRate_OHₓ( J_FUV::Float64, 
                                      J_LW::Float64,
-                                    e_Lyα::Float64 = 0.0
+                                    e_Lyα::Float64 = 0.0,
+                                        A::StellarBandAverages = DefaultStellarBandAverages
                                       )
-    @fastmath (  Four_π * ( J_FUV * σOH_FUV * inv_E_FUV  +  J_LW * σOH_LW * inv_E_LW )
+    @fastmath (  Four_π * ( J_FUV * σOH_FUV * A.inv_E_FUV  +  J_LW * σOH_LW * A.inv_E_LW )
 
     +  c * e_Lyα * σOH_Lyα * inv_ELyα  )
 end
@@ -856,9 +982,10 @@ end
 @inline function PhotoDissRate_CHₓ( J_opt::Float64,
                                     J_FUV::Float64, 
                                      J_LW::Float64,
-                                    e_Lyα::Float64 = 0.0
+                                    e_Lyα::Float64 = 0.0,
+                                        A::StellarBandAverages = DefaultStellarBandAverages
                                     )
-    @fastmath (  Four_π * ( J_opt * σCH_opt * inv_E_opt +  J_FUV * σCH_FUV * inv_E_FUV  +  J_LW * σCH_LW * inv_E_LW )
+    @fastmath (  Four_π * ( J_opt * σCH_opt * A.inv_E_opt +  J_FUV * σCH_FUV * A.inv_E_FUV  +  J_LW * σCH_LW * A.inv_E_LW )
     
     +  c * e_Lyα * σCH_Lyα * inv_ELyα  )
 end
@@ -872,15 +999,16 @@ end
                                         J_EUV1::Float64,
                                         J_EUV2::Float64,
                                         J_EUV3::Float64,
-                                         e_Lyα::Float64 = 0.0
+                                         e_Lyα::Float64 = 0.0,
+                                             A::StellarBandAverages = DefaultStellarBandAverages
                                        )
 
-    @fastmath (  Four_π * ( J_opt  * σHminus_opt  * inv_E_opt  
-                          + J_FUV  * σHminus_FUV  * inv_E_FUV  
-                          + J_LW   * σHminus_LW   * inv_E_LW
-                          + J_EUV1 * σHminus_EUV1 * inv_E_EUV1 
-                          + J_EUV2 * σHminus_EUV2 * inv_E_EUV2  
-                          + J_EUV3 * σHminus_EUV3 * inv_E_EUV3 )
+    @fastmath (  Four_π * ( J_opt  * σHminus_opt  * A.inv_E_opt  
+                          + J_FUV  * σHminus_FUV  * A.inv_E_FUV  
+                          + J_LW   * σHminus_LW   * A.inv_E_LW
+                          + J_EUV1 * σHminus_EUV1 * A.inv_E_EUV1 
+                          + J_EUV2 * σHminus_EUV2 * A.inv_E_EUV2  
+                          + J_EUV3 * σHminus_EUV3 * A.inv_E_EUV3 )
 
                 +  c * e_Lyα * σHminus_Lyα * inv_ELyα  )
 end
@@ -888,8 +1016,9 @@ end
 
 """ HD photodissociation rate (s⁻¹) 
     from absorptions of stellar Lyman-Werner photons. """
-@inline function PhotoDissRate_HD( J_LW::Float64 )
-    @fastmath Four_π * J_LW * σHD_LW * inv_E_LW
+@inline function PhotoDissRate_HD( J_LW::Float64,
+                                      A::StellarBandAverages = DefaultStellarBandAverages )
+    @fastmath Four_π * J_LW * σHD_LW * A.inv_E_LW
 end
 
 
@@ -897,11 +1026,12 @@ end
     ionizing stellar photons. """
 @inline function IonRate_H2( J_EUV1::Float64,
                              J_EUV2::Float64,
-                             J_EUV3::Float64
+                             J_EUV3::Float64,
+                                  A::StellarBandAverages = DefaultStellarBandAverages
                               )
-    @fastmath Four_π * ( J_EUV1 * σH2_EUV1 * inv_E_EUV1 
-                       + J_EUV2 * σH2_EUV2 * inv_E_EUV2 
-                       + J_EUV3 * σH2_EUV3 * inv_E_EUV3  )
+    @fastmath Four_π * ( J_EUV1 * σH2_EUV1 * A.inv_E_EUV1 
+                       + J_EUV2 * σH2_EUV2 * A.inv_E_EUV2 
+                       + J_EUV3 * σH2_EUV3 * A.inv_E_EUV3  )
 end
 
 
@@ -909,40 +1039,31 @@ end
     ionizing stellar photons. """
 @inline function IonRate_HI( J_EUV1::Float64, 
                              J_EUV2::Float64,
-                             J_EUV3::Float64
+                             J_EUV3::Float64,
+                                  A::StellarBandAverages = DefaultStellarBandAverages
                              )
-    @fastmath Four_π * ( J_EUV1 * σHI_EUV1 * inv_E_EUV1 
-                       + J_EUV2 * σHI_EUV2 * inv_E_EUV2 
-                       + J_EUV3 * σHI_EUV3 * inv_E_EUV3  )
+    @fastmath Four_π * ( J_EUV1 * A.σHI_EUV1_N * A.inv_E_EUV1 
+                       + J_EUV2 * A.σHI_EUV2_N * A.inv_E_EUV2 
+                       + J_EUV3 * A.σHI_EUV3_N * A.inv_E_EUV3  )
 end
 
 
 """ He I photoionization rate (s⁻¹) from absorptions of
     ionizing stellar photons. """
 @inline function IonRate_HeI( J_EUV2::Float64,
-                              J_EUV3::Float64
+                              J_EUV3::Float64,
+                                   A::StellarBandAverages = DefaultStellarBandAverages
                              )
-    @fastmath Four_π * ( J_EUV2 * σHeI_EUV2 * inv_E_EUV2 
-                       + J_EUV3 * σHeI_EUV3 * inv_E_EUV3  )
+    @fastmath Four_π * ( J_EUV2 * A.σHeI_EUV2_N * A.inv_E_EUV2 
+                       + J_EUV3 * A.σHeI_EUV3_N * A.inv_E_EUV3  )
 end
 
 
 """ He II photoionization rate (s⁻¹) from absorptions of
     ionizing stellar photons. """
-@inline function IonRate_HeII( J_EUV3::Float64 )
-    Four_π * J_EUV3 * σHeII_EUV3 * inv_E_EUV3 
-end
-
-
-""" O I photoionization rate (s⁻¹) from absorptions of
-    ionizing stellar photons. """
-@inline function IonRate_OI( J_EUV1::Float64, 
-                             J_EUV2::Float64,
-                             J_EUV3::Float64
-                             )
-    @fastmath Four_π * ( J_EUV1 * σOI_EUV1 * inv_E_EUV1 
-                       + J_EUV2 * σOI_EUV2 * inv_E_EUV2 
-                       + J_EUV3 * σOI_EUV3 * inv_E_EUV3  )
+@inline function IonRate_HeII( J_EUV3::Float64,
+                                    A::StellarBandAverages = DefaultStellarBandAverages )
+    Four_π * J_EUV3 * A.σHeII_EUV3_N * A.inv_E_EUV3 
 end
 
 
@@ -951,12 +1072,100 @@ end
 @inline function IonRate_CI( J_LW::Float64,
                            J_EUV1::Float64, 
                            J_EUV2::Float64,
-                           J_EUV3::Float64
+                           J_EUV3::Float64, 
+                                A::StellarBandAverages = DefaultStellarBandAverages
                              )
-    @fastmath Four_π * ( J_LW   * σCI_LW   * inv_E_LW
-                       + J_EUV1 * σCI_EUV1 * inv_E_EUV1 
-                       + J_EUV2 * σCI_EUV2 * inv_E_EUV2 
-                       + J_EUV3 * σCI_EUV3 * inv_E_EUV3  )
+    @fastmath Four_π * ( J_LW   * σCI_LW_N   * A.inv_E_LW
+                       + J_EUV1 * σCI_EUV1_N * A.inv_E_EUV1 
+                       + J_EUV2 * σCI_EUV2_N * A.inv_E_EUV2 
+                       + J_EUV3 * σCI_EUV3_N * A.inv_E_EUV3  )
+end
+
+
+""" C II photoionization rate (s⁻¹) from absorptions of
+    ionizing stellar photons. """
+@inline function IonRate_CII( J_EUV1::Float64, 
+                              J_EUV2::Float64,
+                              J_EUV3::Float64, 
+                                   A::StellarBandAverages = DefaultStellarBandAverages
+                             )
+    @fastmath Four_π * ( J_EUV1 * σCII_EUV1_N * A.inv_E_EUV1 
+                       + J_EUV2 * σCII_EUV2_N * A.inv_E_EUV2 
+                       + J_EUV3 * σCII_EUV3_N * A.inv_E_EUV3  )
+end
+
+
+""" O I photoionization rate (s⁻¹) from absorptions of
+    ionizing stellar photons. """
+@inline function IonRate_OI( J_EUV1::Float64, 
+                             J_EUV2::Float64,
+                             J_EUV3::Float64, 
+                                  A::StellarBandAverages = DefaultStellarBandAverages
+                             )
+    @fastmath Four_π * ( J_EUV1 * σOI_EUV1_N * A.inv_E_EUV1 
+                       + J_EUV2 * σOI_EUV2_N * A.inv_E_EUV2 
+                       + J_EUV3 * σOI_EUV3_N * A.inv_E_EUV3  )
+end
+
+
+""" O II photoionization rate (s⁻¹) from absorptions of
+    ionizing stellar photons. """
+@inline function IonRate_OII( J_EUV2::Float64,
+                              J_EUV3::Float64, 
+                                   A::StellarBandAverages = DefaultStellarBandAverages
+                             )
+    @fastmath Four_π * ( J_EUV2 * σOII_EUV2_N * A.inv_E_EUV2 
+                       + J_EUV3 * σOII_EUV3_N * A.inv_E_EUV3  )
+end
+
+
+""" O III photoionization rate (s⁻¹) from absorptions of
+    ionizing stellar photons. """
+@inline function IonRate_OIII( J_EUV3::Float64, 
+                                    A::StellarBandAverages = DefaultStellarBandAverages
+                              )
+    @fastmath Four_π * J_EUV3 * σOIII_EUV3_N * A.inv_E_EUV3 
+end
+
+
+""" S I photoionization rate (s⁻¹) from absorptions of
+    ionizing stellar photons. """
+@inline function IonRate_SI( J_LW::Float64,
+                            J_FUV::Float64,
+                           J_EUV1::Float64, 
+                           J_EUV2::Float64,
+                           J_EUV3::Float64, 
+                                A::StellarBandAverages = DefaultStellarBandAverages
+                             )
+    @fastmath Four_π * ( J_LW   * σSI_LW_N   * A.inv_E_LW 
+                       + J_FUV  * σSI_FUV_N  * A.inv_E_FUV 
+                       + J_EUV1 * σSI_EUV1_N * A.inv_E_EUV1 
+                       + J_EUV2 * σSI_EUV2_N * A.inv_E_EUV2 
+                       + J_EUV3 * σSI_EUV3_N * A.inv_E_EUV3  )
+end
+
+
+""" S II photoionization rate (s⁻¹) from absorptions of
+    ionizing stellar photons. """
+@inline function IonRate_SII( J_EUV1::Float64, 
+                              J_EUV2::Float64,
+                              J_EUV3::Float64, 
+                                   A::StellarBandAverages = DefaultStellarBandAverages
+                             )
+    @fastmath Four_π * ( J_EUV1 * σSII_EUV1_N * A.inv_E_EUV1 
+                       + J_EUV2 * σSII_EUV2_N * A.inv_E_EUV2 
+                       + J_EUV3 * σSII_EUV3_N * A.inv_E_EUV3  )
+end
+
+
+""" S III photoionization rate (s⁻¹) from absorptions of
+    ionizing stellar photons. """
+@inline function IonRate_SIII( J_EUV2::Float64,
+                               J_EUV3::Float64, 
+                                    A::StellarBandAverages = DefaultStellarBandAverages
+                              )
+    @fastmath Four_π * ( J_EUV2 * σSIII_EUV2_N * A.inv_E_EUV2 
+                       + J_EUV3 * σSIII_EUV3_N * A.inv_E_EUV3  )
 end
 
 
@@ -971,4 +1180,335 @@ end
     dNdt_LyC = dNdt_EUV1(mstar, Zstar_Zsun) + dNdt_EUV2(mstar, Zstar_Zsun) + dNdt_EUV3(mstar, Zstar_Zsun)
     
     return ( 3 * dNdt_LyC / (Four_π * krecHII(T, CaseB) * (nH^2)) )^(1/3)
+end
+
+
+################################################################################
+#######                                                                  #######
+#######   P H O T O - I O N I Z A T I O N  C R O S S - S E C T I O N S   #######
+#######                                                                  #######
+################################################################################
+
+# The code below is for computing SED photon number & energy-weighted photoionization 
+# cross-sections & photoheating. For use in idealized tests where specific SEDs 
+# are used. 
+
+
+""" General fit to photoionization cross-sections by Verner et al. (1996). """
+function CrossSectionFit_Verner96( E_eV::Float64, # Photon energy in eV 
+                                     σ0::Float64, # In 10⁻¹⁸ cm² (Mb)
+                                  E0_eV::Float64, 
+                                     yw::Float64, 
+                                     ya::Float64, 
+                                      P::Float64, 
+                                     y0::Float64,
+                                     y1::Float64,
+                                 Eth_eV::Float64 )
+
+    if E_eV < Eth_eV
+        # Exit early if photon energy is below the threshold:
+        return 0.0
+    end
+
+    x = (E_eV / E0_eV ) - y0 
+    y = sqrt( x * x  +  y1 * y1 )
+    F = ((x - 1)^2  +  yw * yw) * (y^(0.5*P - 5.5)) * ((1 + sqrt(y/ya))^(-P))
+
+    return σ0 * F * 1e-18 
+end
+
+
+""" The photon energy-dependent H I photoionization cross-section (cm²). """
+function σHI( E::Float64 )
+    # Get photon energy in eV:
+    E_eV   = E / eV 
+    # Constants for the H I cross-section:
+    Eth_eV = 1.360e1 
+    E0_eV  = 4.298e-1
+    σ0     = 5.475e4
+    ya     = 3.288e1 
+    P      = 2.963e0
+    yw     = 0.0
+    y0     = 0.0
+    y1     = 0.0
+
+    # Get cross-section: 
+    σHI    = CrossSectionFit_Verner96( E_eV, σ0, E0_eV, yw, 
+                                       ya, P, y0, y1, Eth_eV )
+
+    return σHI
+end
+
+
+""" The photon energy-dependent He I photoionization cross-section (cm²). """
+function σHeI( E::Float64 )
+    # Get photon energy in eV:
+    E_eV   = E / eV 
+    # Constants for the He I cross-section:
+    Eth_eV = 2.459e1
+    E0_eV  = 1.361e1
+    σ0     = 9.492e2
+    ya     = 1.469e0
+    P      = 3.188e0
+    yw     = 2.039e0
+    y0     = 4.434e-1
+    y1     = 2.136e0
+
+    # Get cross-section: 
+    σHeI   = CrossSectionFit_Verner96( E_eV, σ0, E0_eV, yw, 
+                                       ya, P, y0, y1, Eth_eV )
+
+    return σHeI
+end
+
+
+""" The photon energy-dependent He II photoionization cross-section (cm²). """
+function σHeII( E::Float64 )
+    # Get photon energy in eV:
+    E_eV   = E / eV 
+    # Constants for the He II cross-section:
+    Eth_eV = 5.442e1
+    E0_eV  = 1.720e0
+    σ0     = 1.369e4
+    ya     = 3.288e1
+    P      = 2.936e0
+    yw     = 0.0
+    y0     = 0.0
+    y1     = 0.0
+
+    # Get cross-section: 
+    σHeII  = CrossSectionFit_Verner96( E_eV, σ0, E0_eV, yw, 
+                                       ya, P, y0, y1, Eth_eV )
+
+    return σHeII
+end
+
+
+""" Simple mid-point integration over photon energy E. """
+function IntegrateEnergyBand( f::Function, E_min::Float64, E_max::Float64, N::Int = 4096 )
+
+    # Initialize step size (in energy, ΔE), and integrand value:
+    ΔE    = (E_max - E_min) / N 
+    ∫dE_f = 0.0
+
+    @inbounds for i in 1:N
+        E_mid  = E_min  +  (i - 0.5) * ΔE
+        f_mid  = f(E_mid) 
+        ∫dE_f += @fastmath f_mid * ΔE
+    end
+
+    return ∫dE_f
+end
+
+
+""" This function computes the photon number-weighted cross-section 
+    between E_min and E_max:
+    
+    σ_E = [∫dν 4πJ σ(hν) / hν] / [∫dν 4πJ / hν] """
+function Compute_σ_N( J::Function,     σ::Function,
+                  E_min::Float64,  E_max::Float64, N::Int = 4096 )
+
+    numerator = IntegrateEnergyBand(
+        E -> J(E) * σ(E) / E,
+        E_min, E_max, N
+    )
+
+    denominator = IntegrateEnergyBand(
+        E -> J(E) / E,
+        E_min, E_max, N
+    )
+
+    if denominator ≤ 0.0
+        return 0.0
+    end
+
+    # Put it all together: 
+    σ_N = numerator / denominator
+
+    return σ_N
+end
+
+
+""" This function computes the photon energy-weighted cross-section between 
+    energy E_min and E_max:
+    
+    σ_E = [∫dν 4πJ σ(hν)] / [∫dν 4πJ] """
+function Compute_σ_E( J::Function,    σ::Function, 
+                  E_min::Float64, E_max::Float64, N::Int = 4096 )
+
+    numerator = IntegrateEnergyBand(
+        E -> J(E) * σ(E),
+        E_min, E_max, N
+    )
+
+    denominator = IntegrateEnergyBand(
+        E -> J(E),
+        E_min, E_max, N
+    )
+
+    if denominator ≤ 0.0
+        return 0.0
+    end
+
+    # Put it all together:
+    σ_E = numerator / denominator
+
+    return σ_E
+end
+
+
+""" This function computes the photoheating from the excess energy 
+    between energy E_min and E_max. """
+function Compute_photoheating( J::Function,    σ::Function, 
+                           E_min::Float64, E_max::Float64,  E_th::Float64,
+                               N::Int = 4096 )
+
+    numerator = IntegrateEnergyBand(
+        E -> J(E) * σ(E) * max(E - E_th, 0.0) / E,
+        E_min, E_max, N
+    )
+
+    denominator = IntegrateEnergyBand(
+        E -> J(E) * σ(E) / E,
+        E_min, E_max, N
+    )
+
+    if denominator ≤ 0.0
+        return 0.0
+    end
+
+    # Put it all together:
+    heating = numerator / denominator
+
+    return heating 
+end
+
+
+""" This function computes the mean photon energy, in an interval between E_min 
+    and E_max:
+    
+    E_av = [∫dν 4πJ] / [∫dν 4πJ / hν] """
+function Compute_meanphotonenergy( J::Function, 
+                               E_min::Float64, E_max::Float64, 
+                                   N::Int = 4096 )
+
+    numerator = IntegrateEnergyBand(
+        E -> J(E),
+        E_min, E_max, N
+    )
+
+    denominator = IntegrateEnergyBand(
+        E -> J(E) / E,
+        E_min, E_max, N
+    )
+
+    if denominator ≤ 0.0
+        return 0.0
+    end
+
+    # Put it all together:
+    E_av = numerator / denominator            
+
+    return E_av 
+end
+
+
+""" Black-body spectral shape as a function of photon energy E (erg).
+
+    This is proportional to B_ν(T), written as a function of E = hν.
+    Constants cancel in all weighted averages below. """
+@inline function BlackBodyShape_E( E::Float64, T::Float64 )
+
+    x = E / (kB * T)
+
+    if x > 700.0
+        return 0.0
+    end
+
+    return (E^3) / expm1(x)
+end
+
+
+""" This function computes the H I, He I, and He II photoionization 
+    cross-sections (number & energy-weighted), the photoheating, and 
+    mean photon energies, assuming a black-body spectrum 
+    of temperature Teff (K). """
+function ComputeHydrogenHelium_σ_and_heating_BB( Teff::Float64, 
+                                                E_min::Float64, 
+                                                E_max::Float64, N::Int = 4096 )
+
+    # Ionization thresholds:
+    Eth_HI   = 13.6 * eV
+    Eth_HeI  = 24.6 * eV
+    Eth_HeII = 54.4 * eV
+
+    # Black-body spectral shape:
+    J(E)     = BlackBodyShape_E( E, Teff )
+
+    # Photon number-weighted cross-sections:
+    σHI_N    = Compute_σ_N( J, σHI,   E_min, E_max, N )
+    σHeI_N   = Compute_σ_N( J, σHeI,  E_min, E_max, N )
+    σHeII_N  = Compute_σ_N( J, σHeII, E_min, E_max, N )
+
+    # Energy-weighted cross-sections:
+    σHI_E    = Compute_σ_E( J, σHI,   E_min, E_max, N  )
+    σHeI_E   = Compute_σ_E( J, σHeI,  E_min, E_max, N  )
+    σHeII_E  = Compute_σ_E( J, σHeII, E_min, E_max, N  )
+
+    # Mean excess heating energy per photoionization:
+    hHI      = Compute_photoheating( J, σHI,   E_min, E_max, Eth_HI,   N )
+    hHeI     = Compute_photoheating( J, σHeI,  E_min, E_max, Eth_HeI,  N )
+    hHeII    = Compute_photoheating( J, σHeII, E_min, E_max, Eth_HeII, N )
+
+    # Average photon energies: 
+    E_av     = Compute_meanphotonenergy( J, E_min, E_max, N )
+
+    return σHI_N, σHeI_N, σHeII_N, 
+           σHI_E, σHeI_E, σHeII_E, 
+           hHI,   hHeI,   hHeII,
+           E_av
+end
+
+
+function GetBBStellarAverages( Teff::Float64 )
+
+    # Get averages for the H/He ionizing bands:
+    σHI_EUV1_BB,   σHeI_EUV1_BB,   σHeII_EUV1_BB, 
+    σHI_EUV1_BB_E, σHeI_EUV1_BB_E, σHeII_EUV1_BB_E, 
+    hHI_EUV1_BB,   hHeI_EUV1_BB,   hHeII_EUV1_BB,
+    E_EUV1_BB = ComputeHydrogenHelium_σ_and_heating_BB( Teff, 13.6 * eV, 24.6 * eV )
+
+    σHI_EUV2_BB,   σHeI_EUV2_BB,   σHeII_EUV2_BB, 
+    σHI_EUV2_BB_E, σHeI_EUV2_BB_E, σHeII_EUV2_BB_E, 
+    hHI_EUV2_BB,   hHeI_EUV2_BB,   hHeII_EUV2_BB,
+    E_EUV2_BB = ComputeHydrogenHelium_σ_and_heating_BB( Teff, 24.6 * eV, 54.4 * eV )
+
+    σHI_EUV3_BB,   σHeI_EUV3_BB,   σHeII_EUV3_BB, 
+    σHI_EUV3_BB_E, σHeI_EUV3_BB_E, σHeII_EUV3_BB_E, 
+    hHI_EUV3_BB,   hHeI_EUV3_BB,   hHeII_EUV3_BB,
+    E_EUV3_BB = ComputeHydrogenHelium_σ_and_heating_BB( Teff, 54.4 * eV, 100.0 * eV )
+
+    # Also get photon energies in other bands (opt, FUV, LW):
+    _,   _,   _, 
+    _,   _,   _, 
+    _,   _,   _,
+    E_opt_BB = ComputeHydrogenHelium_σ_and_heating_BB( Teff, 1.0 * eV, 5.8 * eV )
+
+    _,   _,   _, 
+    _,   _,   _, 
+    _,   _,   _,
+    E_FUV_BB = ComputeHydrogenHelium_σ_and_heating_BB( Teff, 5.8 * eV, 11.2 * eV )
+
+    _,   _,   _, 
+    _,   _,   _, 
+    _,   _,   _,
+    E_LW_BB = ComputeHydrogenHelium_σ_and_heating_BB( Teff, 11.2 * eV, 13.6 * eV )
+
+    # Save in struct:
+    return StellarBandAverages( E_opt_BB, E_FUV_BB, E_LW_BB, E_EUV1_BB, E_EUV2_BB, E_EUV3_BB,
+                                1 / E_opt_BB, 1 / E_FUV_BB, 1  / E_LW_BB, 1 / E_EUV1_BB, 1 / E_EUV2_BB, 1 / E_EUV3_BB,
+                                σHI_EUV1_BB, σHI_EUV2_BB, σHI_EUV3_BB, σHeI_EUV2_BB, σHeI_EUV3_BB, σHeII_EUV3_BB, 
+                                σHI_EUV1_BB_E, σHI_EUV2_BB_E, σHI_EUV3_BB_E, σHeI_EUV2_BB_E, σHeI_EUV3_BB_E, σHeII_EUV3_BB_E,
+                                hHI_EUV1_BB, hHI_EUV2_BB, hHI_EUV3_BB, hHeI_EUV2_BB, hHeI_EUV3_BB, hHeII_EUV3_BB 
+                                 )
 end

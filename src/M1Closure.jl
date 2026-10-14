@@ -7,11 +7,14 @@
 """
 
 using .ConstantsAndFunctions  # For constants like OneThird = 1/3
+using .ConstantsAndFunctions.FastInterpolations: CreateM1ThirdMomentLUTs, ϕ1ϕ2Fast # For the calculation of L:∇u
 using Base.Threads            # For CPU acceleration
 
 # Export functions:
 export Compute_D_Edd, Compute_D_Edd_from_f_n,
-       Update_D_Edd!, Update_D_Edd_Serial!, Update_D_Edd_Threaded!
+       Update_D_Edd!, Update_D_Edd_Serial!, Update_D_Edd_Threaded!,
+       Compute_Lijk
+
 
 # Export constants:
 export fmin, fmax, Jeps, Heps
@@ -26,6 +29,12 @@ const DEBUG_M1Closure = false
     f2 = f * f
     χ  = ( 3  +  4 * f2 ) / ( 5  +  2 * sqrt( 4  -  3 * f2 ) )
 
+    #if f < OneThird
+    #  χ = OneThird
+    #else  
+    #  χ = 0.5  -  f  +  1.5 * f*f
+    #end
+      
     return χ
 end
 
@@ -69,9 +78,10 @@ const Heps_squared::Float64 = Heps * Heps
         nZ       = H_Z * inv_Hmag  # Z-component of the flux unit vector n
 
         # Get the components of D:
-        D_rr     = a  +  b * nr * nr 
+        b_nr     = b * nr            # Used twice below 
+        D_rr     = a  +  b_nr * nr 
         D_ZZ     = a  +  b * nZ * nZ 
-        D_rZ     = b * nr * nZ  
+        D_rZ     = b_nr * nZ  
 
         return D_rr, D_ZZ, D_rZ
     end
@@ -98,9 +108,10 @@ end
         b = (3 * χ  -  1) * 0.5
 
         # Get the components of D:
-        D_rr = a  +  b * nr * nr
+        b_nr = b * nr            # Used twice below 
+        D_rr = a  +  b_nr * nr
         D_ZZ = a  +  b * nZ * nZ
-        D_rZ = b * nr * nZ
+        D_rZ = b_nr * nZ
 
         return D_rr, D_ZZ, D_rZ
     else
@@ -142,29 +153,118 @@ end
 end
 
 
-""" Updates the relevant Eddington factors D = K / J, for a single 
+""" Updates the relevant Eddington factors D = K / J, for a all 
     frequency bin. This version does use threading over spatial cells. """
-@fastmath function Update_D_Edd_Threaded!( D_rr::AbstractArray{TypeOfD, 2},  # rr-component of D (N_r x N_Z elements)
-                                           D_ZZ::AbstractArray{TypeOfD, 2},  # ZZ-component of D (N_r x N_Z elements)
-                                           D_rZ::AbstractArray{TypeOfD, 2},  # rZ-component of D (N_r x N_Z elements)
-                                            H_r::AbstractArray{Float64, 2},  # H in r-direction  (N_r x N_Z elements)
-                                            H_Z::AbstractArray{Float64, 2},  # H in Z-direction  (N_r x N_Z elements) 
-                                              J::AbstractArray{Float64, 2}   # J                 (N_r x N_Z elements)
+@fastmath function Update_D_Edd_Threaded!( D_rr::AbstractArray{TypeOfD, 3},  # rr-component of D (N_ν x N_r x N_Z elements)
+                                           D_ZZ::AbstractArray{TypeOfD, 3},  # ZZ-component of D (N_ν x N_r x N_Z elements)
+                                           D_rZ::AbstractArray{TypeOfD, 3},  # rZ-component of D (N_ν x N_r x N_Z elements)
+                                            H_r::AbstractArray{Float64, 3},  # H in r-direction  (N_ν x N_r x N_Z elements)
+                                            H_Z::AbstractArray{Float64, 3},  # H in Z-direction  (N_ν x N_r x N_Z elements) 
+                                              J::AbstractArray{Float64, 3}   # J                 (N_ν x N_r x N_Z elements)
                                           )  where {TypeOfD<:AbstractFloat}
 
-    N_r, N_Z    = size( J )  # Grid size
-    dN_r        = 1:N_r
-    dN_Z        = 1:N_Z
+    N_ν, N_r, N_Z  = size( J )  # Grid size
+    dN_ν           = 1:N_ν
+    dN_r           = 1:N_r
+    dN_Z           = 1:N_Z
 
     @threads for j in dN_Z 
-        @inbounds @simd for i in dN_r       
-            Drr, DZZ, DrZ = Compute_D_Edd( H_r[i,j], H_Z[i,j], J[i,j] )
-            D_rr[i,j]     = TypeOfD( Drr )
-            D_ZZ[i,j]     = TypeOfD( DZZ )
-            D_rZ[i,j]     = TypeOfD( DrZ )
+        @inbounds for i in dN_r  
+            @simd for k in dN_ν     
+                Drr, DZZ, DrZ   = Compute_D_Edd( H_r[k,i,j], H_Z[k,i,j], J[k,i,j] )
+                D_rr[k,i,j]     = TypeOfD( Drr )
+                D_ZZ[k,i,j]     = TypeOfD( DZZ )
+                D_rZ[k,i,j]     = TypeOfD( DrZ )
+            end # End of k-loop 
         end # End of i-loop
     end # End of j-loop 
 
+end
+
+
+# Create look-up tables (LUTs) for expensive functions that 
+# are needed for the calculation of the third moment, L:
+const L_LUTs = CreateM1ThirdMomentLUTs()
+
+""" This function computes the needed components of the third moment L_ijk (i,j,k are 
+    spatial indices here). The components of L are evaluated following Vaytet+ (2011): 
+    
+    Lᵢⱼₖ = ϕ₁(Hᵢδⱼₖ + Hⱼδᵢₖ + Hₖδᵢⱼ)  +  ϕ₂ HᵢHⱼHₖ/J² 
+
+    where ϕ₁ and ϕ₂ are functions of the reduced flux, derived by Vaytet+ for the M1 closure.
+
+    ----------- OLD:
+    This function computes the needed components of L : ∇u = L_ijk (∇_j u_k).
+    For the i = r and Z components, this yields (assuming u_ϕ = 0):
+    
+    L_rjk (∇_j u_k) = L_rrr(∂u_r/∂r) + L_rrZ(∂u_Z/∂r) + L_rZr(∂u_r/∂Z) + L_rZZ(∂u_Z/∂Z) + L_rϕϕ(u_r/r) 
+
+    L_Zjk (∇_j u_k) = L_Zrr(∂u_r/∂r) + L_ZrZ(∂u_Z/∂r) + L_ZZr(∂u_r/∂Z) + L_ZZZ(∂u_Z/∂Z) + L_Zϕϕ(u_r/r) 
+    
+    The components of L are evaluated following Vaytet+ (2011): 
+    
+    Lᵢⱼₖ = ϕ₁(Hᵢδⱼₖ + Hⱼδᵢₖ + Hₖδᵢⱼ)  +  ϕ₂ HᵢHⱼHₖ/J² 
+    
+    Function returns:
+    
+    (L : ∇u)_r = L_rjk (∇_j u_k) 
+    (L : ∇u)_Z = L_Zjk (∇_j u_k) """
+@inline @fastmath function Compute_Lijk( J::Float64,
+                                       H_r::Float64,
+                                       H_Z::Float64
+                                        )
+
+    # Squared magnitude of H:
+    Hmag_squared = H_r * H_r  +  H_Z * H_Z 
+
+    # If there is essentially no radiation field, set the contraction to zero:
+    if J ≤ Jeps || Hmag_squared ≤ Heps_squared
+        return 0.0, 0.0, 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0, 0.0, 0.0
+    end
+    
+    # Reduced flux:
+    Hmag = sqrt( Hmag_squared )
+    fraw = Hmag / J 
+    f    = clamp( fraw, 0.0, fmax )
+
+    # If fraw is slightly too large, rescale H consistently with the closure:
+    if f < fraw
+        Hscale = f / fraw
+        H_r    = Hscale * H_r
+        H_Z    = Hscale * H_Z
+    end
+
+    # Get the functions ϕ1 and ϕ2 of Vaytet+ (2011), that are 
+    # needed to evaluate L:
+    ϕ1, ϕ2 = ϕ1ϕ2Fast( f, L_LUTs )
+
+    # Define some common factors below:
+    inv_Jsquared           = 1.0 / ( J * J )
+    ϕ2_Hr_Hr_inv_Jsquared  = ϕ2 * H_r * H_r * inv_Jsquared
+    ϕ2_HZ_HZ_inv_Jsquared  = ϕ2 * H_Z * H_Z * inv_Jsquared
+
+    ϕ1_Hr                  = ϕ1 * H_r 
+    ϕ1_HZ                  = ϕ1 * H_Z
+
+    # Needed L components:
+    L_rrr  = 3 * ϕ1_Hr  +  ϕ2_Hr_Hr_inv_Jsquared * H_r 
+
+    L_rrZ  =     ϕ1_HZ  +  ϕ2_Hr_Hr_inv_Jsquared * H_Z 
+    L_rZr  = L_rrZ  # By symmetry 
+    L_Zrr  = L_rrZ  # By symmetry 
+
+    L_rZZ  =     ϕ1_Hr  +  ϕ2_HZ_HZ_inv_Jsquared * H_r 
+    L_ZrZ  = L_rZZ  # By symmetry 
+    L_ZZr  = L_rZZ  # By symmetry 
+
+    L_ZZZ  = 3 * ϕ1_HZ  +  ϕ2_HZ_HZ_inv_Jsquared * H_Z 
+
+    L_rϕϕ  = ϕ1_Hr
+    L_Zϕϕ  = ϕ1_HZ
+
+    return L_rrr, L_rrZ, L_rZr, L_rZZ, L_rϕϕ,
+           L_Zrr, L_ZrZ, L_ZZr, L_ZZZ, L_Zϕϕ
 end
 
 
@@ -176,7 +276,6 @@ end
 
 # The code below is old, from early testing of LYDION with the 
 # HLL flux, for which the eigenvalues were needed. 
-
 
 """ HLL eigenvalues (in units c̃), for a given f = |H| / J
     and μ = cos θ. See Skinner & Ostriker (2013). """
@@ -207,73 +306,30 @@ end
 
 
 """ Computes the eigenvalues (in units c̃) in the r-direction
-    for the HLL wave speeds, both left and right.
+    for the HLL wave speeds, using already reconstructed f and n. """
+@inline @fastmath function M1WaveSpeeds_r( f_L::Float64,
+                                           f_R::Float64,
+                                          nr_L::Float64,
+                                          nr_R::Float64 )
 
-    See Skinner & Ostriker (2013). """
-@inline @fastmath function M1WaveSpeeds_r( J_L::Float64, 
-                                           J_R::Float64, 
-                                         H_r_L::Float64, 
-                                         H_r_R::Float64, 
-                                         H_Z_L::Float64,
-                                         H_Z_R::Float64
-                                          )
-
-
-    # Compute magnitudes of fluxes on the left & right:
-    Hmag_L = sqrt( H_r_L * H_r_L  +  H_Z_L * H_Z_L )
-    Hmag_R = sqrt( H_r_R * H_r_R  +  H_Z_R * H_Z_R )
-
-    # Values of μ:
-    μ_L = ( Hmag_L > Heps ) ? ( H_r_L / Hmag_L ) : 0.0
-    μ_R = ( Hmag_R > Heps ) ? ( H_r_R / Hmag_R ) : 0.0
-
-    # Compute f = |H| / J, but fall back to f = 0 (diffusion limit)
-    # if J ≈ 0 or |H| ≈ 0 :
-    f_L = ( J_L > Jeps && Hmag_L > Heps ) ? ( Hmag_L / J_L ) : 0.0
-    f_R = ( J_R > Jeps && Hmag_R > Heps ) ? ( Hmag_R / J_R ) : 0.0
-
-    # COMPUTE λ1, λ3 FOR LEFT SIDE:
-    λ1_L, λ3_L = HLL_Eigenvalues( f_L, μ_L )
-
-    # COMPUTE λ1, λ3 FOR RIGHT SIDE:
-    λ1_R, λ3_R = HLL_Eigenvalues( f_R, μ_R )
+    # In the r-direction, μ = n_r:
+    λ1_L, λ3_L = HLL_Eigenvalues( f_L, nr_L )  # Left side 
+    λ1_R, λ3_R = HLL_Eigenvalues( f_R, nr_R )  # Right side 
 
     return λ1_L, λ1_R, λ3_L, λ3_R
 end
 
 
 """ Computes the eigenvalues (in units c̃) in the Z-direction
-    for the HLL wave speeds, both left and right.
+    for the HLL wave speeds, using already reconstructed f and n. """
+@inline @fastmath function M1WaveSpeeds_Z( f_L::Float64,
+                                           f_R::Float64,
+                                          nZ_L::Float64,
+                                          nZ_R::Float64 )
 
-    See Skinner & Ostriker (2013). """
-@inline @fastmath function M1WaveSpeeds_Z( J_L::Float64, 
-                                           J_R::Float64, 
-                                         H_r_L::Float64, 
-                                         H_r_R::Float64, 
-                                         H_Z_L::Float64,
-                                         H_Z_R::Float64
-                                          )
-
-
-    # Compute magnitudes of fluxes on the left & right:
-    Hmag_L = sqrt( H_r_L * H_r_L  +  H_Z_L * H_Z_L )
-    Hmag_R = sqrt( H_r_R * H_r_R  +  H_Z_R * H_Z_R )
-
-    # Values of μ:
-    μ_L = ( Hmag_L > Heps ) ? ( H_Z_L / Hmag_L ) : 0.0
-    μ_R = ( Hmag_R > Heps ) ? ( H_Z_R / Hmag_R ) : 0.0
-
-    # Compute f = |H| / J, but fall back to f = 0 (diffusion limit)
-    # if J ≈ 0 or |H| ≈ 0 :
-    f_L = ( J_L > Jeps && Hmag_L > Heps ) ? ( Hmag_L / J_L ) : 0.0
-    f_R = ( J_R > Jeps && Hmag_R > Heps ) ? ( Hmag_R / J_R ) : 0.0
-
-    # COMPUTE λ1, λ3 FOR LEFT SIDE:
-    λ1_L, λ3_L = HLL_Eigenvalues( f_L, μ_L )
-
-    # COMPUTE λ1, λ3 FOR RIGHT SIDE:
-    λ1_R, λ3_R = HLL_Eigenvalues( f_R, μ_R )
+    # In the Z-direction, μ = n_Z:
+    λ1_L, λ3_L = HLL_Eigenvalues( f_L, nZ_L )  # Left side 
+    λ1_R, λ3_R = HLL_Eigenvalues( f_R, nZ_R )  # Right side 
 
     return λ1_L, λ1_R, λ3_L, λ3_R
 end
-

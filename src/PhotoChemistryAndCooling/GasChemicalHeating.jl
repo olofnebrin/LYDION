@@ -36,8 +36,16 @@ function HeatingRate_H2chemical( T::Float64,
                                  z::Float64 = 0.0 )
 
     inv_nH = @fastmath 1 / nH 
-    xHI    = @fastmath nHI * inv_nH
     xH2    = @fastmath nH2 * inv_nH
+
+    if T ≥ 3e4 || xH2 < 1e-9
+        # Ignore H₂ chemical heating/cooling in hot gas, of when 
+        # H₂ is negligible, and exit early to avoid all the algebra below. 
+        return 0.0
+    end
+
+    # Also define xHI needed below:
+    xHI    = @fastmath nHI * inv_nH
 
     # Only consider heating from formation on dust if the dust densities 
     # are above ~ the dust floor:

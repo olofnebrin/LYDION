@@ -8,8 +8,8 @@ using HDF5
 using HDF5: create_dataset, h5open, resize!, attrs, datatype
 
 
-export CreateHDF5File, SaveGridHDF5File, SaveLyαFreqGridHDF5File, SaveSphericalBinsHDF5File,
-       SaveAnalyticalSolutionHDF5File, SaveTimeStepHDF5
+export CreateHDF5File, SaveGridHDF5File, SaveLyαFreqGridHDF5File, SaveStaticCloudFieldsHDF5File,
+       SaveSphericalBinsHDF5File, SaveAnalyticalSolutionHDF5File, SaveTimeStepHDF5
 
 
 const N_x_analytical::Int = 300 
@@ -54,6 +54,14 @@ function CreateHDF5File( FileName::String,
         # Cell volumes ΔV: one value per cell.
         create_dataset(file, "CellVolumes", Float64,
                        (N_r, N_Z) )
+
+        # H I number density (cm⁻³):
+        create_dataset(file, "nHI", Float64,
+                       (N_r, N_Z))
+
+        # Continuum absorption opacity (cm⁻¹):
+        create_dataset(file, "alpha_c", Float64, 
+                       (N_r, N_Z))
 
         # Create arrays for spectra:
         create_dataset(file, "x_Analytical", Float64,
@@ -225,6 +233,21 @@ function SaveGridHDF5File( FileName::String,
 end
 
 
+""" Save static cloud opacity fields, useful for e.g. MCRT comparisons. """
+function SaveStaticCloudFieldsHDF5File( FileName::String,
+                                             nHI::AbstractArray{Float64,2},
+                                              αc::AbstractArray{Float64,2}
+                                       )
+
+    h5open(FileName, "r+") do file
+        file["nHI"][:,:]       = nHI
+        file["alpha_c"][:,:]   = αc
+    end
+
+    return nothing
+end
+
+
 """ Save the radial bins for the spherically averaged profile(s). """
 function SaveSphericalBinsHDF5File( FileName::String,
                                   R_binedges::AbstractArray{Float64,1},
@@ -379,7 +402,7 @@ function SaveTimeStepHDF5( FileName::String,
             i_Z = dset_zidx[edge]
 
             # Access & save the Lyα spectrum J(νC) at the edge indices: 
-            J                          = @view Lya.J_Lyα[i_r, i_Z, :]
+            J                          = @view Lya.J_Lyα[:, i_r, i_Z]
             dset_J_edge[edge, :, step] = J
 
             # Do the same for the normalized spectra (TODO):

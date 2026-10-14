@@ -5,6 +5,22 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as pe
 
+from pathlib import Path
+import sys
+
+def add_cmastro_to_path():
+    here = Path(__file__).resolve()
+    # Walk upwards until we find the repo-relative path src/cmastro/src
+    for parent in [here.parent, *here.parents]:
+        candidate = parent / "src" / "cmastro" / "src"
+        if (candidate / "cmastro" / "__init__.py").exists():
+            sys.path.insert(0, str(candidate))
+            return str(candidate)
+    raise RuntimeError("Could not find src/cmastro/src containing cmastro/__init__.py")
+
+cmastro_path = add_cmastro_to_path()
+import cmastro
+
 # ---------------- User inputs ----------------
 script_dir = os.path.dirname(os.path.abspath(__file__))
 filename   = os.path.join(script_dir, "SedovTest_E1.00e+00_rho1_gamma1.67_t0.4_128x128.h5")
@@ -126,6 +142,11 @@ fig, axes = plt.subplots(
     figsize=(12, 10)
 )
 
+def tick_label(val):
+    if np.isclose(val, 0.0):
+        return "0"
+    return f"{val:.1f}"
+
 # Make panels close together (tweak wspace/hspace if needed)
 plt.subplots_adjust(
     left   = 0.0,    # Space for y-labels
@@ -139,9 +160,9 @@ plt.subplots_adjust(
 # Common limits and ticks
 r_min, r_max = r[0], r[-1]
 Z_min, Z_max = Z[0], Z[-1]
-common_min = min(r_min, Z_min)
-common_max = max(r_max, Z_max)
-common_ticks = np.linspace(common_min, common_max, 7)
+#common_min = min(r_min, Z_min)
+#common_max = max(r_max, Z_max)
+common_ticks = np.arange(0.0, 1.51, 0.5)
 
 for ax in axes.flat:
     ax.set_xlim(r_min, r_max)
@@ -149,14 +170,14 @@ for ax in axes.flat:
     ax.set_aspect('equal', adjustable='box')
     ax.set_xticks(common_ticks)
     ax.set_yticks(common_ticks)
-    ax.set_xticklabels([f"{val:.1f}" for val in common_ticks])
-    ax.set_yticklabels([f"{val:.1f}" for val in common_ticks])
+    ax.set_xticklabels([tick_label(val) for val in common_ticks])
+    ax.set_yticklabels([tick_label(val) for val in common_ticks])
     ax.tick_params(
         which = 'both',
-        labelsize = 22,
+        labelsize = 30,
         width = 1.7,
         length = 10
-    )
+        )
 
 # Density range
 #vmin_rho = np.min(rho_hist)
@@ -165,7 +186,7 @@ vmin_rho = 0.0
 vmax_rho = 4.0
 
 time_style = dict(
-    color="white", fontsize = 25,
+    color="white", fontsize = 30,
     path_effects=[pe.withStroke(linewidth = 3, foreground='black')]
 )
 
@@ -178,7 +199,7 @@ for ax, idx in zip(axes.flat, indices):
     im = ax.pcolormesh(
         R, ZZ, rho_hist[idx].T,
         vmin = vmin_rho, vmax = vmax_rho,
-        shading = "auto", cmap = "viridis"
+        shading = "auto", cmap = "cma:laguna",
     )
     im.set_rasterized(True)
     images.append(im)
@@ -205,13 +226,13 @@ for ax, idx in zip(axes.flat, indices):
 
 # Add resolution label:
 axes[0, 0].text( 0.1, 0.2, f"Resolution:\n{Nr} × {Nz}", 
-                 fontsize = 30, color = 'white')
+                 fontsize = 35, color = 'white')
 
 # Axis labels
-axes[0, 0].set_ylabel("Z", fontsize = 25)
-axes[1, 0].set_ylabel("Z", fontsize = 25)
-axes[1, 0].set_xlabel("r", fontsize = 25)
-axes[1, 1].set_xlabel("r", fontsize = 25)
+axes[0, 0].set_ylabel("Z", fontsize = 35, labelpad = 10)
+axes[1, 0].set_ylabel("Z", fontsize = 35, labelpad = 10)
+axes[1, 0].set_xlabel("R", fontsize = 35, labelpad = 10)
+axes[1, 1].set_xlabel("R", fontsize = 35, labelpad = 10)
 
 axes[0, 0].tick_params(labelbottom=False)
 axes[0, 1].tick_params(labelbottom=False)

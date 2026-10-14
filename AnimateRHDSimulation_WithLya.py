@@ -17,7 +17,8 @@ sys.path.insert(0, str(cmastro_src))
 import cmastro
 
 # ---------------- user inputs ----------------
-filename  = "RHDSim_StarCluster_Lya_128x128_2026-04-16.h5" 
+#filename  = "RHDSim_StarCluster_Lya_128x128_2026-04-16.h5" 
+filename  =  "RHDSim_Lya_128x128_2026-04-26.h5"
 frameskip = 1                  # use >1 to skip frames
 save_mp4  = True               # True to save mp4 instead of interactive show
 outname   = "Animation_LyaRHD_withspectra.mp4"

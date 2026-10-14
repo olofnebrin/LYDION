@@ -20,7 +20,7 @@ import cmastro
 
 # ---------------- user inputs ----------------
 #filename = "IdealizedRHDSim_Turbulence_false_Lya_64x64_2026-04-07.h5"     
-filename = "RHDSim_StarCluster_Lya_128x128_2026-04-16.h5" 
+filename = "RHDSim_NoLya_256x256_2026-06-25.h5"
 frameskip = 1                 
 save_mp4 = True               
 outname = "density_T.mp4"
@@ -59,8 +59,8 @@ with h5py.File(filename, "r") as f:
 
 
 xHI_hist      = 1.0 - 2.0 * xH2_hist - xHII_hist
-rhod_hist     = rhod_Sil_hist + rhod_C_hist + rhod_PAH_hist 
-CrossSec_hist = CrossSec_hist * 1e21   # convert to 10^-21 cm^2 per H nucleus
+rhod_hist     = rhod_Sil_hist + rhod_C_hist + rhod_PAH_hist
+CrossSec_hist = CrossSec_hist / 1e-21   # convert to 10^-24 cm^2 per H nucleus
 
 # shapes (needed by ensure_NtNrNz)
 Nt_raw, a1_rho, a2_rho = rho_hist.shape

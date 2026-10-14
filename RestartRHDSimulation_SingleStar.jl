@@ -6,8 +6,7 @@ using .RHDSolver_SingleStar                         # The full RHD solver module
 
 
 # Name of HDF5 file containing simulation you want to restart:
-FileName = "RHDSim_Lya_128x128_2026-04-10_MostlyH2.h5"
-#FileName = "IdealizedRHDSim_Turbulence_false_Lya_64x64_2026-04-08.h5"
+FileName = "RHDSim_NoLya_256x512_2026-07-04.h5"
 
 # Restart the simulation:
 RestartRHDsimulation_SingleStar( FileName )

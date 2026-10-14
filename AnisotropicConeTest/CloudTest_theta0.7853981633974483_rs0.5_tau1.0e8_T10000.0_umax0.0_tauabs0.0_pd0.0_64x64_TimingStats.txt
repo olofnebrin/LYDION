@@ -1,0 +1,17 @@
+# LYDION timing statistics
+# CPU time = user time + system time from getrusage(RUSAGE_SELF).
+# This is analogous to user+sys from /usr/bin/time -l.
+
+AverageBusyCores = 5.392695110996761
+CPUCoreHours = 1.550744144166667
+CPUSeconds = 5582.678919000001
+EndTime = 2026-05-25T01:31:57.653
+JuliaVersion = 1.11.4
+NThreads = 8
+StartTime = 2026-05-25T01:14:42.423
+SystemHours = 0.020945888055555556
+SystemSeconds = 75.405197
+UserHours = 1.5297982561111114
+UserSeconds = 5507.273722000001
+WallHours = 0.2875638455814785
+WallSeconds = 1035.2298440933228

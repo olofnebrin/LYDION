@@ -1,0 +1,17 @@
+Aaron's description of the MCRT files on Slack:
+
+$ h5ls Lya-cloud-xcrit0.hdf5
+P_rad_r                  Dataset {131072} = radial component of the pressure tensor
+P_rad_rz                 Dataset {131072} = shear component of the pressure tensor
+P_rad_z                  Dataset {131072} = vertical component of the pressure tensor
+a_rad_r                  Dataset {131072} = radial component of acceleration (path-based)
+a_rad_r_scat             Dataset {131072} = radial component of acceleration (scattering-based, usually converges faster)
+a_rad_z                  Dataset {131072} = vertical component of acceleration (path-based)
+a_rad_z_scat             Dataset {131072} = vertical component of acceleration (scattering-based, usually converges faster)
+dust                     Group
+exit                     Group
+line                     Group
+sources                  Group
+u_rad_r                  Dataset {131072} = energy density of each cell
+u_rad_x                  Dataset {131072, 100} = spectral energy density of each cell (in Doppler units)... probably needs some conversion codeYou can use f['a_rad_r_scat'][:].reshape((n_r, n_z)) where n_z = 2 * n_r as I did not use reflective boundary conditions (just duplicated the domain). (edited) 
+[2:29 AM]Then the data will be what you are used to (it is C-ordering so no transpose is necessary).

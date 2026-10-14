@@ -39,7 +39,7 @@ using  Dates, Printf
 
 
 const N_dust::Int           = 3      # 3 dust bins (Sil, C, PAH) 
-const N_passivescalars::Int = 19     # Number of passive scalars (for chemistry etc)
+const N_passivescalars::Int = 26     # Number of passive scalars (for chemistry etc., default is 26 for the tracked species)
 const BENCHMARK_RHD::Bool   = false  # For benchmarking performance of the RHD update. Off by default.
 
 export SetupRHDsimulation_SingleStar, RestartRHDsimulation_SingleStar
@@ -73,6 +73,7 @@ function UpdateRHD!( Δt_Hydro::Float64,
                     ghostgrid::GhostPaddedGrid{Float64},
                      LyaState::Union{LyαArrays, Nothing},
                            RT::StellarRTArrays,
+                    Zstar_pos::Float64,
                       Gravity::Bool    = true,
                   RadPressure::Bool    = true,
                    IRfeedback::Bool    = true,
@@ -174,13 +175,9 @@ function UpdateRHD!( Δt_Hydro::Float64,
     end
 
     # Inject momentum and mass from stellar winds if turned on:
-
-    # Position of star along Z-axis (also needed below for radial force multipliers):
-    Zmid = 0.5 * ( Z[1] + Z[end] )
-    Zc   = ifelse( BC_Z_bot === :Reflect, 0.0, Zmid )
     if StellarWindFeedback
         # Inject momentum & mass:
-        InjectStellarWind!( Δt_Hydro, mstarZAMS, Zstar_Zsun, hydrostate, geometry, RT.ρ_star, Zc )
+        InjectStellarWind!( Δt_Hydro, mstarZAMS, Zstar_Zsun, hydrostate, geometry, RT.ρ_star, Zstar_pos )
     end
 
     @threads for j in dN_Z
@@ -211,7 +208,7 @@ function UpdateRHD!( Δt_Hydro::Float64,
 
     if BENCHMARK_RHD
         t_HydroDust  = (time_ns() - t0)
-        t0           = 0.0
+        t0           = time_ns()  # Reset timer for RT + subcycling 
     end
 
     ###############################################################
@@ -230,10 +227,14 @@ function UpdateRHD!( Δt_Hydro::Float64,
     Reset_Δρu!( RT.Δρu_stellar_r,   RT.Δρu_stellar_Z )
     Reset_Δρu!( RT.Δρu_IR_r,        RT.Δρu_IR_Z )
 
-    # Determine an updated reduced speed of light for the radiative transfer:
-    RT.c̃  = FindRSL( RT.c̃, LyaState, hydrostate, chemstate, duststate, geometry )
+    # Determine new stellar & IR reduced speed of light for the radiative 
+    # transfer:
+    RT.c̃  = FindRSL_StellarRT( RT.c̃, RT, hydrostate, duststate, geometry )
+
+    # Determine new Lyα reduced speed of light (if Lyα RHD is turned on):
     if !isnothing(LyaState)
-        LyaState.c̃_Lyα = RT.c̃
+        LyaState.c̃_Lyα = FindRSL_LyαRT( LyaState.c̃_Lyα, RT.c̃_min, LyaState, 
+                                        hydrostate, chemstate, duststate, geometry )
     end
 
     # ---------------------------------------------------------------------
@@ -307,11 +308,11 @@ function UpdateRHD!( Δt_Hydro::Float64,
     # Update direct/stellar & IR luminsoity & force diagnostics 
     # (just useful for comparing forces after simulation):
     if Gravity
-        Update_M_F_dir!( RT, geometry, gravstate, Zc )
-        Update_M_F_IR_L_IR!( RT, geometry, gravstate, Zc, BC_Z_bot )
+        Update_M_F_dir!( RT, geometry, gravstate, Zstar_pos )
+        Update_M_F_IR_L_IR!( RT, geometry, gravstate, Zstar_pos, BC_Z_bot )
     else
-        Update_M_F_dir!( RT, geometry, Zc )
-        Update_M_F_IR_L_IR!( RT, geometry, Zc, BC_Z_bot )
+        Update_M_F_dir!( RT, geometry, Zstar_pos )
+        Update_M_F_IR_L_IR!( RT, geometry, Zstar_pos, BC_Z_bot )
     end
 
     # Update Lyα forces f_Lyα, force multiplier M_F, luminosity L_Lyα, and Lyα escape fraction
@@ -324,14 +325,14 @@ function UpdateRHD!( Δt_Hydro::Float64,
             LyaState.L_Lyα = Update_f_Lyα_MF_L_Lyα!( LyaState.f_Lyα_r, LyaState.f_Lyα_Z, LyaState.Δρu_Lyα_r, LyaState.Δρu_Lyα_Z, 
                                                      LyaState.∫dν_js_Lyα, ΔV, rCoM, ZCoM, Δt_Hydro,
                                                      gravstate.f_gravity_r, gravstate.f_gravity_Z,
-                                                     Zc, # Z-position of star
+                                                     Zstar_pos, # Z-position of star
                                                      BC_Z_bot )
         else
             LyaState.M_F, LyaState.M_F_radial_net, 
             LyaState.M_F_radial_out, 
             LyaState.L_Lyα = Update_f_Lyα_MF_L_Lyα!( LyaState.f_Lyα_r, LyaState.f_Lyα_Z, LyaState.Δρu_Lyα_r, LyaState.Δρu_Lyα_Z, 
                                                      LyaState.∫dν_js_Lyα, ΔV, rCoM, ZCoM, Δt_Hydro,
-                                                     Zc, # Z-position of star 
+                                                     Zstar_pos, # Z-position of star 
                                                      BC_Z_bot )
         end
 
@@ -378,12 +379,12 @@ function UpdateRHD!( Δt_Hydro::Float64,
     # Update gas pressure force diagnostics, using the updated pressure
     # (just useful for comparing forces after simulation):
     if Gravity
-        UpdateIntegratedPressureForces!( hydrostate, geometry, gravstate, Zc )
+        UpdateIntegratedPressureForces!( hydrostate, geometry, gravstate, Zstar_pos )
 
         # Update gravity force diagnostics too:
-        UpdateGravityForceDiagnostics!( gravstate, geometry, Zc )
+        UpdateGravityForceDiagnostics!( gravstate, geometry, Zstar_pos )
     else
-        UpdateIntegratedPressureForces!( hydrostate, geometry, Zc )
+        UpdateIntegratedPressureForces!( hydrostate, geometry, Zstar_pos )
     end
 
     # Update the Lyα dust absorption cross-section per H nucleus for all cells (useful diagnostic):
@@ -421,9 +422,15 @@ function SetupRHDsimulation_SingleStar( mstarZAMS::Float64,  # Stellar mass (M�
                                   xHD₀::Float64,  # HD fraction inside the cloud 
                                   xCI₀::Float64,
                                  xCII₀::Float64,
+                                xCIII₀::Float64,
                                   xCO₀::Float64,
                                   xOI₀::Float64,
                                  xOII₀::Float64,
+                                xOIII₀::Float64,
+                                 xOIV₀::Float64,
+                                 xSII₀::Float64,
+                                xSIII₀::Float64,
+                                 xSIV₀::Float64,
                               xHII_ext::Float64,  # H II fraction outside the cloud 
                                xH2_ext::Float64,  # H₂ fraction outside the cloud 
                              xHeII_ext::Float64,  # He II fraction outside the cloud 
@@ -432,13 +439,20 @@ function SetupRHDsimulation_SingleStar( mstarZAMS::Float64,  # Stellar mass (M�
                                xHD_ext::Float64,  # HD fraction outside the cloud 
                                xCI_ext::Float64,
                               xCII_ext::Float64,
+                             xCIII_ext::Float64,
                                xCO_ext::Float64,
                                xOI_ext::Float64,
                               xOII_ext::Float64,
+                             xOIII_ext::Float64,
+                              xOIV_ext::Float64,
+                              xSII_ext::Float64,
+                             xSIII_ext::Float64,
+                              xSIV_ext::Float64,
                             Zgas_Zsun₀::Float64,  # Initial gas metallicity in units of Solar metallicity 
                                      z::Float64,
-                                 Hydro::Bool    = true,     # Hydrodynamics (on/off)
-                                   Lyα::Bool    = true,     # Lyα RT (on/off)
+                                 c̃_min::Float64 = 100 * kms, # Minimum RSL 
+                                 Hydro::Bool    = true,      # Hydrodynamics (on/off)
+                                   Lyα::Bool    = true,      # Lyα RT (on/off)
                                 Recoil::Bool    = true,
                         LyαDestruction::Bool    = true,
                                Gravity::Bool    = true,
@@ -461,10 +475,16 @@ function SetupRHDsimulation_SingleStar( mstarZAMS::Float64,  # Stellar mass (M�
                                 Nsaved::Int     = 300,
                             print_info::Bool    = true,
                               FileName::String  = "RHDSim.h5",
-                       FileDescription::String  = "RHD simulation test."
+                       FileDescription::String  = "RHD simulation of a single star.",
+                      δZstar_pos_input::Union{Nothing,Float64} = nothing,   # Stellar position along Z-axis relative to cloud center
+                   FluxMethodStellarRT::String = "HLL",  # Stellar/IR M1 flux method: "HLL" or "GLF"
+                       FluxMethodLyαRT::String = "GLF"   # Lyα M1 flux method: "HLL" or "GLF"
                              )
 
     PrintLYDIONLogo()
+
+    @assert FluxMethodStellarRT == "HLL" || FluxMethodStellarRT == "GLF" "FluxMethodStellarRT must be \"HLL\" or \"GLF\"."
+    @assert FluxMethodLyαRT     == "HLL" || FluxMethodLyαRT     == "GLF" "FluxMethodLyαRT must be \"HLL\" or \"GLF\"."
 
     if POWER_LAW_ENVELOPE
         @assert p_ENVELOPE ≥ 0.0 "Density should drop off at large radii, i.e. p_ENVELOPE ≥ 0.0. "
@@ -495,13 +515,31 @@ function SetupRHDsimulation_SingleStar( mstarZAMS::Float64,  # Stellar mass (M�
     # Center star & cloud appropriately:
     if BC_Z_left == :Reflect
         # In this case there is symmetry around Z = 0, so we place the star & cloud at Z = 0:
-        Zcl_pos   = 0.0
-        Zstar_pos = 0.0
+        Zcl_pos           = 0.0
+        Zstar_pos_default = 0.0      # Default stellar position if not specifed
     else
         # Otherwise, we center the star & cloud:
-        Zcl_pos   = 0.5 * ( Z[1] + Z[end] )
-        Zstar_pos = Zcl_pos
+        Zcl_pos           = 0.5 * ( Z[1] + Z[end] )
+        Zstar_pos_default = Zcl_pos  # Default stellar position if not specifed
     end
+
+    if isnothing(δZstar_pos_input)
+        # If the stellar position has not been specified by the user, set to 
+        # the default value:
+        Zstar_pos = Zstar_pos_default 
+    else
+        # Otherwise use the specified Z_star_pos, as long as 
+        # reflective BCs at the midplane are not used:
+        if BC_Z_left == :Reflect
+            Zstar_pos = Zstar_pos_default
+            @warn "Since there is reflective BCs at the midplane, the user-specified position of the star is ignored, and 
+                   the star is placed at the cloud center."
+        else 
+            Zstar_pos = Zcl_pos  +  δZstar_pos_input
+        end
+    end
+
+    @assert Z[1] ≤ Zstar_pos ≤ Z[end] "Stellar position must be within the simulated region."
 
 
     if print_info
@@ -529,6 +567,7 @@ function SetupRHDsimulation_SingleStar( mstarZAMS::Float64,  # Stellar mass (M�
                   Stellar wind feedback:       $(StellarWindFeedback)
                   Dust growth & destruction:   $(DustGrowthDestruction)
                   On-the-spot approximation:   $(OTS)
+                  Minimum RSL, c̃_min:          $(c̃_min / kms) km s⁻¹
 
                   """)
     end
@@ -614,9 +653,17 @@ function SetupRHDsimulation_SingleStar( mstarZAMS::Float64,  # Stellar mass (M�
 
                     chemstate.xCI[i,j]    = xCI₀
                     chemstate.xCII[i,j]   = xCII₀
+                    chemstate.xCIII[i,j]  = xCIII₀
                     chemstate.xCO[i,j]    = xCO₀
+
                     chemstate.xOI[i,j]    = xOI₀
                     chemstate.xOII[i,j]   = xOII₀
+                    chemstate.xOIII[i,j]  = xOIII₀
+                    chemstate.xOIV[i,j]   = xOIV₀
+
+                    chemstate.xSII[i,j]   = xSII₀
+                    chemstate.xSIII[i,j]  = xSIII₀
+                    chemstate.xSIV[i,j]   = xSIV₀
 
                     # Adiabatic index:
                     γad[i,j] = Getγad( xHII₀, xH2₀, xHeII₀, xHeIII₀ )
@@ -646,9 +693,17 @@ function SetupRHDsimulation_SingleStar( mstarZAMS::Float64,  # Stellar mass (M�
 
                     chemstate.xCI[i,j]    = xCI_ext
                     chemstate.xCII[i,j]   = xCII_ext
+                    chemstate.xCIII[i,j]  = xCIII_ext
                     chemstate.xCO[i,j]    = xCO_ext
+
                     chemstate.xOI[i,j]    = xOI_ext
                     chemstate.xOII[i,j]   = xOII_ext
+                    chemstate.xOIII[i,j]  = xOIII_ext
+                    chemstate.xOIV[i,j]   = xOIV_ext
+
+                    chemstate.xSII[i,j]   = xSII_ext
+                    chemstate.xSIII[i,j]  = xSIII_ext
+                    chemstate.xSIV[i,j]   = xSIV_ext
 
                     # Adiabatic index:
                     γad[i,j] = Getγad( chemstate.xHII[i,j], chemstate.xH2[i,j], 
@@ -730,10 +785,16 @@ function SetupRHDsimulation_SingleStar( mstarZAMS::Float64,  # Stellar mass (M�
     #######                L Y M A N - α  R T               #######
     #######                                                 #######
     ###############################################################
+
+    if FluxMethodLyαRT == "HLL"
+        HLL_LyαRT = true 
+    else
+        HLL_LyαRT = false
+    end
     
     # Generate struct with Lyα arrays + settings:
     LyαState::Union{LyαArrays,Nothing} =
-    Lyα ? GenerateLyαArrays( c̃, r, Z, T, Recoil, LyαDestruction ) : nothing
+    Lyα ? GenerateLyαArrays( c̃, r, Z, T, Recoil, LyαDestruction, HLL_LyαRT ) : nothing
 
 
     ###############################################################
@@ -742,10 +803,17 @@ function SetupRHDsimulation_SingleStar( mstarZAMS::Float64,  # Stellar mass (M�
     #######                                                 #######
     ############################################################### 
 
+    if FluxMethodStellarRT == "HLL"
+        HLL_StellarRT = true 
+    else
+        HLL_StellarRT = false
+    end
+
     # Generate all stellar RT arrays, including J, H, inteface fluxes, 
     # emissivities, and luminosities, for all 7 stellar + IR RT bands:
     RT = GenerateStellarRTArrays( mstarZAMS, Zstar_Zsun, ΔV, r, Z, 
-                                  Zstar_pos, σstar_cell, c̃, OTS )
+                                  Zstar_pos, σstar_cell, c̃, c̃_min, OTS,
+                                  HLL_StellarRT )
 
     # Add stellar mass to the non-gas mass (will also influence gravity):
     gravstate.ρ_bg .= RT.ρ_star
@@ -754,6 +822,11 @@ function SetupRHDsimulation_SingleStar( mstarZAMS::Float64,  # Stellar mass (M�
     # of the star (for saving):
     L_bol    = RT.Lum_bol
     dNdt_LyC = RT.dN_dt_LyC
+
+    # Initialize equilibrium dust temperatures & grain charges from the
+    # initial gas, chemistry, radiation, and Lyα state:
+    InitializeDustTemperaturesAndCharges!( duststate, hydrostate, 
+                                           chemstate, RT, LyαState, z )
 
     ###############################################################
     #######                                                 #######
@@ -772,13 +845,13 @@ function SetupRHDsimulation_SingleStar( mstarZAMS::Float64,  # Stellar mass (M�
         CreateHDF5File( FileName, N_r, N_Z, Nminsteps, Nmaxsteps, Nsaved, Gravity, 
                         Lyα, Recoil, LyαDestruction, RadPressure, IRfeedback,
                         StellarWindFeedback,
-                        DustGrowthDestruction, OTS, z, 
+                        DustGrowthDestruction, c̃_min, OTS, z, 
                         N_ν,
                         tmax, mstarZAMS, L_bol, dNdt_LyC, Zstar_Zsun, σstar_cell, 
                         Zstar_pos,
                         DG₀, Zgas_Zsun₀,
                         BC_r_right, BC_Z_left, BC_Z_right,
-                        CFL, CFL_RT, c̃,
+                        CFL, CFL_RT, c̃, FluxMethodStellarRT, FluxMethodLyαRT,
                         FileDescription )
 
         # Save spatial grid:
@@ -877,7 +950,7 @@ function SetupRHDsimulation_SingleStar( mstarZAMS::Float64,  # Stellar mass (M�
                     duststate,
                     geometry, gravstate, gravcoeffs,
                     ghostgrid, 
-                    LyαState, RT,
+                    LyαState, RT, Zstar_pos,
                     Gravity, RadPressure, IRfeedback, StellarWindFeedback, 
                     z, mstarZAMS, Zstar_Zsun, Hydro, CoolingHeating )
 
@@ -942,10 +1015,16 @@ function RestartRHDsimulation_SingleStar( FileName::String  = "RHDSim.h5" )
     Gravity = false; Lyα = false; Recoil = false; RadPressure = false; IRfeedback = false; StellarWindFeedback = false
     Hydro = true; LyαDestruction = true; DustGrowthDestruction = true
     mstarZAMS = 0.0; Zstar_Zsun = 0.0
+    Zstar_pos = 0.0
     z = 0.0; tmax = 0.0
     t = 0.0; step = 0; Δt_Hydro = 0.0
+    c̃_min   = 0.0
     c̃_saved = 0.0
     BC_r_right = :Outflow; BC_Z_left = :Reflect; BC_Z_right = :Outflow
+
+    # Initialize M1 flux methods:
+    FluxMethodStellarRT = "HLL"
+    FluxMethodLyαRT     = "GLF"
 
     geometry_ref   = Ref{Any}(nothing)
     hydrostate_ref = Ref{Any}(nothing)
@@ -1005,6 +1084,13 @@ function RestartRHDsimulation_SingleStar( FileName::String  = "RHDSim.h5" )
         StellarWindFeedback    = parse_bool(get_attr(Settings, "StellarWindFeedback"))
         DustGrowthDestruction  = parse_bool(get_attr(Settings, "DustGrowth/Destruction"))
         OTS                    = parse_bool(get_attr(Settings, "OTS"))
+        if haskey(attrs(Settings), "RSL_min")
+            c̃_min = parse_f64(get_attr(Settings, "RSL_min"))
+        else
+            println("Saved minimum RSL c̃_min could not be found in the HDF5 file, 
+                     so manually setting it to c̃_min = 100 km/s.")
+            c̃_min = 100.0 * kms
+        end
         LyαDestruction         = haskey(attrs(Settings), "Lya_pd_on") ? parse_bool(get_attr(Settings, "Lya_pd_on")) : true
         Hydro                  = haskey(attrs(Settings), "Hydro")     ? parse_bool(get_attr(Settings, "Hydro"))     : true
         z                      = haskey(attrs(Settings), "z")         ? parse_f64(get_attr(Settings, "z"))          : 0.0
@@ -1030,6 +1116,13 @@ function RestartRHDsimulation_SingleStar( FileName::String  = "RHDSim.h5" )
         # Get minimum and maximum allowed number of time-steps:
         Nminsteps = parse_i(get_attr(Settings, "Nminsteps")) 
         Nmaxsteps = parse_i(get_attr(Settings, "Nmaxsteps"))
+
+        # Flux methods for M1 RT:
+        FluxMethodStellarRT = haskey(attrs(Settings), "FluxMethodStellarRT") ? String(get_attr(Settings, "FluxMethodStellarRT")) : "HLL"
+        FluxMethodLyαRT     = haskey(attrs(Settings), "FluxMethodLyaRT")     ? String(get_attr(Settings, "FluxMethodLyaRT"))     : "GLF"
+
+        @assert FluxMethodStellarRT == "HLL" || FluxMethodStellarRT == "GLF" "Saved FluxMethodStellarRT must be \"HLL\" or \"GLF\"."
+        @assert FluxMethodLyαRT     == "HLL" || FluxMethodLyαRT     == "GLF" "Saved FluxMethodLyαRT must be \"HLL\" or \"GLF\"."
 
         ###############################################################
         #######                                                 #######
@@ -1080,20 +1173,36 @@ function RestartRHDsimulation_SingleStar( FileName::String  = "RHDSim.h5" )
         chemstate.xHD      .=  CheckPoint["xHD"][:, :]
         chemstate.xCI      .=  CheckPoint["xCI"][:, :]
         chemstate.xCII     .=  CheckPoint["xCII"][:, :]
+        chemstate.xCIII    .=  CheckPoint["xCIII"][:, :]
         chemstate.xCO      .=  CheckPoint["xCO"][:, :]
         chemstate.xOI      .=  CheckPoint["xOI"][:, :]
         chemstate.xOII     .=  CheckPoint["xOII"][:, :]
+        chemstate.xOIII    .=  CheckPoint["xOIII"][:, :]
+        chemstate.xOIV     .=  CheckPoint["xOIV"][:, :]
+        chemstate.xSII     .=  CheckPoint["xSII"][:, :]
+        chemstate.xSIII    .=  CheckPoint["xSIII"][:, :]
+        chemstate.xSIV     .=  CheckPoint["xSIV"][:, :]
 
         chemstate.ZC       .= CheckPoint["ZC"][:, :]
         chemstate.ZSil     .= CheckPoint["ZSil"][:, :]
         chemstate.Zgasrest .= CheckPoint["Zgasrest"][:, :]
 
         # Set up dust state struct, containing dust properties:
-        Td₀       = 30.0      # Arbitrary dust temperature 
+        Td₀       = 30.0      # Arbitrary dust temperature before we initialize below
         duststate = SetupDustState( DustGrowthDestruction, N_r, N_Z, Td₀ )
+
+        # Initialize dust temperatures to last saved checkpoint values:
+        duststate.Td_Sil   .= CheckPoint["Td_Sil"][:, :]
+        duststate.Td_C     .= CheckPoint["Td_C"][:, :]
+        duststate.Td_PAH   .= CheckPoint["Td_PAH"][:, :]
 
         # Initialize the IR radiation temperature to last saved values:
         duststate.Trad     .= CheckPoint["Trad"][:, :]
+
+        # Initialize the grain charges to last saved checkpoint values:
+        duststate.Zgr_Sil  .= CheckPoint["Zgr_Sil"][:, :]
+        duststate.Zgr_C    .= CheckPoint["Zgr_C"][:, :]
+        duststate.Zgr_PAH  .= CheckPoint["Zgr_PAH"][:, :]
 
         # Setup hydro state (not initialized to right values yet) + ghost grid arrays:
         BC_r_left::Symbol     = :Reflect # Always reflective BCs at inner r-boundary in cylindrical coordinates
@@ -1181,40 +1290,49 @@ function RestartRHDsimulation_SingleStar( FileName::String  = "RHDSim.h5" )
                                            rCoM, ZCoM, r, Z )
 
         # Initialize stellar RT arrays/state:
+        if FluxMethodStellarRT == "HLL"
+            HLL_StellarRT = true 
+        else
+            HLL_StellarRT = false 
+        end
+
         RT = GenerateStellarRTArrays( mstarZAMS, Zstar_Zsun, ΔV, r, Z, 
-                                      Zstar_pos, σstar_cell, c̃_saved, OTS )
+                                      Zstar_pos, σstar_cell, c̃_saved, c̃_min, OTS,
+                                      HLL_StellarRT )
 
         # Add stellar mass to gravitating mass:
         gravstate.ρ_bg .= RT.ρ_star
 
         # Get latest saved stellar RT state:
-        RT.J_opt    .= CheckPoint["J_opt"][:, :];    RT.J_opt_old   .= RT.J_opt
-        RT.H_r_opt  .= CheckPoint["H_r_opt"][:, :];  RT.H_r_opt_old .= RT.H_r_opt
-        RT.H_Z_opt  .= CheckPoint["H_Z_opt"][:, :];  RT.H_Z_opt_old .= RT.H_Z_opt
+        @views begin
+            RT.J[iopt_RT,  :, :] .= CheckPoint["J_opt"][:, :]
+            RT.J[iFUV_RT,  :, :] .= CheckPoint["J_FUV"][:, :]
+            RT.J[iLW_RT,   :, :] .= CheckPoint["J_LW"][:, :]
+            RT.J[iEUV1_RT, :, :] .= CheckPoint["J_EUV1"][:, :]
+            RT.J[iEUV2_RT, :, :] .= CheckPoint["J_EUV2"][:, :]
+            RT.J[iEUV3_RT, :, :] .= CheckPoint["J_EUV3"][:, :]
+            RT.J[iIR_RT,   :, :] .= CheckPoint["J_IR"][:, :]
 
-        RT.J_FUV    .= CheckPoint["J_FUV"][:, :];    RT.J_FUV_old   .= RT.J_FUV
-        RT.H_r_FUV  .= CheckPoint["H_r_FUV"][:, :];  RT.H_r_FUV_old .= RT.H_r_FUV
-        RT.H_Z_FUV  .= CheckPoint["H_Z_FUV"][:, :];  RT.H_Z_FUV_old .= RT.H_Z_FUV
+            RT.H_r[iopt_RT,  :, :] .= CheckPoint["H_r_opt"][:, :]
+            RT.H_r[iFUV_RT,  :, :] .= CheckPoint["H_r_FUV"][:, :]
+            RT.H_r[iLW_RT,   :, :] .= CheckPoint["H_r_LW"][:, :]
+            RT.H_r[iEUV1_RT, :, :] .= CheckPoint["H_r_EUV1"][:, :]
+            RT.H_r[iEUV2_RT, :, :] .= CheckPoint["H_r_EUV2"][:, :]
+            RT.H_r[iEUV3_RT, :, :] .= CheckPoint["H_r_EUV3"][:, :]
+            RT.H_r[iIR_RT,   :, :] .= CheckPoint["H_r_IR"][:, :]
 
-        RT.J_LW     .= CheckPoint["J_LW"][:, :];    RT.J_LW_old   .= RT.J_LW
-        RT.H_r_LW   .= CheckPoint["H_r_LW"][:, :];  RT.H_r_LW_old .= RT.H_r_LW
-        RT.H_Z_LW   .= CheckPoint["H_Z_LW"][:, :];  RT.H_Z_LW_old .= RT.H_Z_LW
+            RT.H_Z[iopt_RT,  :, :] .= CheckPoint["H_Z_opt"][:, :]
+            RT.H_Z[iFUV_RT,  :, :] .= CheckPoint["H_Z_FUV"][:, :]
+            RT.H_Z[iLW_RT,   :, :] .= CheckPoint["H_Z_LW"][:, :]
+            RT.H_Z[iEUV1_RT, :, :] .= CheckPoint["H_Z_EUV1"][:, :]
+            RT.H_Z[iEUV2_RT, :, :] .= CheckPoint["H_Z_EUV2"][:, :]
+            RT.H_Z[iEUV3_RT, :, :] .= CheckPoint["H_Z_EUV3"][:, :]
+            RT.H_Z[iIR_RT,   :, :] .= CheckPoint["H_Z_IR"][:, :]
 
-        RT.J_EUV1   .= CheckPoint["J_EUV1"][:, :];    RT.J_EUV1_old   .= RT.J_EUV1
-        RT.H_r_EUV1 .= CheckPoint["H_r_EUV1"][:, :];  RT.H_r_EUV1_old .= RT.H_r_EUV1
-        RT.H_Z_EUV1 .= CheckPoint["H_Z_EUV1"][:, :];  RT.H_Z_EUV1_old .= RT.H_Z_EUV1
-
-        RT.J_EUV2   .= CheckPoint["J_EUV2"][:, :];    RT.J_EUV2_old   .= RT.J_EUV2
-        RT.H_r_EUV2 .= CheckPoint["H_r_EUV2"][:, :];  RT.H_r_EUV2_old .= RT.H_r_EUV2
-        RT.H_Z_EUV2 .= CheckPoint["H_Z_EUV2"][:, :];  RT.H_Z_EUV2_old .= RT.H_Z_EUV2
-
-        RT.J_EUV3   .= CheckPoint["J_EUV3"][:, :];    RT.J_EUV3_old   .= RT.J_EUV3
-        RT.H_r_EUV3 .= CheckPoint["H_r_EUV3"][:, :];  RT.H_r_EUV3_old .= RT.H_r_EUV3
-        RT.H_Z_EUV3 .= CheckPoint["H_Z_EUV3"][:, :];  RT.H_Z_EUV3_old .= RT.H_Z_EUV3
-
-        RT.J_IR     .= CheckPoint["J_IR"][:, :];      RT.J_IR_old   .= RT.J_IR
-        RT.H_r_IR   .= CheckPoint["H_r_IR"][:, :];    RT.H_r_IR_old .= RT.H_r_IR
-        RT.H_Z_IR   .= CheckPoint["H_Z_IR"][:, :];    RT.H_Z_IR_old .= RT.H_Z_IR
+            RT.J_old   .= RT.J
+            RT.H_r_old .= RT.H_r
+            RT.H_Z_old .= RT.H_Z
+        end
 
         # Initialize Lyα state:
         if Lyα
@@ -1225,9 +1343,15 @@ function RestartRHDsimulation_SingleStar( FileName::String  = "RHDSim.h5" )
             νC   = Vector{Float64}(file["νC"][:])
             Δν   = Vector{Float64}(file["Δν"][:])
 
+            if FluxMethodLyαRT == "HLL"
+                HLL_LyαRT = true 
+            else
+                HLL_LyαRT = false 
+            end
+
             # Create Lyα state:
             LyαState = GenerateLyαArrays_FromSaved( c̃_saved, ν, νC, Δν, r, Z, T,
-                                                    Recoil, LyαDestruction )
+                                                    Recoil, LyαDestruction, HLL_LyαRT )
 
             # Set Lyα J and H to last saved values:
             LyαState.J_Lyα       .= CheckPoint["J_Lya"][:, :, :]
@@ -1347,7 +1471,7 @@ function RestartRHDsimulation_SingleStar( FileName::String  = "RHDSim.h5" )
                     duststate,
                     geometry, gravstate, gravcoeffs,
                     ghostgrid, 
-                    LyαState, RT,
+                    LyαState, RT, Zstar_pos,
                     Gravity, RadPressure, IRfeedback, StellarWindFeedback,
                     z, mstarZAMS, Zstar_Zsun, Hydro, CoolingHeating )
 

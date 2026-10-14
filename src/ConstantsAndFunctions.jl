@@ -28,7 +28,7 @@ export LyαArrays, GenerateLyαArrays, H, Htophat,
        eLyα_sphere_point, eLyα_sphere_uni,
        D_colon_∇u_Cartesian, Compute_f_esc_Cylindrical, Compute_f_esc_Lyα_Cylindrical,
        vth_H, GetHydrogenDensities, GetHeliumDensities, GetDeuteriumDensities, 
-       GetCarbonDensities, GetOxygenDensities, GetElectronDensity,
+       GetCarbonDensities, GetOxygenDensities, GetSulfurDensities, GetElectronDensity,
        GetElectronDensityFromFracs, GetTotalNumberDensity,
        GetAllNumberDensities, Get_ρ_From_nH, Compute_nC_over_nO,
        MinMod, FreeFallTime, SphericalAverageProfile!,
@@ -57,6 +57,7 @@ const yr::Float64         = 365.24 * day          # 1 year (sec)
 const Myr::Float64        = 1e6 * yr              # 1 million years (sec)
 const Gyr::Float64        = 1e9 * yr              # 1 billion years (sec)
 const eV::Float64         = 1.60217725e-12        # 1 eV (erg)
+const inv_eV::Float64     = 1 / eV                # Inverse of 1 eV (convenient)
 const Ang::Float64        = 1e-8                  # 1 Ångström (cm)
 const nm::Float64         = 1e-7                  # 1 nanometer (cm)
 const μm::Float64         = 1e-4                  # 1 micron (cm)
@@ -137,12 +138,13 @@ const fSilicon::Float64   = 9.07e-4 / MZ_over_MH           # Fraction of metal m
 const fSulfur::Float64    = 4.63e-4 / MZ_over_MH           # Fraction of metal mass in sulfur @ Solar abundance ratios     (Asplund et al. 2009)
 const fIron::Float64      = 1.94e-3 / MZ_over_MH           # Fraction of metal mass in iron @ Solar abundance ratios       (Asplund et al. 2009)
 
-# Fraction of non-C/Si metals in the form of oxygen, needed 
-# to recover the oxygen density from Zgasrest_Zsun (the ratio between 
+# Fraction of non-C/Si metals in the form of oxygen and sulfur, needed 
+# to recover the oxygen & sulfur densities from Zgasrest_Zsun (the ratio between 
 # metals in Zgasrest_Zsun is assumed fixed): 
 const fO_over_frest::Float64 = fOxygen / (1 - fCarbon - fSilicon)
- 
+const fS_over_frest::Float64 = fSulfur / (1 - fCarbon - fSilicon)
 
+ 
 const DGsun::Float64      = 1 / 162                        # Solar dust-to-gas ratio
 const TCMB0::Float64      = 2.726                          # CMB temperature at redshift z = 0
 
@@ -151,6 +153,8 @@ const OneThird::Float64          = 1 / 3
 const TwoThirds::Float64         = 2 / 3
 const ThreeEights::Float64       = 3 / 8
 const ThreeFourths::Float64      = 3 / 4 
+const OneNinth::Float64          = 1 / 9
+const OneTwelfth::Float64        = 1 / 12 
 const Four_π::Float64            = 4 * π 
 const inv_Four_π::Float64        = 1 / Four_π
 const Two_π::Float64             = 2 * π
@@ -185,18 +189,18 @@ const inv_E_EUV2::Float64 = 1 / E_EUV2
 const inv_E_EUV3::Float64 = 1 / E_EUV3
 
 # Export constants:
-export c, h, G, kB, e, q_e, q_HII, q_HeII, q_HeIII,
+export c, inv_c, h, G, kB, e, q_e, q_HII, q_HeII, q_HeIII,
        σSB, νLyα, νLyC, ELyα, ELyC, inv_ELyα, 
        ALyα, A_2γ, A_2p2s, A_2s2p, f_lu_Lyα, 
        σT, σHminus_Lyα, σOH_Lyα, σCH_Lyα, σRaman,
        X, Y, X_D, Zsun, DGsun, TCMB0, inv_Zsun,
 
        fCarbon, fNitrogen, fOxygen, fNeon, fMagnesium, fSilicon, fSulfur, fIron, 
-       mH, mH2, mD, me, mHe, mC, mO, mCO, mSi,
+       mH, mH2, mD, me, mHe, mC, mO, mCO, mSi, mS,
        inv_mH2, inv_mD, inv_mN, inv_mNe, inv_mMg, inv_mSi, inv_mS, inv_mFe,
 
-       Lsun, Msun, AU, pc, kpc, Mpc, Gpc, kms, inv_kms, day, yr, Myr, Gyr, eV, Ang, nm, μm, F_Habing,
-       OneThird, TwoThirds, ThreeEights, ThreeFourths, Four_π, inv_Four_π, Two_π, Sqrt_π, Sqrt_2,
+       Lsun, Msun, AU, pc, kpc, Mpc, Gpc, kms, inv_kms, day, yr, Myr, Gyr, eV, inv_eV, Ang, nm, μm, F_Habing,
+       OneThird, TwoThirds, ThreeEights, ThreeFourths, OneNinth, OneTwelfth, Four_π, inv_Four_π, Two_π, Sqrt_π, Sqrt_2,
        Sqrt_π_over_2, inv_Sqrt_π_over_2, Four_π_over_c, inv_c, X_over_mH, Y_over_mHe, 
 
        E_opt, E_FUV, E_LW, E_EUV1, E_EUV2, E_EUV3,
@@ -310,7 +314,7 @@ const σ0_PREFACT::Float64 = Sqrt_π * (e^2) * f_lu_Lyα / ( me * νLyα )
 end
 
 
-""" Compute & update the (top-hat average) Voigt profile Hvoigt[i,j,k]
+""" Compute & update the (top-hat average) Voigt profile Hvoigt[k,i,j]
     for each cell. """
 function Update_Hvoigt!( Hvoigt::AbstractArray{Float64, 3}, # Top-hat average Voigt profile for each cell (UPDATED)
                              δν::AbstractArray{Float64},    # Frequency interfaces displacement from line center 
@@ -319,68 +323,71 @@ function Update_Hvoigt!( Hvoigt::AbstractArray{Float64, 3}, # Top-hat average Vo
                        inv_Δν_D::AbstractArray{Float64, 2}  # Inverse Doppler width for each cell 
                          )
 
-    N_r, N_Z, N_ν = size( Hvoigt ) # Grid size 
-    dN_r = 1:N_r
-    dN_Z = 1:N_Z
-    dN_ν = 1:N_ν 
+    N_ν, N_r, N_Z = size( Hvoigt ) # Grid size 
+    dN_ν    = 1:N_ν 
+    N_cells = N_r * N_Z
 
-    @threads for k in dN_ν
+    @threads :static for idx in 1:N_cells
+        # Get cell indices from idx:
+        i = ( (idx - 1) % N_r ) + 1
+        j = ( (idx - 1) ÷ N_r ) + 1 
+
         @inbounds begin 
-            δν_C   = δνC[k]
-            δν_max = δν[k+1]
-            δν_min = δν[k]
-            
-            for j in dN_Z
-                @simd for i in dN_r
-                    # Inverse Doppler width:
-                    inv_ΔνD = inv_Δν_D[i,j]
+            # Inverse Doppler width and Voigt parameter:
+            inv_ΔνD_ij = inv_Δν_D[i,j]
+            a_ij       = a[i,j]
 
-                    # Bin-averaged Voigt profile:
-                    Hvoigt[i,j,k] = Htophat( δν_C   * inv_ΔνD, # x 
-                                             δν_max * inv_ΔνD, # xmax 
-                                             δν_min * inv_ΔνD, # xmin
-                                             a[i,j] )
-                                            
-                end # End of i-loop
-            end # End of j-loop
+            @simd for k in dN_ν
+                δν_C   = δνC[k]
+                δν_max = δν[k+1]
+                δν_min = δν[k]
+
+                x      = @fastmath δν_C * inv_ΔνD_ij
+                xmax   = @fastmath δν_max * inv_ΔνD_ij
+                xmin   = @fastmath δν_min * inv_ΔνD_ij
+
+                # Bin-averaged Voigt profile:
+                Hvoigt[k,i,j] = Htophat( x, xmax, xmin, a_ij )
+            end # End of k-loop 
 
         end # End of inbounds 
-    end # End of k-loop
+    end # End of cell loop 
 
     return nothing 
 end
 
 
 """ Compute & update the normalized emission profile ϕ_ν for each cell, 
-    assuming ϕ_ν = Hvoigt / ∫dν Hvoigt ≈ Hvoigt[i,j,k] / ∑_k Δν[k] Hvoigt[i,j,k]. """
+    assuming ϕ_ν = Hvoigt / ∫dν Hvoigt ≈ Hvoigt[k,i,j] / ∑_k Δν[k] Hvoigt[k,i,j]. """
 function Update_ϕν!( ϕ_ν::AbstractArray{Float64, 3},  # Normalized emission line profile (UPDATED)
                       Δν::AbstractArray{Float64, 1},  # Frequency bin widths
                   Hvoigt::AbstractArray{Float64, 3},  # Voigt profile for each cell
                     kmin::Int, 
                     kmax::Int 
                    )
-    N_r, N_Z, _ = size( Hvoigt )
-    dN_r = 1:N_r
-    dN_Z = 1:N_Z
-    dk   = kmin:kmax 
+    N_ν, N_r, N_Z = size( Hvoigt )
+    dk      = kmin:kmax 
+    N_cells = N_r * N_Z 
 
-    @threads for j in dN_Z
+    @threads :static for idx in 1:N_cells
+        # Get cell indices from idx:
+        i = ( (idx - 1) % N_r ) + 1
+        j = ( (idx - 1) ÷ N_r ) + 1
+
         @inbounds begin 
-            for i in dN_r
 
-                SUM = 0.0
-                @simd for k in dk 
-                    SUM += Δν[k] * Hvoigt[i,j,k]
-                end
-                inv_SUM = 1 / SUM
-                
-                @simd for k in dk 
-                    ϕ_ν[i,j,k] = Hvoigt[i,j,k] * inv_SUM
-                end
+            SUM = 0.0
+            @simd for k in dk 
+                SUM += @fastmath Δν[k] * Hvoigt[k,i,j]
+            end
+            inv_SUM = @fastmath 1.0 / SUM
 
-            end # End of i-loop
-        end # End of inbounds
-    end # End of j-loop
+            @simd for k in dk 
+                ϕ_ν[k,i,j] = @fastmath Hvoigt[k,i,j] * inv_SUM
+            end
+
+        end # End of inbounds 
+    end # End of cell loop 
 
     return nothing 
 end
@@ -412,24 +419,28 @@ end
                                 )
 
     # Grid size & intervals:
-    N_r, N_Z, N_ν = size( J )
-    dN_r          = 1:N_r 
-    dN_Z          = 1:N_Z 
+    N_ν, N_r, N_Z = size( J )
     dN_ν          = 1:N_ν
+    N_cells       = N_r * N_Z 
 
-    @threads for j in dN_Z 
-        @inbounds for i in dN_r 
+    @threads :static for idx in 1:N_cells
+
+        # Get cell indices from idx:
+        i = ( (idx - 1) % N_r ) + 1
+        j = ( (idx - 1) ÷ N_r ) + 1
+
+        @inbounds begin 
 
             ∫dν_J = 0.0 # Initialize the estimated integral
-            @simd for k in dN_ν
-                ∫dν_J += Δν[k] * J[i,j,k]
+            @simd for k in dN_ν 
+                ∫dν_J += @fastmath Δν[k] * J[k,i,j]
             end
 
             # Get Lyα energy density:
-            e_Lyα[i,j] = Four_π_over_c * ∫dν_J
+            e_Lyα[i,j] = @fastmath Four_π_over_c * ∫dν_J
 
-        end # End of i-loop 
-    end # End of j-loop 
+        end # End of inbounds 
+    end # End of cell loop 
 
     return nothing 
 end
@@ -489,62 +500,74 @@ function LyαEmissionAbsorptionUpdate!( J_Lyα::AbstractArray{Float64, 3},
                                           Δt::Float64 )
 
     # Grid size & intervals:
-    N_r, N_Z, N_ν  = size( J_Lyα )   # Grid size 
-    dN_r           = 1:N_r           # r-interval 
-    dN_Z           = 1:N_Z           # Z-interval
+    N_ν, N_r, N_Z  = size( J_Lyα )   # Grid size 
     dN_ν           = 1:N_ν           # ν-interval
+    N_cells        = N_r * N_Z 
 
-    @threads for k in dN_ν
-        @inbounds @simd for j in dN_Z 
-            for i in dN_r 
+    # Convenient constant:
+    inv_c̃               = @fastmath 1.0 / c̃
+    Four_π_over_c_inv_c̃ = @fastmath Four_π_over_c * inv_c̃
+
+    @threads :static for idx in 1:N_cells
+
+        # Get cell indices from idx:
+        i = ( (idx - 1) % N_r ) + 1
+        j = ( (idx - 1) ÷ N_r ) + 1
+
+        @inbounds begin
+            # Some convenient constnats per bin below:
+            αc_ij       = αc_Lyα[i,j]
+            α_ij        = α_Lyα[i,j]
+            pd_ij       = pd[i,j]
+            ∫dν_js_ij   = ∫dν_js_Lyα[i,j]
+            α_ij_pd_ij  = @fastmath α_ij * pd_ij
+            ∫dν_js_ij_c̃ = @fastmath ∫dν_js_ij * c̃
+
+            @simd for k in dN_ν
                 # Absorption opacity for J:
-                αabs_J = αc_Lyα[i,j]  +  α_Lyα[i,j] * Hvoigt[i,j,k] * pd[i,j]
+                αabs_J = @fastmath αc_ij  +  α_ij_pd_ij * Hvoigt[k,i,j] 
 
                 # Change in J from emission:
-                dJdt   = ∫dν_js_Lyα[i,j] * ϕ_ν[i,j,k] * c̃
+                dJdt   = @fastmath ∫dν_js_ij_c̃ * ϕ_ν[k,i,j] 
 
                 # Update J:
-                J_Lyα[i,j,k] = AbsorptionUpdateJorH( J_Lyα_old[i,j,k], Δt, dJdt, αabs_J, c̃ )
+                J_Lyα[k,i,j] = AbsorptionUpdateJorH( J_Lyα_old[k,i,j], Δt, dJdt, αabs_J, c̃ )
 
                 # Store & set old (un-updated) H components:
-                H_r_old_Lyα[i,j,k] = H_r_Lyα[i,j,k] 
-                H_Z_old_Lyα[i,j,k] = H_Z_Lyα[i,j,k]
+                H_r_old_Lyα[k,i,j] = H_r_Lyα[k,i,j] 
+                H_Z_old_Lyα[k,i,j] = H_Z_Lyα[k,i,j]
 
                 # Flux opacity for H_r and H_Z:
-                αabs_H = α_F_Lyα[i,j,k]
+                αabs_H = α_F_Lyα[k,i,j]
 
                 # Candidate updates for H_r and H_Z:
-                H_r_Lyα[i,j,k]  = AbsorptionUpdateJorH( H_r_old_Lyα[i,j,k], Δt, 0.0, αabs_H, c̃ )
-                H_Z_Lyα[i,j,k]  = AbsorptionUpdateJorH( H_Z_old_Lyα[i,j,k], Δt, 0.0, αabs_H, c̃ )
+                H_r_Lyα[k,i,j]  = AbsorptionUpdateJorH( H_r_old_Lyα[k,i,j], Δt, 0.0, αabs_H, c̃ )
+                H_Z_Lyα[k,i,j]  = AbsorptionUpdateJorH( H_Z_old_Lyα[k,i,j], Δt, 0.0, αabs_H, c̃ )
 
-            end # End of i-loop 
-        end # End of j-loop 
-    end # End of k-loop 
-
-
-    # Compute change in gas momentum from Lyα radiation pressure: 
-    inv_c̃  = 1 / c̃      # Convenient constant 
-    @threads for j in dN_Z 
-        @inbounds @simd for i in dN_r 
+            end # End of k-loop 
 
             # Compute ∫dν (H_old - H):
             ∫dν_ΔH_r = 0.0
             ∫dν_ΔH_Z = 0.0
-            for k in dN_ν
-                ∫dν_ΔH_r += Δν[k] * ( H_r_old_Lyα[i,j, k] - H_r_Lyα[i,j, k] )
-                ∫dν_ΔH_Z += Δν[k] * ( H_Z_old_Lyα[i,j, k] - H_Z_Lyα[i,j, k] )
-            end
+            @simd for k in dN_ν
+                Δν_k      = Δν[k]
+                ∫dν_ΔH_r += Δν_k * ( H_r_old_Lyα[k,i,j] - H_r_Lyα[k,i,j] )
+                ∫dν_ΔH_Z += Δν_k * ( H_Z_old_Lyα[k,i,j] - H_Z_Lyα[k,i,j] )
+            end # End of k-loop 
 
             # Change in gas momentum from Lyα radiation pressure:
-            Δρu_Lyα_r[i,j] += Four_π_over_c * inv_c̃ * ∫dν_ΔH_r
-            Δρu_Lyα_Z[i,j] += Four_π_over_c * inv_c̃ * ∫dν_ΔH_Z
-        end
-    end
+            Δρu_Lyα_r[i,j] += @fastmath Four_π_over_c_inv_c̃ * ∫dν_ΔH_r
+            Δρu_Lyα_Z[i,j] += @fastmath Four_π_over_c_inv_c̃ * ∫dν_ΔH_Z
 
-    # Update old J and H components a final time:
-    J_Lyα_old   .= J_Lyα 
-    H_r_old_Lyα .= H_r_Lyα 
-    H_Z_old_Lyα .= H_Z_Lyα
+            # Update old J and H components a final time:
+            @simd for k in dN_ν
+                J_Lyα_old[k,i,j]   = J_Lyα[k,i,j]  
+                H_r_old_Lyα[k,i,j] = H_r_Lyα[k,i,j] 
+                H_Z_old_Lyα[k,i,j] = H_Z_Lyα[k,i,j]
+            end
+
+        end # End of inbounds 
+    end # End of cell loop 
 
     return nothing 
 end
@@ -962,7 +985,7 @@ end
 
     f_esc_Lyα = 0.0
     @inbounds @simd for k in dN_ν
-        f_esc_Lyα += Δν[k] * Compute_f_esc_Cylindrical( H_r_Lya[:,:,k], H_Z_Lya[:,:,k], A_r, A_Z, 
+        f_esc_Lyα += Δν[k] * Compute_f_esc_Cylindrical( H_r_Lya[k,:,:], H_Z_Lya[k,:,:], A_r, A_Z, 
                                                         L_Lyα_allspace, BC_Z_bot )
     end
 
@@ -1214,58 +1237,99 @@ end
 end
 
 
-""" This function computes the C I, C II, CO, and CHₓ number densities,
-    given the fractional abundances of C I, C II, and CO, and the carbon
+""" This function computes the C I, C II, C III, CO, and CHₓ number densities,
+    given the fractional abundances of C I, C II, C III, and CO, and the carbon
     gas density ρCarbon. """
 @inline @fastmath function GetCarbonDensities( xCI::Float64, 
                                               xCII::Float64, 
+                                             xCIII::Float64,
                                                xCO::Float64, 
                                            ρCarbon::Float64 )
 
     # Get carbon number density:
-    nC   = ρCarbon * inv_mC 
+    nC    = ρCarbon * inv_mC 
 
     # Get number densities of all species:
-    nCI  = xCI  * nC 
-    nCII = xCII * nC 
-    nCO  = xCO  * nC
-    nCHx = max( 1 - xCI - xCII - xCO, 0.0 ) * nC 
+    nCI   = xCI  * nC 
+    nCII  = xCII * nC 
+    nCIII = xCIII * nC 
+    nCO   = xCO  * nC
+    nCHx  = max( 1 - xCI - xCII - xCIII - xCO, 0.0 ) * nC 
 
-    return nCI, nCII, nCO, nCHx, nC
+    return nCI, nCII, nCIII, nCO, nCHx, nC
 end
 
 
-""" This function computes the O I, O II, and OHₓ number densities,
-    given the fractional abundances of O I, O II, and the number density 
+""" This function computes the O I, O II, O III, O IV, and OHₓ number densities,
+    given the fractional abundances of O I, O II, O III, O IV, and the number density 
     of CO, and the oxygen density ρOxygen. """
 @inline @fastmath function GetOxygenDensities( xOI::Float64, 
                                               xOII::Float64, 
+                                             xOIII::Float64,
+                                              xOIV::Float64,
                                                nCO::Float64, 
                                            ρOxygen::Float64 )
 
     # Get oxygen number density:
-    nO   = ρOxygen * inv_mO 
+    nO    = ρOxygen * inv_mO 
 
     # Get number densities of all species:
-    nOI  = xOI  * nO 
-    nOII = xOII * nO 
-    nOHx = clamp( nO - nOI - nOII - nCO, 0.0, nO )
+    nOI   = xOI   * nO 
+    nOII  = xOII  * nO 
+    nOIII = xOIII * nO 
+    nOIV  = xOIV  * nO 
+    nOHx  = clamp( nO - nOI - nOII - nOIII - nOIV - nCO, 0.0, nO )
 
-    return nOI, nOII, nOHx, nO
+    return nOI, nOII, nOIII, nOIV, nOHx, nO
+end
+
+
+""" This function computes the S I, S II, S III, and S IV number densities,
+    given the fractional abundances of S II, S III, and S IV, and the 
+    sulfur density ρSulfur. """
+@inline @fastmath function GetSulfurDensities( xSII::Float64, 
+                                              xSIII::Float64,
+                                               xSIV::Float64,
+                                            ρSulfur::Float64 )
+
+    # Get sulfur number density:
+    nS    = ρSulfur * inv_mS
+
+    # S I abundance fraction from conservation: 
+    xSI   = max( 1.0 - xSII - xSIII - xSIV, 0.0 )
+
+    # Get number densities of all species:
+    nSI   = xSI   * nS 
+    nSII  = xSII  * nS 
+    nSIII = xSIII * nS 
+    nSIV  = xSIV  * nS 
+
+    return nSI, nSII, nSIII, nSIV, nS
 end
 
 
 """ This function computes the electron number density 
-    from the number densities of H II, He II, and He III. """
+    from the number densities of H II, He II, He III, D II, 
+    C II, C III, O II, O III, O IV, S II, S III, and S IV. """
 @inline @fastmath function GetElectronDensity( nHII::Float64, 
                                               nHeII::Float64, 
                                              nHeIII::Float64,
                                                nDII::Float64,
                                                nCII::Float64,
-                                               nOII::Float64
+                                              nCIII::Float64,
+                                               nOII::Float64,
+                                              nOIII::Float64,
+                                               nOIV::Float64,
+                                               nSII::Float64,
+                                              nSIII::Float64,
+                                               nSIV::Float64
                                               )
 
-    return nHII  +  nHeII  +  2 * nHeIII  +  nDII  +  nCII  +  nOII 
+    ne = ( nHII  +  nHeII  +  2 * nHeIII  +  nDII  +  nCII  +  2 * nCIII  
+         + nOII  +  2 * nOIII  +  3 * nOIV
+         + nSII  +  2 * nSIII  +  3 * nSIV )
+
+    return ne 
 end
 
 
@@ -1274,13 +1338,19 @@ const fOxygen_over_mO::Float64 = fOxygen * inv_mO
 
 """ This function computes the electron number density 
     from the abundance fractions of H II, He II, He III,
-    D II, C II, and O II. """
+    D II, C II, C III, O II, O III, O IV, S II, S III, and S IV. """
 @inline @fastmath function GetElectronDensityFromFracs( xHII::Float64, 
                                                        xHeII::Float64, 
                                                       xHeIII::Float64,
                                                         xDII::Float64,
                                                         xCII::Float64,
+                                                       xCIII::Float64,
                                                         xOII::Float64,
+                                                       xOIII::Float64,
+                                                        xOIV::Float64,
+                                                        xSII::Float64,
+                                                       xSIII::Float64,
+                                                        xSIV::Float64,
                                                            ρ::Float64,
                                                           ZC::Float64,  # Carbon gas metallicity 
                                                         ZSil::Float64,  # Si gas metallicity 
@@ -1317,16 +1387,28 @@ const fOxygen_over_mO::Float64 = fOxygen * inv_mO
     # Get nDII:
     nDII       = xDII * nD 
 
-    # Get nCII:
+    # Get nCII and nCIII:
     nC         = ZC * ρ * inv_mC 
-    nCII       = xCII * nC 
+    nCII       = xCII  * nC 
+    nCIII      = xCIII * nC 
 
-    # Get nOII:
-    nO         = fO_over_frest * Zgasrest * ρ * inv_mO 
-    nOII       = xOII * nO
+    # Get nOII, nOIII, and nOIV:
+    Zgasrest_ρ = Zgasrest * ρ   # Used for both O and S below 
+    nO         = fO_over_frest * Zgasrest_ρ * inv_mO 
+    nOII       = xOII  * nO
+    nOIII      = xOIII * nO
+    nOIV       = xOIV  * nO 
+
+    # Get nSII, nSIII, and nSIV:
+    nS         = fS_over_frest * Zgasrest_ρ * inv_mS 
+    nSII       = xSII  * nS 
+    nSIII      = xSIII * nS 
+    nSIV       = xSIV  * nS 
 
     # Get electron density:
-    ne         = GetElectronDensity( nHII, nHeII, nHeIII, nDII, nCII, nOII )
+    ne         = GetElectronDensity( nHII, nHeII, nHeIII, nDII, nCII, nCIII, 
+                                     nOII, nOIII, nOIV,
+                                     nSII, nSIII, nSIV )
 
     return ne
 end
@@ -1334,14 +1416,17 @@ end
 
 """ Computes the total gas number density. """
 @inline function GetTotalNumberDensity( nHI::Float64,   nHII::Float64,    nH2::Float64, 
-                                        nHeI::Float64, nHeII::Float64, nHeIII::Float64,
+                                       nHeI::Float64,  nHeII::Float64, nHeIII::Float64,
                                         nDI::Float64,   nDII::Float64,    nHD::Float64, 
-                                        nCI::Float64,   nCII::Float64,    nCO::Float64,
-                                        nCHx::Float64,   nOI::Float64,   nOII::Float64,
-                                        nOHx::Float64,    ne::Float64 )
+                                        nCI::Float64,   nCII::Float64,  nCIII::Float64,
+                                        nCO::Float64,   nCHx::Float64,    nOI::Float64,   
+                                       nOII::Float64,  nOIII::Float64,   nOIV::Float64,
+                                       nOHx::Float64,    nSI::Float64,   nSII::Float64,
+                                      nSIII::Float64,   nSIV::Float64,     ne::Float64 )
 
-    n  = ( nHI + nHII + nH2 + nHeI + nHeII + nHeIII + nDI + nDII + nHD
-         + nCI + nCII + nCO + nCHx + nOI + nOII + nOHx + ne )
+    n  = @fastmath ( nHI + nHII + nH2   + nHeI + nHeII + nHeIII + nDI  + nDII  + nHD
+                   + nCI + nCII + nCIII + nCO  + nCHx  + nOI    + nOII + nOIII + nOIV + nOHx
+                   + nSI + nSII + nSIII + nSIV + ne )
 
     return n
 end
@@ -1356,9 +1441,15 @@ function GetAllNumberDensities( xH2::Float64,
                                xDII::Float64,
                                 xCI::Float64,
                                xCII::Float64,
+                              xCIII::Float64,
                                 xCO::Float64,
                                 xOI::Float64,
                                xOII::Float64,
+                              xOIII::Float64,
+                               xOIV::Float64,
+                               xSII::Float64,
+                              xSIII::Float64,
+                               xSIV::Float64,
                                   ρ::Float64,
                                  ZC::Float64,  # Carbon gas metallicity 
                                ZSil::Float64,  # Silicon gas metallicity  
@@ -1373,31 +1464,44 @@ function GetAllNumberDensities( xH2::Float64,
     ρ_pristine = max( (1 - Z), 0.0 ) * ρ
 
     # Get hydrogen densities:
-    nHI, nHII, nH2, nH        = GetHydrogenDensities( xHII, xH2, ρ_pristine, HydrogenAndHelium )
+    nHI, nHII, nH2, nH               = GetHydrogenDensities( xHII, xH2, ρ_pristine, HydrogenAndHelium )
 
     # Get helium densities:
-    nHeI, nHeII, nHeIII, nHe  = GetHeliumDensities( xHeII, xHeIII, ρ_pristine, HydrogenAndHelium )
+    nHeI, nHeII, nHeIII, nHe         = GetHeliumDensities( xHeII, xHeIII, ρ_pristine, HydrogenAndHelium )
 
     # Get deuterium densities:
-    nDI, nDII, nHD, nD        = GetDeuteriumDensities( xHD, xDII, ρ_pristine, HydrogenAndHelium )
+    nDI, nDII, nHD, nD               = GetDeuteriumDensities( xHD, xDII, ρ_pristine, HydrogenAndHelium )
 
     # Get carbon species densities:
-    ρCarbon                   = @fastmath ZC * ρ
-    nCI, nCII, nCO, nCHx, nC  = GetCarbonDensities( xCI, xCII, xCO, ρCarbon )
+    ρCarbon                          = @fastmath ZC * ρ
+    nCI, nCII, nCIII, nCO, nCHx, nC  = GetCarbonDensities( xCI, xCII, xCIII, xCO, ρCarbon )
 
     # Get oxygen species densities:
-    ρOxygen                   = @fastmath fO_over_frest * Zgasrest * ρ
-    nOI, nOII, nOHx, nO       = GetOxygenDensities( xOI, xOII, nCO, ρOxygen )
+    Zgasrest_ρ                       = Zgasrest * ρ   # Used for both O and S below 
+    ρOxygen                          = @fastmath fO_over_frest * Zgasrest_ρ
+    nOI, nOII, nOIII, nOIV, nOHx, nO = GetOxygenDensities( xOI, xOII, xOIII, xOIV, nCO, ρOxygen )
+
+    # Get sulfur species densities:
+    ρSulfur                          = @fastmath fS_over_frest * Zgasrest_ρ
+    nSI, nSII, nSIII, nSIV, nS       = GetSulfurDensities( xSII, xSIII, xSIV, ρSulfur )
 
     # Get electron density:
-    ne                        = GetElectronDensity( nHII, nHeII, nHeIII, nDII, nCII, nOII )
+    ne                               = GetElectronDensity( nHII, nHeII, nHeIII, nDII, nCII, nCIII, 
+                                                           nOII, nOIII, nOIV, nSII, nSIII, nSIV )
 
     # Get total number density (that would e.g. enter the pressure P = n kB T):
-    n  = ( nHI + nHII + nH2 + nHeI + nHeII + nHeIII + nDI + nDII + nHD
-         + nCI + nCII + nCO + nCHx + nOI + nOII + nOHx + ne )
+    n = GetTotalNumberDensity( nHI,  nHII,  nH2, 
+                               nHeI, nHeII, nHeIII,
+                               nDI,  nDII,  nHD,
+                               nCI,  nCII,  nCIII,  nCO,  nCHx,
+                               nOI,  nOII,  nOIII,  nOIV, nOHx,
+                               nSI,  nSII,  nSIII,  nSIV,
+                               ne )
 
     return nHI, nHII, nH2, nHeI, nHeII, nHeIII, nDI, nDII, nHD, 
-           nCI, nCII, nCO, nCHx, nOI, nOII, nOHx, ne, n, nH, nHe, nD, nC, nO
+           nCI, nCII, nCIII, nCO, nCHx, nOI, nOII, nOIII, nOIV, nOHx, 
+           nSI, nSII, nSIII, nSIV,
+           ne, n, nH, nHe, nD, nC, nO, nS
 end
 
 
@@ -1557,7 +1661,7 @@ end
 """ This function computes the number of ionizing photons in each ionizing 
     band (EUV1, EUV2, EUV3), assuming a black-body spectrum of temperature 
     Teff (K), and a total ionizing output dNdt_LyC. Useful for idealized tests. """
-function GetBlackBodyIonizingEmission( dNdt_LyC::Float64, Teff::Float64 )
+function GetBlackBodyIonizingEmission( dNdt_LyC::Float64, Teff::Float64, E_max::Float64 = 100.0 * eV )
 
     # Convenient variable:
     inv_kBT = 1 / ( kB * Teff )
@@ -1566,17 +1670,22 @@ function GetBlackBodyIonizingEmission( dNdt_LyC::Float64, Teff::Float64 )
     ϕ  = ( x::Float64 ) -> (x^2) / expm1( x )
 
     # Minimum x of each band:
-    x0 = ( 13.6 * eV ) * inv_kBT
-    x1 = ( 24.6 * eV ) * inv_kBT
-    x2 = ( 54.4 * eV ) * inv_kBT
+    x0   = ( 13.6 * eV ) * inv_kBT
+    x1   = ( 24.6 * eV ) * inv_kBT
+    x2   = ( 54.4 * eV ) * inv_kBT
 
-    # Total ionizing photons (LyC): [13.6 eV, ∞):
-    I_tot, _ = quadgk( ϕ, x0, Inf, rtol = 1e-10 )
+    # Integrate to:
+    xmax = E_max * inv_kBT
+
+    @assert E_max > 54.4 * eV
+
+    # Total ionizing photons (LyC): [13.6 eV, E_max]:
+    I_tot, _ = quadgk( ϕ, x0, xmax, rtol = 1e-10 )
 
     # The ionizing photons in each band (EUV1, EUV2, EUV3):
-    I1, _ = quadgk( ϕ, x0, x1,  rtol = 1e-10 )
-    I2, _ = quadgk( ϕ, x1, x2,  rtol = 1e-10 )
-    I3, _ = quadgk( ϕ, x2, Inf, rtol = 1e-10 )
+    I1, _ = quadgk( ϕ, x0, x1,   rtol = 1e-10 )
+    I2, _ = quadgk( ϕ, x1, x2,   rtol = 1e-10 )
+    I3, _ = quadgk( ϕ, x2, xmax, rtol = 1e-10 )
 
     @assert isfinite(I_tot) && I_tot > 0
     @assert abs( ( I1 + I2 + I3 ) / I_tot - 1 ) < 1e-10
@@ -1612,6 +1721,181 @@ function PrintLYDIONLogo( )
 
     println(LYDION_logo)
     println("")
+end
+
+
+###############################################################
+#######                                                 #######
+#######             T I M I N G   U T I L S             #######
+#######                                                 #######
+###############################################################
+
+import Dates: now
+using Printf
+
+export StartTimer, StopTimer, PrintTimingStats, SaveTimingStats
+
+# The OS reports CPU times as seconds + microseconds.
+struct OS_TimeValue
+    seconds::Clong
+    microseconds::Clong
+end
+
+# Julia mirror of the C `struct rusage`.
+# Only user_cpu_time and system_cpu_time are used directly.
+mutable struct OS_ResourceUsage
+    user_cpu_time::OS_TimeValue
+    system_cpu_time::OS_TimeValue
+
+    max_resident_set_size::Clong
+    shared_memory_size::Clong
+    unshared_data_size::Clong
+    unshared_stack_size::Clong
+    minor_page_faults::Clong
+    major_page_faults::Clong
+    swaps::Clong
+    block_inputs::Clong
+    block_outputs::Clong
+    messages_sent::Clong
+    messages_received::Clong
+    signals_received::Clong
+    voluntary_context_switches::Clong
+    involuntary_context_switches::Clong
+end
+
+
+function EmptyResourceUsage()
+    return OS_ResourceUsage(
+        OS_TimeValue(0, 0),
+        OS_TimeValue(0, 0),
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    )
+end
+
+
+@inline function TimeValueToSeconds( t::OS_TimeValue )
+    return t.seconds  +  1e-6 * t.microseconds
+end
+
+
+function GetCPUTimeSeconds()
+
+    usage = Ref(EmptyResourceUsage())
+
+    # RUSAGE_SELF = 0 means current Julia process.
+    error_code = ccall(
+        :getrusage,
+        Cint,
+        (Cint, Ref{OS_ResourceUsage}),
+        0,
+        usage
+    )
+
+    if error_code != 0
+        error("getrusage failed.")
+    end
+
+    user_seconds = TimeValueToSeconds(usage[].user_cpu_time)
+    system_seconds = TimeValueToSeconds(usage[].system_cpu_time)
+    total_cpu_seconds = user_seconds + system_seconds
+
+    return total_cpu_seconds, user_seconds, system_seconds
+end
+
+
+function StartTimer()
+
+    cpu_seconds, user_seconds, system_seconds = GetCPUTimeSeconds()
+
+    return Dict(
+        "WallStart" => time(),
+        "CPUStart" => cpu_seconds,
+        "UserStart" => user_seconds,
+        "SystemStart" => system_seconds,
+        "StartTime" => string(now()),
+        "NThreads" => Threads.nthreads(),
+        "JuliaVersion" => string(VERSION)
+    )
+
+end
+
+
+function StopTimer( TimerStart::Dict )
+
+    cpu_end, user_end, system_end = GetCPUTimeSeconds()
+    wall_end = time()
+
+    wall_seconds = wall_end - TimerStart["WallStart"]
+    cpu_seconds = cpu_end - TimerStart["CPUStart"]
+    user_seconds = user_end - TimerStart["UserStart"]
+    system_seconds = system_end - TimerStart["SystemStart"]
+
+    return Dict(
+        "StartTime" => TimerStart["StartTime"],
+        "EndTime" => string(now()),
+
+        "JuliaVersion" => TimerStart["JuliaVersion"],
+        "NThreads" => TimerStart["NThreads"],
+
+        "WallSeconds" => wall_seconds,
+        "WallHours" => wall_seconds / 3600,
+
+        "CPUSeconds" => cpu_seconds,
+        "CPUCoreHours" => cpu_seconds / 3600,
+
+        "UserSeconds" => user_seconds,
+        "UserHours" => user_seconds / 3600,
+
+        "SystemSeconds" => system_seconds,
+        "SystemHours" => system_seconds / 3600,
+
+        "AverageBusyCores" => cpu_seconds / wall_seconds
+    )
+
+end
+
+
+function PrintTimingStats(TimingStats::Dict)
+
+    println()
+    println("Timing statistics:")
+    println("  Start time              = ", TimingStats["StartTime"])
+    println("  End time                = ", TimingStats["EndTime"])
+    println("  Julia threads           = ", TimingStats["NThreads"])
+
+    @printf("  Wall time               = %.4e s = %.4f h\n",
+            TimingStats["WallSeconds"], TimingStats["WallHours"])
+
+    @printf("  CPU time                = %.4e s = %.4f core h\n",
+            TimingStats["CPUSeconds"], TimingStats["CPUCoreHours"])
+
+    @printf("    user time             = %.4e s = %.4f h\n",
+            TimingStats["UserSeconds"], TimingStats["UserHours"])
+
+    @printf("    system time           = %.4e s = %.4f h\n",
+            TimingStats["SystemSeconds"], TimingStats["SystemHours"])
+
+    @printf("  Average busy cores      = %.3f\n",
+            TimingStats["AverageBusyCores"])
+
+    return nothing
+end
+
+
+function SaveTimingStats( FileName::String, TimingStats::Dict )
+
+    open(FileName, "w") do io
+        println(io, "# LYDION timing statistics")
+        println(io, "# CPU time = user time + system time from getrusage(RUSAGE_SELF).")
+        println(io, "# This is analogous to user+sys from /usr/bin/time -l.")
+        println(io)
+
+        for key in sort(collect(keys(TimingStats)))
+            println(io, key, " = ", TimingStats[key])
+        end
+    end
+
+    return nothing
 end
 
 

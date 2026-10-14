@@ -22,13 +22,25 @@ export Update_fesc_LyC_and_LW_Cylindrical!, Update_M_F_dir!, Update_M_F_IR_L_IR!
                                                  BC_Z_bot::Symbol = :Outflow          # Assumed BCs at the lower-Z boundary 
                                                      )
 
-    # Lyman-Werner escape fraction: 
-    RT.f_esc_LW   = Compute_f_esc_Cylindrical( RT.H_r_LW, RT.H_Z_LW, A_r, A_Z, RT.Lum_LW, BC_Z_bot )
+    @views begin
+        # Lyman-Werner escape fraction: 
+        RT.f_esc_LW = Compute_f_esc_Cylindrical( RT.H_r[iLW_RT, :, :],
+                                                 RT.H_Z[iLW_RT, :, :],
+                                                 A_r, A_Z, RT.Lum_LW, BC_Z_bot )
 
-    # Compute LyC photon number-weighted escape fraction:
-    f_esc_EUV1    = Compute_f_esc_Cylindrical( RT.H_r_EUV1, RT.H_Z_EUV1, A_r, A_Z, RT.Lum_EUV1, BC_Z_bot )
-    f_esc_EUV2    = Compute_f_esc_Cylindrical( RT.H_r_EUV2, RT.H_Z_EUV2, A_r, A_Z, RT.Lum_EUV2, BC_Z_bot )
-    f_esc_EUV3    = Compute_f_esc_Cylindrical( RT.H_r_EUV3, RT.H_Z_EUV3, A_r, A_Z, RT.Lum_EUV3, BC_Z_bot )
+        # Compute LyC photon number-weighted escape fraction:
+        f_esc_EUV1 = Compute_f_esc_Cylindrical( RT.H_r[iEUV1_RT, :, :],
+                                                RT.H_Z[iEUV1_RT, :, :],
+                                                A_r, A_Z, RT.Lum_EUV1, BC_Z_bot )
+
+        f_esc_EUV2 = Compute_f_esc_Cylindrical( RT.H_r[iEUV2_RT, :, :],
+                                                RT.H_Z[iEUV2_RT, :, :],
+                                                A_r, A_Z, RT.Lum_EUV2, BC_Z_bot )
+
+        f_esc_EUV3 = Compute_f_esc_Cylindrical( RT.H_r[iEUV3_RT, :, :],
+                                                RT.H_Z[iEUV3_RT, :, :],
+                                                A_r, A_Z, RT.Lum_EUV3, BC_Z_bot )
+    end
 
     if RT.dN_dt_LyC > 0.0
         RT.f_esc_LyC  = ( RT.dN_dt_EUV1 * f_esc_EUV1  +  RT.dN_dt_EUV2 * f_esc_EUV2  +  RT.dN_dt_EUV3 * f_esc_EUV3 ) / RT.dN_dt_LyC

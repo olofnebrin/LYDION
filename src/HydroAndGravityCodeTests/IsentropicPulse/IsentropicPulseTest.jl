@@ -25,26 +25,6 @@ function UpdateIsentropicPulseTest!( Δt_Hydro::Float64,
                         ghostgrid::GhostPaddedGrid{Float64}
                           )
 
-    # Main geometry arrays:
-    inv_ΔV      = geometry.inv_ΔV
-    A_X         = geometry.A_X
-    A_Y         = geometry.A_Y
-    inv_r_cell  = geometry.inv_r_cell # Not needed/carries no significance in Cartesian coordinates, except as an argument
-
-    # Weights for converting between cell center & cell-average values of 
-    # conservatives & primitives:
-    w_i_m1_X    = geometry.w_i_m1_X;     w_j_m1_Y     = geometry.w_j_m1_Y
-    w_i_0_X     = geometry.w_i_0_X;      w_j_0_Y      = geometry.w_j_0_Y
-    w_i_p1_X    = geometry.w_i_p1_X;     w_j_p1_Y     = geometry.w_j_p1_Y
-
-    q_i_m1_X    = geometry.q_i_m1_X;     q_j_m1_Y     = geometry.q_j_m1_Y
-    q_i_0_X     = geometry.q_i_0_X;      q_j_0_Y      = geometry.q_j_0_Y
-    q_i_p1_X    = geometry.q_i_p1_X;     q_j_p1_Y     = geometry.q_j_p1_Y
-
-    # WENO3 weights for interface reconstruction:
-    w_plus_i_p1 = geometry.w_plus_i_p1;  w_minus_i_p1 = geometry.w_minus_i_p1   
-    w_plus_j_p1 = geometry.w_plus_j_p1;  w_minus_j_p1 = geometry.w_minus_j_p1
-
     # Hydro state arrays (cell-averaged):
     ρ           = hydrostate.ρ;        ρu_X        = hydrostate.ρu_X 
     ρu_Y        = hydrostate.ρu_Y;     E           = hydrostate.E
@@ -63,15 +43,8 @@ function UpdateIsentropicPulseTest!( Δt_Hydro::Float64,
     #######                                                 #######
     ###############################################################
 
-    # Update hydro variables by advection: 
-    UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, inv_ΔV, A_X, A_Y, 
-
-                  w_i_m1_X, w_i_0_X, w_i_p1_X, w_j_m1_Y, w_j_0_Y, w_j_p1_Y, 
-                  q_i_m1_X, q_i_0_X, q_i_p1_X, q_j_m1_Y, q_j_0_Y, q_j_p1_Y,  
-
-                  w_plus_i_p1, w_minus_i_p1,  w_plus_j_p1, w_minus_j_p1,
-
-                  Val(:Cartesian), inv_r_cell )  
+    # Update hydro variables by advection:
+    UpdateHydro!( Δt_Hydro, hydrostate, ghostgrid, geometry )    
 
     # Update primitives to reflect latest conservatives,
     # so that we can set the CFL time-step for the scalar advection:
@@ -138,10 +111,14 @@ function SetupIsentropicPulseTest(tmax::Float64,
         print("\r\033[KInitialising hydro arrays..."); flush(stdout)
     end 
 
-    N_Scalars = 0  # We have no passive scalars
+    # We have no passive scalars, and we set # of dust bins to minimum 
+    # value (1):
+    N_Scalars = 0
+    N_dust    = 1
     
     # Set up hydro state + ghost grid arrays:
-    hydrostate, ghostgrid = GenerateHydroArrays( X, XCoM, Y, YCoM, 5 / 3, N_Scalars,
+    hydrostate, ghostgrid = GenerateHydroArrays( X, XCoM, Y, YCoM, 
+                                                 5 / 3, N_dust, N_Scalars,
                                                  :Reflect, :Reflect,   # Reflective BCs in X 
                                                  :Reflect, :Reflect    # Reflective BCs in Y 
                                                   )
@@ -172,7 +149,7 @@ function SetupIsentropicPulseTest(tmax::Float64,
             γad[i,j] = γ
 
             # Set the initial density and pressure
-            ρ[i,j]   = 1 + 0.4 * exp( - 80 * ((XCoM[i] - Xc)^2 + (YCoM[j] - Yc)^2) )
+            ρ[i,j]   = 1  +  3.0 * exp( - 80 * ((XCoM[i] - Xc)^2 + (YCoM[j] - Yc)^2) )
             P[i,j]   = ρ[i,j]^γ 
             
             # Gas energy (no initial kinetic energy):
@@ -214,7 +191,7 @@ function SetupIsentropicPulseTest(tmax::Float64,
     while t < tmax
 
         # Hydro CFL time-step:
-        Δt_CFL   = GetCFLTimeStep( X, Y, ρ, P, u_X, u_Y, ud_X, ud_Y, γad )  
+        Δt_CFL = GetCFLTimeStep( hydrostate, geometry )  
 
         # Set hydro time-step:
         Δt_Hydro = min( 1.25 * Δt_Hydro, Δt_CFL, Δt_Resolve, tmax - t )

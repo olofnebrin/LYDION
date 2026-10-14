@@ -20,7 +20,10 @@ import cmastro
 
 # ---------------- user inputs ----------------
 #filename = "IdealizedRHDSim_Turbulence_false_Lya_64x64_2026-04-07.h5"     
-filename = "RHDSim_NoLya_256x512_2026-04-13.h5" 
+#filename = "RHDSim_SingleStar_NoLya_128x128_uRMS8kmsD0.001_2026-04-28.h5"
+#filename = "RHDSim_StarCluster_Lya_512x512_2026-04-19.h5"
+filename = "RHDSim_NoLya_128x256_2026-07-04.h5"
+#filename = "RHDSim_SingleStar_NoLya_u8_256x256_2026-05-02.h5"
 frameskip = 1                 
 save_mp4 = True               
 outname = "density_T.mp4"
@@ -45,11 +48,15 @@ with h5py.File(filename, "r") as f:
     Trad_hist     = f["Trad_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xH2_hist      = f["xH2_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xHII_hist     = f["xHII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xHeII_hist    = f["xHeII_History"][:]                  # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xHeIII_hist   = f["xHeIII_History"][:]                 # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xCI_hist      = f["xCI_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xCII_hist     = f["xCII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xCO_hist      = f["xCO_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xOI_hist      = f["xOI_History"][:]                    # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     xOII_hist     = f["xOII_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xOIII_hist    = f["xOIII_History"][:]                  # (Nt, Nr, Nz) or (Nt, Nz, Nr)
+    xOIV_hist     = f["xOIV_History"][:]                   # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     Zgr_Sil_hist  = f["Zgr_Sil_History"][:]                # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     Zgr_C_hist    = f["Zgr_C_History"][:]                  # (Nt, Nr, Nz) or (Nt, Nz, Nr)
     Zgr_PAH_hist  = f["Zgr_PAH_History"][:]                # (Nt, Nr, Nz) or (Nt, Nz, Nr)
@@ -58,8 +65,8 @@ with h5py.File(filename, "r") as f:
 
 
 xHI_hist  = 1.0 - 2.0 * xH2_hist - xHII_hist
-#rhod_hist = rhod_Sil_hist + rhod_C_hist + rhod_PAH_hist 
-rhod_hist = rhod_Sil_hist 
+rhod_hist = rhod_Sil_hist + rhod_C_hist + rhod_PAH_hist 
+#rhod_hist = rhod_Sil_hist 
 
 # shapes (needed by ensure_NtNrNz)
 Nt_raw, a1_rho, a2_rho = rho_hist.shape
@@ -137,7 +144,7 @@ nH_hist = X * rho_hist / mH   # (Nt, Nr, Nz)
 R, ZZ = np.meshgrid(r/pc, Z/pc, indexing='ij')
 
 # display ranges
-vmin_nH, vmax_nH = 1e2, 1e8
+vmin_nH, vmax_nH = 100, 1e6
 norm_nH = LogNorm(vmin=vmin_nH, vmax=vmax_nH)
 
 vmin_T, vmax_T = 1, 1e5
@@ -147,6 +154,7 @@ vmin_DG, vmax_DG = 0.1, 10
 norm_DG = LogNorm(vmin=vmin_DG, vmax=vmax_DG)
 
 vmin_x, vmax_x = 1e-8, 1.0
+#vmin_x, vmax_x = 0.01, 1.0
 norm_x = LogNorm(vmin=vmin_x, vmax=vmax_x)
 
 # --- figure with 2x2 layout ---
@@ -165,11 +173,11 @@ ax3.tick_params(labelbottom=False)
 ax1.set_ylabel("Z (pc)", labelpad=12)
 im_nH = ax1.pcolormesh(R, ZZ, nH_hist[0].T, norm=norm_nH, shading='auto', cmap='cma:laguna')
 cb1 = fig.colorbar(im_nH, ax=ax1, pad=0.02)
-cb1.set_ticks([1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8])
-#cb1.set_ticks([10, 1e3, 1e5])
-cb1.set_ticklabels(['10$^{2}$', '10$^{3}$', '10$^{4}$', '10$^{5}$', '10$^{6}$', '10$^{7}$', '10$^{8}$'])
+#cb1.set_ticks([1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8])
+cb1.set_ticks([100, 1e4, 1e6])
+#cb1.set_ticklabels(['10$^{2}$', '10$^{3}$', '10$^{4}$', '10$^{5}$', '10$^{6}$', '10$^{7}$', '10$^{8}$'])
 #cb1.set_ticklabels(['10$^{4}$', '10$^{6}$', '10$^{8}$'])
-#cb1.set_ticklabels(['10', '10$^{3}$', '10$^{5}$'])
+cb1.set_ticklabels(['10$^{2}$', '10$^{4}$', '10$^{6}$'])
 panel_label_style = dict(ha='right', va='top', color='black',
                          path_effects=[pe.withStroke(linewidth=3, foreground='white')])
 ax1.text(0.9, 0.2, "n$_{H}$ (cm$^{-3}$)", transform=ax1.transAxes, **panel_label_style)
@@ -222,6 +230,7 @@ def init():
     im_nH.set_array(nH_hist[k0].T.ravel())
     im_T.set_array(T_hist[k0].T.ravel())
     im_xH2.set_array(np.clip(DG_hist[k0].T, vmin_DG, vmax_DG).ravel())
+    #im_xHII.set_array(np.clip(xHII_hist[k0].T, vmin_x, vmax_x).ravel())
     im_xHII.set_array(np.clip(xHII_hist[k0].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k0]/kyr:.2f} kyr")
     return im_nH, im_T, im_xH2, im_xHII, txt
@@ -230,6 +239,7 @@ def update(k):
     im_nH.set_array(nH_hist[k].T.ravel())
     im_T.set_array(T_hist[k].T.ravel())
     im_xH2.set_array(np.clip(DG_hist[k].T, vmin_DG, vmax_DG).ravel())
+    #im_xHII.set_array(np.clip(xHII_hist[k].T, vmin_x, vmax_x).ravel())
     im_xHII.set_array(np.clip(xHII_hist[k].T, vmin_x, vmax_x).ravel())
     txt.set_text(f"t = {t[k]/kyr:.2f} kyr")
     return im_nH, im_T, im_xH2, im_xHII, txt

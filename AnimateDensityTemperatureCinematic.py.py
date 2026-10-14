@@ -30,8 +30,8 @@ from PlotCosmetics import (
 )
 
 # ---------------- user inputs ----------------
-#filename    = "RHDSim_NoLya_512x1024_2026-02-10.h5"
-filename    = "RHDSim_NoLya_256x512_2026-04-13.h5" 
+filename    = "RHDSim_NoLya_512x1024_2026-07-09.h5"
+#filename    = "RHDSim_NoLya_768x1536_2026-07-05.h5" 
 frameskip   = 1
 save_mp4    = True
 outname     = "density_temperature_cinematic_2panel.mp4"
@@ -39,7 +39,7 @@ fps         = 20
 dpi         = 300
 
 # view half-size (pc)
-half_pc     = 1.0
+half_pc     = 2.0
 
 # scale bar
 scalebar_pc = 0.5
@@ -48,7 +48,7 @@ scalebar_pc = 0.5
 midplane_symmetry = False   # True => center at z=0 ; False => center at z=Zmax/2
 
 # pretty mirroring options
-mirror_r = False            # show ±r
+mirror_r = True            # show ±r
 mirror_z = False            # show ±z
 
 
@@ -213,8 +213,8 @@ for ax in (axL, axR):
 # --- star marker on both ---
 star_r_pc = 0.0 if mirror_r else 0.0 + 0.002 * ax_xlim[1]  # Small offset if not mirrored to avoid sitting on the edge
 star_z_pc = 0.0 if midplane_symmetry else z_center
-AddStar(axL, star_r_pc, star_z_pc, size=300)
-AddStar(axR, star_r_pc, star_z_pc, size=300)
+AddStar(axL, star_r_pc, star_z_pc, size=100)
+AddStar(axR, star_r_pc, star_z_pc, size=100)
 
 # initial frame
 k0 = frames[0]

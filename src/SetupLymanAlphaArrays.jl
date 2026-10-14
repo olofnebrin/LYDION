@@ -20,10 +20,15 @@ function GenerateLyαArrays( c_Lyα::Float64,
                                 T::AbstractArray{Float64, 2}, # Array of gas temperatures (only sets initial Hvoigt values)
                            Recoil::Bool    = true,            # Atomic recoil (on if true, off if false)
                    LyαDestruction::Bool    = true,            # Lyα destruction, pd > 0 (on if true, off if false)
-                             Tmin::Float64 = 30.0             # Temperature which sets Doppler width resolution near line center (default = 30 K)
+                             Tmin::Float64 = 30.0,            # Temperature which sets Doppler width resolution near line center (default = 30 K)
+                           q_fine::Float64 = 1.1,             # Fine bins grow by a factor q_fine going to larger x 
+                           q_wing::Float64 = q_fine,          # Coarse bins in the wings grow by a factor q_wing going to larger x 
+                              HLL::Bool    = false            # Flux method for Lyα M1 transport (HLL if true, GLF if false)
                              )
 
     N_r, N_Z = size( T )
+
+    @assert q_fine ≥ 1.0 && q_wing ≥ 1.0 "q_fine = $(q_fine) and q_wing = $(q_wing). They should be ≥ 1.0."
 
     ###############################################################
     #######                                                 #######
@@ -32,8 +37,6 @@ function GenerateLyαArrays( c_Lyα::Float64,
     ###############################################################
     # The code below sets up the frequency bins/grid for Lyα
 
-    q_fine          = 1.1           # Fine bins grow by a factor q_fine going to larger x 
-    q_wing          = 1.1           # Coarse bins in the wings grow by a factor q_wing going to larger x 
     x_fine_max_3e4  = 5.0           # Fine region near core extends out to ν = x_fine_max × ΔνD(3 × 10⁴ K)
     x_max           = 1e5           # Bins extend out to |ν - νLyα| = x_max × ΔνD(Tmin)
 
@@ -122,7 +125,7 @@ function GenerateLyαArrays( c_Lyα::Float64,
     inv_ΔνD .= 1.0 ./ ΔνD
 
     # Get Voigt profile for each cell:
-    Hvoigt   = zeros( N_r, N_Z, N_ν )               # Initialize Hvoigt
+    Hvoigt   = zeros( N_ν, N_r, N_Z )               # Initialize Hvoigt
     Update_Hvoigt!( Hvoigt, δν, δνC, a, inv_ΔνD )   # Compute & fill the array with values
 
     # Save ~ core region for 3 × 10⁴ K, for fall-back use in advection,
@@ -143,33 +146,28 @@ function GenerateLyαArrays( c_Lyα::Float64,
 
     # Get number of threads, for determining the size of the scratch 
     # arrays for the interface fluxes:
-    nthreads   = Threads.maxthreadid()
+    # nthreads   = Threads.maxthreadid() NOTE: Not needed anymore for new layout J[k,i,j]
 
     # Convenient arrays: 
-    zeros_c()  = zeros( Float64, N_r,   N_Z,   N_ν )
-    zeros_rf() = zeros( Float64, N_r+1, N_Z,   nthreads )  # For r-interface fluxes 
-    zeros_zf() = zeros( Float64, N_r,   N_Z+1, nthreads )  # For Z-interface fluxes 
+    zeros_c()  = zeros( Float64, N_ν, N_r,   N_Z )
+    zeros_rf() = zeros( Float64, N_ν, N_r+1, N_Z )  # For r-interface fluxes 
+    zeros_zf() = zeros( Float64, N_ν, N_r,   N_Z+1 )  # For Z-interface fluxes 
 
-    # Intensities (latest & old, and stage values for RK2) for all bands: 
+    # Intensities (latest & old, and stage values for RK2) for all bins: 
     J_Lyα  = zeros_c();  J_Lyα_old  = zeros_c()
 
     # Lyα energy density:
     e_Lyα  = zeros( Float64, N_r, N_Z )
 
-    # H ≡ ∫dΩ I n̂ / 4π arrays for all bands:
+    # H ≡ ∫dΩ I n̂ / 4π arrays for all bins:
     H_r_Lyα      = zeros_c();  H_Z_Lyα     = zeros_c()
     H_r_Lyα_old  = zeros_c();  H_Z_Lyα_old = zeros_c()
-
-    # Eddington tensor components (Float32 to save memory):
-    D_rr_Lyα  = fill( Float32(1/3), N_r, N_Z, N_ν )
-    D_ZZ_Lyα  = fill( Float32(1/3), N_r, N_Z, N_ν )
-    D_rZ_Lyα  = zeros( Float32,     N_r, N_Z, N_ν )
 
     # ϕϕ-component of radiation pressure tensor K = D × J at interfaces, 
     # needed for geometric source term (scratch arrays of reduced size to 
     # save memory):
-    K_ϕϕ_iphalf_Lyα = zeros( Float64, N_r, N_Z, nthreads )
-    K_ϕϕ_imhalf_Lyα = zeros( Float64, N_r, N_Z, nthreads )
+    K_ϕϕ_iphalf_Lyα = zeros( Float64, N_ν, N_r, N_Z )
+    K_ϕϕ_imhalf_Lyα = zeros( Float64, N_ν, N_r, N_Z )
 
     # Interface fluxes (scratch arrays of reduced size 
     # to save memory): 
@@ -219,9 +217,16 @@ function GenerateLyαArrays( c_Lyα::Float64,
     L_Lyα::Float64           = 0.0
     f_esc_Lyα::Float64       = 0.0
 
+    # Flux method for M1 transport:
+    if HLL
+        FluxMethod = Val(:HLL)
+    else
+        FluxMethod = Val(:GLF)
+    end
+
     return LyαArrays( c_Lyα, J_Lyα, J_Lyα_old, e_Lyα,
                       H_r_Lyα, H_Z_Lyα, H_r_Lyα_old, H_Z_Lyα_old, 
-                      D_rr_Lyα, D_ZZ_Lyα, D_rZ_Lyα, K_ϕϕ_iphalf_Lyα, K_ϕϕ_imhalf_Lyα, 
+                      K_ϕϕ_iphalf_Lyα, K_ϕϕ_imhalf_Lyα, 
                       F_r_Lyα, F_Z_Lyα, F_r_Hr_Lyα, F_Z_Hr_Lyα, F_r_HZ_Lyα, F_Z_HZ_Lyα, 
                       α_Lyα, α_F_Lyα, αc_Lyα, pd, ∫dν_js_Lyα, Hvoigt, ϕ_ν, Fij_kp, Fij_k, Fij_km, 
                       ν, νC, Δν, δν, δνC, inv_Δν, inv_νC, 
@@ -230,7 +235,8 @@ function GenerateLyαArrays( c_Lyα::Float64,
                       Recoil, LyαDestruction, α_Lyα_floor, Δρu_Lyα_r, Δρu_Lyα_Z, f_Lyα_r, f_Lyα_Z,
                       M_F, M_F_radial_net, M_F_radial_out, M_F_antigravity, 
                       L_Lyα, f_esc_Lyα,
-                      N_ν, dN_ν, dN_ν_int )
+                      N_ν, dN_ν, dN_ν_int,
+                      FluxMethod )
 end
 
 
@@ -244,7 +250,8 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
                                           Z::AbstractArray{Float64, 1},
                                           T::AbstractArray{Float64, 2}, # Array of gas temperatures (only sets initial Hvoigt values)
                                      Recoil::Bool    = true,            # Atomic recoil (on if true, off if false)
-                             LyαDestruction::Bool    = true             # Lyα destruction, pd > 0 (on if true, off if false)
+                             LyαDestruction::Bool    = true,            # Lyα destruction, pd > 0 (on if true, off if false)
+                                        HLL::Bool    = false   # Flux method for Lyα M1 transport (HLL if true, GLF if false)
                                      )
     
     N_ν = length( ν ) - 1
@@ -276,7 +283,7 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
     inv_ΔνD .= 1.0 ./ ΔνD
 
     # Get Voigt profile for each cell:
-    Hvoigt = zeros( N_r, N_Z, N_ν )                 # Initialize Hvoigt
+    Hvoigt = zeros( N_ν, N_r, N_Z )                 # Initialize Hvoigt
     Update_Hvoigt!( Hvoigt, δν, δνC, a, inv_ΔνD )   # Compute & fill the array with values
 
     # Save ~ core region for 3 × 10⁴ K, for fall-back use in advection,
@@ -295,35 +302,26 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
     #######                                                 #######
     ###############################################################
 
-    # Get number of threads, for determining the size of the scratch 
-    # arrays for the interface fluxes:
-    nthreads   = Threads.maxthreadid()
-
     # Convenient arrays: 
-    zeros_c()  = zeros( Float64, N_r,   N_Z,   N_ν )
-    zeros_rf() = zeros( Float64, N_r+1, N_Z,   nthreads )  # For r-interface fluxes 
-    zeros_zf() = zeros( Float64, N_r,   N_Z+1, nthreads )  # For Z-interface fluxes 
+    zeros_c()  = zeros( Float64, N_ν, N_r,   N_Z )
+    zeros_rf() = zeros( Float64, N_ν, N_r+1, N_Z )  # For r-interface fluxes 
+    zeros_zf() = zeros( Float64, N_ν, N_r,   N_Z+1 )  # For Z-interface fluxes 
 
-    # Intensities (latest & old, and stage values for RK2) for all bands: 
+    # Intensities (latest & old, and stage values for RK2) for all bins: 
     J_Lyα  = zeros_c();  J_Lyα_old  = zeros_c()
 
     # Lyα energy density:
     e_Lyα  = zeros( Float64, N_r, N_Z )
 
-    # H ≡ ∫dΩ I n̂ / 4π arrays for all bands:
+    # H ≡ ∫dΩ I n̂ / 4π arrays for all bins:
     H_r_Lyα      = zeros_c();  H_Z_Lyα     = zeros_c()
     H_r_Lyα_old  = zeros_c();  H_Z_Lyα_old = zeros_c()
-
-    # Eddington tensor components (Float32 to save memory):
-    D_rr_Lyα  = fill( Float32(1/3), N_r, N_Z, N_ν )
-    D_ZZ_Lyα  = fill( Float32(1/3), N_r, N_Z, N_ν )
-    D_rZ_Lyα  = zeros( Float32,     N_r, N_Z, N_ν )
 
     # ϕϕ-component of radiation pressure tensor K = D × J at interfaces, 
     # needed for geometric source term (scratch arrays of reduced size to 
     # save memory):
-    K_ϕϕ_iphalf_Lyα = zeros( Float64, N_r, N_Z, nthreads )
-    K_ϕϕ_imhalf_Lyα = zeros( Float64, N_r, N_Z, nthreads )
+    K_ϕϕ_iphalf_Lyα = zeros( Float64, N_ν, N_r, N_Z )
+    K_ϕϕ_imhalf_Lyα = zeros( Float64, N_ν, N_r, N_Z )
 
     # Interface fluxes (scratch arrays of reduced size 
     # to save memory): 
@@ -373,9 +371,16 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
     L_Lyα::Float64           = 0.0
     f_esc_Lyα::Float64       = 0.0
 
+    # Flux method for M1 transport:
+    if HLL
+        FluxMethod = Val(:HLL)
+    else
+        FluxMethod = Val(:GLF)
+    end
+
     return LyαArrays( c_Lyα, J_Lyα, J_Lyα_old, e_Lyα,
                       H_r_Lyα, H_Z_Lyα, H_r_Lyα_old, H_Z_Lyα_old, 
-                      D_rr_Lyα, D_ZZ_Lyα, D_rZ_Lyα, K_ϕϕ_iphalf_Lyα, K_ϕϕ_imhalf_Lyα, 
+                      K_ϕϕ_iphalf_Lyα, K_ϕϕ_imhalf_Lyα, 
                       F_r_Lyα, F_Z_Lyα, F_r_Hr_Lyα, F_Z_Hr_Lyα, F_r_HZ_Lyα, F_Z_HZ_Lyα, 
                       α_Lyα, α_F_Lyα, αc_Lyα, pd, ∫dν_js_Lyα, Hvoigt, ϕ_ν, Fij_kp, Fij_k, Fij_km, 
                       ν, νC, Δν, δν, δνC, inv_Δν, inv_νC, 
@@ -384,5 +389,6 @@ function GenerateLyαArrays_FromSaved( c_Lyα::Float64,
                       Recoil, LyαDestruction, α_Lyα_floor, Δρu_Lyα_r, Δρu_Lyα_Z, f_Lyα_r, f_Lyα_Z,
                       M_F, M_F_radial_net, M_F_radial_out, M_F_antigravity, 
                       L_Lyα, f_esc_Lyα,
-                      N_ν, dN_ν, dN_ν_int )
+                      N_ν, dN_ν, dN_ν_int,
+                      FluxMethod )
 end

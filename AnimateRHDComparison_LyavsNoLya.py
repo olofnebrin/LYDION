@@ -17,8 +17,9 @@ sys.path.insert(0, str(cmastro_src))
 import cmastro
 
 # ---------------- user inputs ----------------
-filename_noLya = "RHDSim_StarCluster_NoLya_128x128_2026-04-16.h5"    # Run ignoring Lyα feedback
-filename_Lya   = "RHDSim_StarCluster_Lya_128x128_2026-04-16.h5"      # Run with Lyα feedback
+filename_noLya = "RHDSim_SingleStar_NoLya_128x128_uRMS8kmsD0.001_2026-04-28.h5"    # Run ignoring Lyα feedback
+filename_Lya   = "RHDSim_Lya_128x128_2026-04-28.h5"      # Run with Lyα feedback
+#filename_Lya   = "RHDSim_SingleStar_Lya_128x128_uRMS8kmsD0.001_2026-04-28.h5"      # Run with Lyα feedback
 
 frameskip = 1                  # use >1 to skip frames
 save_mp4  = True               # True to save mp4 instead of interactive show

@@ -4,8 +4,11 @@ module FastInterpolations
 
     PURPOSE: Contains code for creating fast/optimized linear look-up tables (LUTs) for
              special or expensive functions like Dawson(x), exp(-x²), that enter the 
-             calculation of the Voigt profile. This can greatly speed up the calculations 
-             when these functions are called for many cells, bins, over many time-steps.
+             calculation of the Voigt profile, the third moment L for the Doppler shifts of H,
+             and Planck-mean dust opacities.
+             
+             This can greatly speed up the calculations when these functions are called for many cells, 
+             bins, over many time-steps.
 
 """
 
@@ -13,8 +16,10 @@ __precompile__()
 
 using SpecialFunctions  # For Dawson integral, erf, etc.
 
-export CreateVoigtLUTs, DawsonFast, ErfFast, GaussianFast, 
-       xGaussianFast, OneMinusx2GaussianFast
+export LinearLUT, CreateVoigtLUTs, DawsonFast, ErfFast, GaussianFast, 
+       xGaussianFast, OneMinusx2GaussianFast, 
+       CreateM1ThirdMomentLUTs, ϕ1ϕ2Fast, M1ThirdMomentLUTs,
+       CreateLUTFromData, EvaluateLUTFlat
 
 
 """ A struct for a general linear look-up table. """
@@ -34,6 +39,13 @@ struct VoigtLUTs
     Gaussian_LUT::LinearLUT            # For exp(-x²)
     xGaussian_LUT::LinearLUT           # For x × exp(-x²)
     OneMinusx2Gaussian_LUT::LinearLUT  # For (1 - 2x²) × exp(-x²)
+end
+
+""" A struct containing LUTs for the M1 third moment closure functions 
+    ϕ₁(f) and ϕ₂(f), from Vaytet et al. (2011). """
+struct M1ThirdMomentLUTs
+    ϕ1_LUT::LinearLUT
+    ϕ2_LUT::LinearLUT
 end
 
 
@@ -98,6 +110,66 @@ end
         return y
     end # End of inbounds 
 end
+
+
+""" This function creates a LUT from already tabulated data y(x).
+
+    NOTE: Assumes x is approximately uniformly spaced. For dust opacity tables, 
+    use x = log10.(T), not x = T.
+    Uses the first and last x-values to define the spacing, which is robust to 
+    small file-output rounding. """
+function CreateLUTFromData( x::Vector{Float64},
+                            y::Vector{Float64} )
+
+    Nx = length(x)
+
+    @assert Nx ≥ 2
+    @assert length(y) == Nx
+    @assert x[end] > x[1]
+
+    # Spacing and its inverse, assuming uniform spacing:
+    Δx     = ( x[end] - x[1] ) / ( Nx - 1 )
+    inv_Δx = 1.0 / Δx
+
+    return LinearLUT( x[1], inv_Δx, y, Nx )
+end
+
+
+""" This function evaluates a LUT at x, with flat extrapolation. """
+@inline function EvaluateLUTFlat( LUT::LinearLUT, x::Float64 )
+
+    @inbounds begin
+        # Load look-up table & its length:
+        y_LUT   = LUT.y
+        Nx      = LUT.Nx
+
+        # Get x̃ = (x - xmin) / Δx:
+        x̃       = ( x - LUT.xmin ) * LUT.inv_Δx 
+
+        # Flat extrapolation:
+        if x̃ ≤ 0.0
+            return y_LUT[1]
+        elseif x̃ ≥ Nx - 1
+            return y_LUT[Nx]
+        end
+
+        # Convert to closest lower index i (0-based):
+        i       = Int( floor(x̃) ) 
+
+        # Distance from x̃ to i + 1 is:
+        δx̃      = (i + 1) - x̃
+
+        # Convert to 1-based system of Julia:
+        i_Julia = i + 1   
+
+        # Linear weighting (NOTE: δx̃ is ∈ [0, 1]) to 
+        # get y(x):
+        @fastmath y =  δx̃ * y_LUT[i_Julia]  +  (1.0 - δx̃) * y_LUT[i_Julia+1]
+
+        return y
+    end # End of inbounds 
+end
+
 
 
 const xmax_Voigt::Float64 = 1000.0
@@ -199,6 +271,110 @@ end
     else
         return EvaluateLUT( V.OneMinusx2Gaussian_LUT, x )
     end
+end
+
+
+""" The function ϕ1 of Vaytet+ (2011). Uses BigFloat to avoid 
+    large errors from cancellations. """
+@inline function ϕ1_Vaytet_BigFloat( f::BigFloat )
+
+    # Powers:
+    f2 = f  * f
+    f3 = f2 * f
+    f4 = f2 * f2
+    f5 = f4 * f
+
+    a  = sqrt( BigFloat(4) -  BigFloat(3) * f2 )
+
+    logterm = log( (f -  BigFloat(2) + a) / (f +  BigFloat(2) - a) )
+
+    prefac  = (f -  BigFloat(2) + a) * (f +  BigFloat(2) - a) / ( BigFloat(4) * f * (a -  BigFloat(2))^5)
+
+    bracket = (  BigFloat(12) * logterm * (f4 +  BigFloat(2)*a*f2 -  BigFloat(7)*f2 -  BigFloat(4)*a +  BigFloat(8)) +
+                 BigFloat(48)*f3 -  BigFloat(9)*a*f3 -  BigFloat(80)*f +  BigFloat(40)*a*f )
+
+    return prefac * bracket
+end
+
+
+""" The function ϕ1 of Vaytet+ (2011). """
+@inline function ϕ1_Vaytet_Exact( f::Float64 )
+
+    # Return limits near edge values, to avoid e.g. division by 0:
+    if f ≤ 1e-8
+        return 0.2  # 1 / 5
+    elseif f ≥ 1.0 - 1e-8
+        return 0.0
+    end
+    
+    return Float64( ϕ1_Vaytet_BigFloat( BigFloat(f) ) )
+end
+
+
+""" The function ϕ2 of Vaytet+ (2011). Uses BigFloat to avoid 
+    large errors from cancellations. """
+@inline function ϕ2_Vaytet_BigFloat( f::BigFloat )
+
+    # Powers:
+    f2 = f  * f
+    f3 = f2 * f
+    f4 = f2 * f2
+    f5 = f4 * f
+    f6 = f3 * f3
+
+    a  = sqrt( BigFloat(4) - BigFloat(3) * f2 )
+
+    logterm = log( (f - BigFloat(2) + a) / (f + BigFloat(2) - a) )
+
+    prefac  = BigFloat(1) / ( f3 * (a - BigFloat(2))^5 )
+
+    bracket = ( BigFloat(60) * logterm * ( -f6 + BigFloat(15)*f4 - BigFloat(3)*a*f4 + BigFloat(15)*a*f2
+                                - BigFloat(42)*f2 - BigFloat(16)*a + BigFloat(32) ) +
+                BigFloat(54)*a*f5 - BigFloat(465)*f5 - BigFloat(674)*a*f3 + BigFloat(2140)*f3 +
+                BigFloat(1056)*a*f - BigFloat(2112)*f )
+
+    return prefac * bracket
+end
+
+
+""" The function ϕ2 of Vaytet+ (2011). Uses BigFloat to avoid 
+    large errors from cancellations. """
+@inline function ϕ2_Vaytet_Exact( f::Float64 )
+
+    # Return limits near edge values, to avoid e.g. division by 0:
+    if f ≥ 1.0 - 1e-8
+        return 1.0
+    end
+
+    f = max( f, 1e-4 )  # Handle approach to f = 0, where ϕ2 approaches a constant (Vaytet+ 2011, Fig. 1)
+
+    return Float64( ϕ2_Vaytet_BigFloat( BigFloat(f) ) )
+end
+
+
+const Nϕ_M1::Int = 512
+
+function CreateM1ThirdMomentLUTs( Nϕ::Int = Nϕ_M1 )
+
+    @assert Nϕ ≥ 2
+
+    ϕ1_LUT = CreateLUT( ϕ1_Vaytet_Exact, 0.0, 1.0, Nϕ )
+    ϕ2_LUT = CreateLUT( ϕ2_Vaytet_Exact, 0.0, 1.0, Nϕ )
+
+    return M1ThirdMomentLUTs( ϕ1_LUT, ϕ2_LUT )
+end
+
+
+""" A fast evaluation of the messy functions ϕ1 and ϕ2 of Vaytet+ (2011), needed 
+    to evaluate the third moment L in the M1 moment method. """
+@inline function ϕ1ϕ2Fast( f::Float64, M1LUTs::M1ThirdMomentLUTs )
+
+    f  = clamp( f, 0.0, 1.0 )
+
+    ϕ1 = EvaluateLUT( M1LUTs.ϕ1_LUT, f )
+    ϕ2 = EvaluateLUT( M1LUTs.ϕ2_LUT, f )
+
+    return ϕ1, ϕ2
 end
 
 

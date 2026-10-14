@@ -41,7 +41,7 @@ function UpdateVoigtAndEmissionProfile!( Lyα::LyαArrays,                 # The
         end
     end
 
-    # Update Hvoigt[i,j,k] for every cell:
+    # Update Hvoigt[k,i,j] for every cell:
     Update_Hvoigt!( Lyα.Hvoigt, Lyα.δν, Lyα.δνC, Lyα.a, Lyα.inv_ΔνD )
 
     # Update the normalized emission line profile ϕ_ν for every cell:
@@ -51,6 +51,11 @@ function UpdateVoigtAndEmissionProfile!( Lyα::LyαArrays,                 # The
 end
 
 
+const OneMinusϕ_L_Pmax::Float64       = exp( - Pmax )
+const χ_L_Pmax::Float64               = ( 1.0 - OneMinusϕ_L_Pmax ) / Pmax
+const OneMinusϕ_L_minus_Pmax::Float64 = exp( Pmax )
+const χ_L_minus_Pmax::Float64         = ( 1.0 - OneMinusϕ_L_minus_Pmax ) / ( - Pmax )
+
 """ This function evaluates:
 
     1 - (ϕ^L)(P) =  exp( - P ) 
@@ -58,7 +63,15 @@ end
     
     These are needed for the frequency leakage coefficients. """
 @inline function OneMinusϕ_L_and_χ_L( P::Float64 )
-    if abs(P) < Pmin
+
+    # Exit early near the maximum (in magnitude) values of P:
+    if P ≥ Pmax 
+        return OneMinusϕ_L_Pmax, χ_L_Pmax
+    elseif P ≤ - Pmax
+        return OneMinusϕ_L_minus_Pmax, χ_L_minus_Pmax
+    end
+
+    if abs(P) < Pmin 
         # Second-order Taylor expansion of exp(-P):
         OneMinusϕ_L = @fastmath( 1.0  -  P  +  0.5 * ( P * P ) )
 
@@ -79,6 +92,11 @@ end
 end
 
 
+const OneMinusϕ_R_Pmax::Float64       = exp( Pmax )
+const χ_R_Pmax::Float64               = ( 1.0 - OneMinusϕ_R_Pmax ) / Pmax
+const OneMinusϕ_R_minus_Pmax::Float64 = exp( - Pmax )
+const χ_R_minus_Pmax::Float64         = ( 1.0 - OneMinusϕ_R_minus_Pmax ) / ( - Pmax )
+
 """ This function evaluates:
 
     1 - (ϕ^R)(P) =  exp( P ) 
@@ -86,7 +104,15 @@ end
     
     These are needed for the frequency leakage coefficients. """
 @inline function OneMinusϕ_R_and_χ_R( P::Float64 )
-    if abs(P) < Pmin
+
+    # Exit early near the maximum (in magnitude) values of P:
+    if P ≥ Pmax 
+        return OneMinusϕ_R_Pmax, χ_R_Pmax
+    elseif P ≤ - Pmax
+        return OneMinusϕ_R_minus_Pmax, χ_R_minus_Pmax
+    end
+
+    if abs(P) < Pmin 
         # Second-order Taylor expansion of exp(P):
         OneMinusϕ_R = @fastmath( 1.0  +  P  +  0.5 * ( P * P ) )
 
@@ -111,95 +137,117 @@ end
 const νLyα_over_c::Float64 = νLyα / c
 const h_over_kB::Float64   = h    / kB 
 
-""" This function updates the frequency leakage coefficients (F_{i,j,k}^±, F_{i,j,k})
+""" This function updates the frequency leakage coefficients (F_{k,i,j}^±, F_{k,i,j})
     for each cell. NOTE: Assumes updated values of Hvoigt and emission profile ϕ_ν. """
-@views function UpdateFreqFactors!( Lyα::LyαArrays,                 # The Lyα state/arrays 
-                                      T::AbstractArray{Float64, 2}, # Gas temperature for every cell 
-                                ∂u_r_∂r::AbstractArray{Float64, 2}, # ∂u_r/∂r
-                                ∂u_r_∂Z::AbstractArray{Float64, 2}, # ∂u_r/∂Z
-                                ∂u_Z_∂r::AbstractArray{Float64, 2}, # ∂u_Z/∂r
-                                ∂u_Z_∂Z::AbstractArray{Float64, 2}, # ∂u_Z/∂Z
-                             u_r_over_r::AbstractArray{Float64, 2}, # ⟨u_r / r⟩ 
+function UpdateFreqFactors!( Lyα::LyαArrays,                 # The Lyα state/arrays 
+                               T::AbstractArray{Float64, 2}, # Gas temperature for every cell 
+                         ∂u_r_∂r::AbstractArray{Float64, 2}, # ∂u_r/∂r
+                         ∂u_r_∂Z::AbstractArray{Float64, 2}, # ∂u_r/∂Z
+                         ∂u_Z_∂r::AbstractArray{Float64, 2}, # ∂u_Z/∂r
+                         ∂u_Z_∂Z::AbstractArray{Float64, 2}, # ∂u_Z/∂Z
+                      u_r_over_r::AbstractArray{Float64, 2}, # ⟨u_r / r⟩ 
                                  )
+
     # Get grid size:
     N_r, N_Z = size( T )
+    N_cells  = N_r * N_Z
 
-    # Needed intervals:
-    dN_r     = 1:N_r
-    dN_Z     = 1:N_Z
+    # Needed frequency interval:
+    dN_ν_int    = Lyα.dN_ν_int 
 
-    # Update Eddington factors D to ensure they use the latest values (from post-advection):
-    @threads for k in Lyα.dN_ν
-        Update_D_Edd_Serial!( Lyα.D_rr_Lyα[:,:,k], Lyα.D_ZZ_Lyα[:,:,k], Lyα.D_rZ_Lyα[:,:,k],
-                              Lyα.H_r_Lyα[:,:,k],  Lyα.H_Z_Lyα[:,:,k],  Lyα.J_Lyα[:,:,k] )
-    end
+    # Unpack arrays:
+    J           = Lyα.J_Lyα
+    H_r         = Lyα.H_r_Lyα
+    H_Z         = Lyα.H_Z_Lyα
+
+    Hvoigt      = Lyα.Hvoigt
+    Fij_kp      = Lyα.Fij_kp
+    Fij_km      = Lyα.Fij_km
+    Fij_k       = Lyα.Fij_k
+
+    α_Lyα       = Lyα.α_Lyα
+    ν           = Lyα.ν
+    νC          = Lyα.νC
+    inv_Δν      = Lyα.inv_Δν
+    inv_νC      = Lyα.inv_νC
+    ΔνD         = Lyα.ΔνD
 
     # Recoil setting (true if on, false if off):
-    RECOIL_ON = Lyα.Recoil
+    RECOIL_ON   = Lyα.Recoil
 
-    # Get frequency leakage factors, for all interior bins:
-    @threads :static for k in Lyα.dN_ν_int 
-        # Get intervals:
-        @inbounds δν_kp     = Lyα.νC[k+1] - Lyα.ν[k+1]   # ν̄_{k+1}   - ν_{k+1/2}
-        @inbounds δν_k      = Lyα.ν[k+1]  - Lyα.νC[k]    # ν_{k+1/2} - ν̄_{k}
-        @inbounds δν_km     = Lyα.ν[k]    - Lyα.νC[k-1]  # ν_{k-1/2} - ν̄_{k-1}
+    # Get the opacity floor once:
+    α_Lyα_floor = Lyα.α_Lyα_floor
 
-        # Inverses of Δν and νC are also needed:
-        @inbounds Inv_Δν    = Lyα.inv_Δν[k]
-        @inbounds Inv_νC_k  = Lyα.inv_νC[k]
-        @inbounds Inv_νC_kp = Lyα.inv_νC[k+1]
-        @inbounds Inv_νC_km = Lyα.inv_νC[k-1]
+    @threads for idx in 1:N_cells
+        # Get cell indices from idx:
+        i = ( (idx - 1) % N_r ) + 1
+        j = ( (idx - 1) ÷ N_r ) + 1 
 
-        # Also convenient, for the recoil-related terms:
-        Two_Inv_νC_k        = 2.0 * Inv_νC_k
-        Two_Inv_νC_kp       = 2.0 * Inv_νC_kp
-        Two_Inv_νC_km       = 2.0 * Inv_νC_km 
+        @inbounds begin 
+            # Compute (1/2) α (Δν_D)² and the recoil factor h / kB T:
+            ΔνD_ij        = ΔνD[i,j]
+            PREFACT       = @fastmath 0.5 * max( α_Lyα[i,j], α_Lyα_floor ) * ( ΔνD_ij * ΔνD_ij )  
+            RECOIL_0      = @fastmath h_over_kB / T[i,j]  
 
-        # Get νC[k],νC[k+1], νC[k-1] once:
-        @inbounds νC_k      = Lyα.νC[k]
-        @inbounds νC_kp     = Lyα.νC[k+1]
-        @inbounds νC_km     = Lyα.νC[k-1]
+            # Velocity gradient components needed for each bin:
+            ∂u_r_∂r_ij    = ∂u_r_∂r[i,j] 
+            ∂u_r_∂Z_ij    = ∂u_r_∂Z[i,j]    
+            ∂u_Z_∂r_ij    = ∂u_Z_∂r[i,j]
+            ∂u_Z_∂Z_ij    = ∂u_Z_∂Z[i,j]
+            u_r_over_r_ij = u_r_over_r[i,j]
 
-        # Get the opacity floor once:
-        α_Lyα_floor         = Lyα.α_Lyα_floor
+            @simd for k in dN_ν_int 
 
-        for j in dN_Z
-            @inbounds for i in dN_r 
+                # Get νC[k],νC[k+1], νC[k-1] once:
+                νC_k      = νC[k]
+                νC_kp     = νC[k+1]
+                νC_km     = νC[k-1]
+                
+                # Get intervals:
+                δν_kp     = νC_kp   - ν[k+1]   # ν̄_{k+1}   - ν_{k+1/2}
+                δν_k      = ν[k+1]  - νC_k     # ν_{k+1/2} - ν̄_{k}
+                δν_km     = ν[k]    - νC_km    # ν_{k-1/2} - ν̄_{k-1}
 
-                # Compute (1/2) α (Δν_D)² and the recoil factor h / kB T:
-                ΔνD        = Lyα.ΔνD[i,j]
-                PREFACT    = 0.5 * max( Lyα.α_Lyα[i,j], α_Lyα_floor ) * ( ΔνD * ΔνD )  
-                RECOIL_0   = h_over_kB / T[i,j]                                     
+                # Inverses of Δν and νC are also needed:
+                Inv_Δν_k  = inv_Δν[k]
+                Inv_νC_k  = inv_νC[k]
+                Inv_νC_kp = inv_νC[k+1]
+                Inv_νC_km = inv_νC[k-1]
 
+                # Also convenient, for the recoil-related terms:
+                Two_Inv_νC_k        = @fastmath 2.0 * Inv_νC_k
+                Two_Inv_νC_kp       = @fastmath 2.0 * Inv_νC_kp
+                Two_Inv_νC_km       = @fastmath 2.0 * Inv_νC_km 
+
+                # Update Eddington factors D to ensure they use the latest values (from post-advection):
+                Drr, DZZ, DrZ = Compute_D_Edd( H_r[k,i,j], H_Z[k,i,j], J[k,i,j] )
 
                 # The Doppler factor (D:∇u)/c ( → (∇⋅u)/(3c) for isotropic intensity):
-                Drr        = Float64( Lyα.D_rr_Lyα[i,j,k] )
-                DrZ        = Float64( Lyα.D_rZ_Lyα[i,j,k] )
-                DZZ        = Float64( Lyα.D_ZZ_Lyα[i,j,k] )
-                D_colon_∇u = D_colon_∇u_Cylindrical( Drr,           DrZ,             DZZ,
-                                                     ∂u_r_∂r[i,j],  ∂u_r_∂Z[i,j],    ∂u_Z_∂r[i,j],
-                                                     ∂u_Z_∂Z[i,j],  u_r_over_r[i,j] )
-                VELOCITY   = D_colon_∇u * inv_c 
+                D_colon_∇u = D_colon_∇u_Cylindrical( Drr,         DrZ,           DZZ,
+                                                     ∂u_r_∂r_ij,  ∂u_r_∂Z_ij,    ∂u_Z_∂r_ij,
+                                                     ∂u_Z_∂Z_ij,  u_r_over_r_ij )
+
+                VELOCITY   = @fastmath D_colon_∇u * inv_c 
 
                 # Get K and C:
-                Kkp        = PREFACT  * Lyα.Hvoigt[i, j, k+1]
-                Kk         = PREFACT  * Lyα.Hvoigt[i, j, k]   
-                Kkm        = PREFACT  * Lyα.Hvoigt[i, j, k-1]  
-                Ckp        = VELOCITY * νC_kp 
-                Ck         = VELOCITY * νC_k
-                Ckm        = VELOCITY * νC_km
+                Kkp        = @fastmath PREFACT  * Hvoigt[k+1, i, j]
+                Kk         = @fastmath PREFACT  * Hvoigt[k,   i, j]   
+                Kkm        = @fastmath PREFACT  * Hvoigt[k-1, i, j]  
+                Ckp        = @fastmath VELOCITY * νC_kp 
+                Ck         = @fastmath VELOCITY * νC_k
+                Ckm        = @fastmath VELOCITY * νC_km
 
                 if RECOIL_ON
                     # Add recoil terms:
-                    Ckp   += Kkp * ( RECOIL_0  -  Two_Inv_νC_kp )
-                    Ck    += Kk  * ( RECOIL_0  -  Two_Inv_νC_k ) 
-                    Ckm   += Kkm * ( RECOIL_0  -  Two_Inv_νC_km )
+                    Ckp   += @fastmath Kkp * ( RECOIL_0  -  Two_Inv_νC_kp )
+                    Ck    += @fastmath Kk  * ( RECOIL_0  -  Two_Inv_νC_k ) 
+                    Ckm   += @fastmath Kkm * ( RECOIL_0  -  Two_Inv_νC_km )
                 end
 
                 # GET PECLET NUMBERS:
-                δν_kp_over_Kkp  = δν_kp * inv( Kkp )  # δν_{k+1} / K_{k+1}
-                δν_k_over_Kk    = δν_k  * inv( Kk )   # δν_{k}   / K_{k}
-                δν_km_over_Kkm  = δν_km * inv( Kkm )  # δν_{k-1} / K_{k-1}
+                δν_kp_over_Kkp  = @fastmath δν_kp * inv( Kkp )  # δν_{k+1} / K_{k+1}
+                δν_k_over_Kk    = @fastmath δν_k  * inv( Kk )   # δν_{k}   / K_{k}
+                δν_km_over_Kkm  = @fastmath δν_km * inv( Kkm )  # δν_{k-1} / K_{k-1}
 
                 Pkp             = clamp( Ckp * δν_kp_over_Kkp, minus_Pmax, Pmax )
                 Pk              = clamp( Ck  * δν_k_over_Kk,   minus_Pmax, Pmax )
@@ -211,22 +259,21 @@ const h_over_kB::Float64   = h    / kB
                 OneMinusϕ_R_Pk,  χ_R_Pk  = OneMinusϕ_R_and_χ_R( Pk )
                 OneMinusϕ_L_Pkm, χ_L_Pkm = OneMinusϕ_L_and_χ_L( Pkm )
 
-                # COMPUTE F_{i,j,k}^+:
-                denom_Fij_kp       = Inv_Δν * inv( χ_L_Pk * δν_k_over_Kk  -  χ_R_Pkp * δν_kp_over_Kkp )
-                Lyα.Fij_kp[i,j,k]  = OneMinusϕ_R_Pkp * denom_Fij_kp 
+                # COMPUTE F_{k,i,j}^+:
+                denom_Fij_kp  = @fastmath Inv_Δν_k * inv( χ_L_Pk * δν_k_over_Kk  -  χ_R_Pkp * δν_kp_over_Kkp )
+                Fij_kp[k,i,j] = @fastmath OneMinusϕ_R_Pkp * denom_Fij_kp 
 
-                # COMPUTE F_{i,j,k}^-:
-                denom_Fij_km       = Inv_Δν * inv( χ_L_Pkm * δν_km_over_Kkm  -  χ_R_Pk * δν_k_over_Kk )
-                Lyα.Fij_km[i,j,k]  = OneMinusϕ_L_Pkm * denom_Fij_km 
+                # COMPUTE F_{k,i,j}^-:
+                denom_Fij_km  = @fastmath Inv_Δν_k * inv( χ_L_Pkm * δν_km_over_Kkm  -  χ_R_Pk * δν_k_over_Kk )
+                Fij_km[k,i,j] = @fastmath OneMinusϕ_L_Pkm * denom_Fij_km 
 
-                # COMPUTE F_{i,j,k}:
-                Lyα.Fij_k[i,j,k]   = OneMinusϕ_L_Pk * denom_Fij_kp  +  OneMinusϕ_R_Pk * denom_Fij_km 
+                # COMPUTE F_{k,i,j}:
+                Fij_k[k,i,j]  = @fastmath OneMinusϕ_L_Pk * denom_Fij_kp  +  OneMinusϕ_R_Pk * denom_Fij_km 
 
-            end # End of i-loop 
-        end # End of j-loop 
-    end # End of k-loop (frequency)
+            end # End of k-loop 
+        end # End of inbounds 
+    end # End of cell loop 
 
-
-    return nothing 
+    return nothing
 end
 

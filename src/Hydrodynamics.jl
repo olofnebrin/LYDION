@@ -295,8 +295,9 @@ const inv_Dimensions::Float64 = 1 / 2
 
             # Compute the local CFL time-scale:
             Δx      = min( ΔX, ΔY )
-            Δt_gas  = inv_Dimensions * Δx / ( u + cs )
-            Δt_dust = inv_Dimensions * Δx / ud_max
+            Prefact = inv_Dimensions * Δx
+            Δt_gas  = Prefact / ( u + cs )
+            Δt_dust = Prefact / ud_max
             Δt      = min( Δt_gas, Δt_dust )
             
             if Δt < local_min_ΔtHydro 
@@ -367,8 +368,9 @@ const t_ff0::Float64 = sqrt( 3 * π / (32 * G) )  # Constant for the free-fall t
 end
 
 
-const inv_γmon_m1::Float64 = 1 / ( γmon  -  1 )
-const inv_γdia_m1::Float64 = 1 / ( γdia  -  1 )
+const inv_γmon_m1::Float64     = 1 / ( γmon  -  1 )
+const inv_γdia_m1::Float64     = 1 / ( γdia  -  1 )
+const nHe_nH_Standard::Float64 = Y / (4 * X)         # Standard value of nHe / nH
 
 """ Adiabatic index of the gas, taking into account 
     H₂, approximating γH2 ≈ γdia. For further discussion
@@ -382,7 +384,8 @@ const inv_γdia_m1::Float64 = 1 / ( γdia  -  1 )
 @inline function Getγad( xHII::Float64,
                           xH2::Float64, 
                         xHeII::Float64,
-                       xHeIII::Float64 
+                       xHeIII::Float64,
+            HydrogenAndHelium::Bool = true 
                         )
    
     # Get y(i) = n(i) / nH for i ∈ (H₂, H I, H II)
@@ -390,7 +393,12 @@ const inv_γdia_m1::Float64 = 1 / ( γdia  -  1 )
 
     # Next get y(i) = n(i) / nH for i ∈ (He I, He II, He III).
     # Use nHe / nH = Y/(4 × X)
-    nHe_nH = Y / (4 * X)
+    if HydrogenAndHelium
+        nHe_nH = nHe_nH_Standard
+    else
+        # In some RHD tests we ignore helium: 
+        nHe_nH = 0.0
+    end
     yHeII  = xHeII * nHe_nH
     yHeIII = xHeIII * nHe_nH
     yHeI   = ( 1  -  xHeII  -  xHeIII ) * nHe_nH
@@ -424,7 +432,8 @@ const Δx_Getμ::Float64 = 1e-10  # Constant threshold for considering limiting 
 @inline function Getμ( xHII::Float64, 
                         xH2::Float64, 
                       xHeII::Float64, 
-                     xHeIII::Float64 )
+                     xHeIII::Float64,
+          HydrogenAndHelium::Bool = true )
 
     # For added numerical stability:
     xHII   = clamp( xHII,   Δx_Getμ,      1.0 - Δx_Getμ )
@@ -454,6 +463,13 @@ const Δx_Getμ::Float64 = 1e-10  # Constant threshold for considering limiting 
         # Otherwise use full formulas: 
         x = xHII / ( 1 - 2 * xH2 )
         y = (1 - xHII - 2 * xH2) / (1 - xHII)
+    end
+
+    # In some RHD tests we ignore helium, and so we get (same as end formula, 
+    # but with X = 1, Y = 0):
+    if !HydrogenAndHelium
+        μ   = 4 / ( 2 * (1  +  y  +  2 * x * y) )
+        return μ
     end
 
     ##### H E L I U M #####
@@ -582,18 +598,38 @@ const ϵ_ρGradient_HLL_and_PLM::Float64 = 100.0 # Revert to HLL + PLM if gas/du
             jp1   = min( j + 1, N_Y )
             jm1   = max( j - 1, 1 )
 
+            P_ij    = P[i,j];    ρ_ij    = ρ[i,j]
+            P_ip1_j = P[ip1,j];  ρ_ip1_j = ρ[ip1,j]
+            P_im1_j = P[im1,j];  ρ_im1_j = ρ[im1,j]
+            P_i_jp1 = P[i,jp1];  ρ_i_jp1 = ρ[i,jp1]
+            P_i_jm1 = P[i,jm1];  ρ_i_jm1 = ρ[i,jm1]
+
             # Compute shock indicator:
-            inv_P   = 1 / max( min( P[i,j], P[im1,j], P[ip1,j], P[i,jm1], P[i,jp1] ), P_floor )
-            ΔP      = ( abs( P[ip1,j] - P[im1,j] ) + abs( P[i,jp1] - P[i,jm1] ) ) * inv_P
+            #inv_P   = 1 / max( min( P[i,j], P[im1,j], P[ip1,j], P[i,jm1], P[i,jp1] ), P_floor )
+            #ΔP      = ( abs( P[ip1,j] - P[im1,j] ) + abs( P[i,jp1] - P[i,jm1] ) ) * inv_P
+            inv_P   = 1 / max( min( P_ij, P_im1_j, P_ip1_j, P_i_jm1, P_i_jp1 ), P_floor )
+            ΔP_X    = max( abs(P_ip1_j - P_ij), abs(P_im1_j - P_ij) )
+            ΔP_Y    = max( abs(P_i_jp1 - P_ij), abs(P_i_jm1 - P_ij) )
+            ΔP      = ( ΔP_X  +  ΔP_Y ) * inv_P
 
             # Also take into account strong gradients ρ and ρd:
-            inv_ρ   = 1 / max( min( ρ[i,j], ρ[im1,j], ρ[ip1,j], ρ[i,jm1], ρ[i,jp1] ), ρ_floor )
-            Δρ      = ( abs( ρ[ip1,j] - ρ[im1,j] ) + abs( ρ[i,jp1] - ρ[i,jm1] ) ) * inv_ρ
+            inv_ρ   = 1 / max( min( ρ_ij, ρ_im1_j, ρ_ip1_j, ρ_i_jm1, ρ_i_jp1 ), ρ_floor )
+            Δρ_X    = max( abs(ρ_ip1_j - ρ_ij), abs(ρ_im1_j - ρ_ij) )
+            Δρ_Y    = max( abs(ρ_i_jp1 - ρ_ij), abs(ρ_i_jm1 - ρ_ij) )
+            Δρ      = ( Δρ_X  +  Δρ_Y ) * inv_ρ
 
             Δρd_max = 0.0
             for bin in dN_dust 
-                inv_ρd  = 1 / max( min( ρd[bin,i,j], ρd[bin,im1,j], ρd[bin,ip1,j], ρd[bin,i,jm1], ρd[bin,i,jp1] ), ρd_floor )
-                Δρd     = ( abs( ρd[bin,ip1,j] - ρd[bin,im1,j] ) + abs( ρd[bin,i,jp1] - ρd[bin,i,jm1] ) ) * inv_ρd
+                ρd_ij    = ρd[bin,i,j]
+                ρd_ip1_j = ρd[bin,ip1,j]
+                ρd_im1_j = ρd[bin,im1,j]
+                ρd_i_jp1 = ρd[bin,i,jp1]
+                ρd_i_jm1 = ρd[bin,i,jm1]
+
+                inv_ρd   = 1 / max( min( ρd_ij, ρd_im1_j, ρd_ip1_j, ρd_i_jm1, ρd_i_jp1 ), ρd_floor )
+                Δρd_X    = max( abs(ρd_ip1_j - ρd_ij), abs(ρd_im1_j - ρd_ij) )
+                Δρd_Y    = max( abs(ρd_i_jp1 - ρd_ij), abs(ρd_i_jm1 - ρd_ij) )
+                Δρd      = ( Δρd_X  +  Δρd_Y ) * inv_ρd
 
                 Δρd_max = max( Δρd, Δρd_max )
             end
@@ -2957,6 +2993,47 @@ function UpdateInterfaceValues_Y!( ρ_L_Y::AbstractMatrix{Float64},    # Left in
 end
 
 
+""" Reconstruct the passive scalar concentration x = S / ρ at interface i+1/2,
+    using PLM with a MinMod slope limiter. """
+@inline @fastmath function ReconstructScalarInterface( x_i::Float64, # x in cell i 
+                                                     x_ip1::Float64, # x in cell i+1
+                                                     x_ip2::Float64, # x in cell i+2
+                                                     x_im1::Float64, # x in cell i-1
+
+                                                      Δr_L::Float64, # r_{i+1} - r̄_i
+                                                      Δr_R::Float64,
+
+                                              inv_dr_i_im1::Float64, # 1 / ( r̄_i - r̄_{i-1} )
+                                              inv_dr_ip1_i::Float64, # 1 / ( r̄_{i+1} - r̄_i )
+                                            inv_dr_ip2_ip1::Float64  # 1 / ( r̄_{i+2} - r̄_{i+1} )
+                                                      )
+
+    # Slope-limited derivative in left cell i:
+    ∂x∂r_ip1_i   = (x_ip1 - x_i)   * inv_dr_ip1_i   # (x_{i+1} - x_i) / ( r̄_{i+1} - r̄_i )
+    ∂x∂r_i_im1   = (x_i   - x_im1) * inv_dr_i_im1   # (x_i - x_{i-1}) / ( r̄_i - r̄_{i-1} )
+
+    ∂x∂r_L       = MinMod( ∂x∂r_i_im1, ∂x∂r_ip1_i )
+
+    # Slope-limited derivative in right cell i+1:
+    ∂x∂r_ip2_ip1 = (x_ip2 - x_ip1) * inv_dr_ip2_ip1 # (x_{i+2} - x_{i+1}) / ( r̄_{i+2} - r̄_{i+1} )
+
+    ∂x∂r_R       = MinMod( ∂x∂r_ip1_i, ∂x∂r_ip2_ip1 )
+
+    # Left and right states at interface i+1/2:
+    x_L = x_i    +  ∂x∂r_L * Δr_L
+    x_R = x_ip1  -  ∂x∂r_R * Δr_R
+
+    # Clamp to ensure positive & monotonic interface values:
+    x_min = max( min( x_i, x_ip1 ), 0.0 )
+    x_max = max( x_i, x_ip1 )
+
+    x_L   = clamp( x_L, x_min, x_max )
+    x_R   = clamp( x_R, x_min, x_max )
+
+    return x_L, x_R
+end
+
+
 ###############################################################
 #######                                                 #######
 #######           F L U X  F U N C T I O N S            #######
@@ -4431,7 +4508,45 @@ function ForwardEuler_Scalars!( Scalars::AbstractArray{Float64, 3},  # Array of 
                                  inv_ΔV::AbstractMatrix{Float64},
                                     A_X::AbstractMatrix{Float64},
                                     A_Y::AbstractMatrix{Float64},
-                                     Δt::Float64 )
+                                     Δt::Float64,
+
+                                      # Needed intervals:
+                            ΔX_L::AbstractVector{Float64}, ΔX_R::AbstractVector{Float64},
+                                  inv_dX_i_im1::AbstractVector{Float64},
+                                  inv_dX_ip1_i::AbstractVector{Float64},
+                                inv_dX_ip2_ip1::AbstractVector{Float64},
+
+                            ΔX_L_InnerBoundary::Float64, ΔX_R_InnerBoundary::Float64,
+                    inv_dX_i_im1_InnerBoundary::Float64,
+                    inv_dX_ip1_i_InnerBoundary::Float64,
+                  inv_dX_ip2_ip1_InnerBoundary::Float64,
+ 
+                            ΔX_L_OuterBoundary::Float64, ΔX_R_OuterBoundary::Float64,
+                    inv_dX_i_im1_OuterBoundary::Float64,
+                    inv_dX_ip1_i_OuterBoundary::Float64,
+                  inv_dX_ip2_ip1_OuterBoundary::Float64,
+
+                             ΔY_L::AbstractVector{Float64}, ΔY_R::AbstractVector{Float64},
+                                  inv_dY_j_jm1::AbstractVector{Float64},
+                                  inv_dY_jp1_j::AbstractVector{Float64},
+                                inv_dY_jp2_jp1::AbstractVector{Float64},
+
+                            ΔY_L_InnerBoundary::Float64, ΔY_R_InnerBoundary::Float64,
+                    inv_dY_j_jm1_InnerBoundary::Float64,
+                    inv_dY_jp1_j_InnerBoundary::Float64,
+                  inv_dY_jp2_jp1_InnerBoundary::Float64,
+ 
+                            ΔY_L_OuterBoundary::Float64, ΔY_R_OuterBoundary::Float64,
+                    inv_dY_j_jm1_OuterBoundary::Float64,
+                    inv_dY_jp1_j_OuterBoundary::Float64,
+                  inv_dY_jp2_jp1_OuterBoundary::Float64,
+                                     
+                             # Boundary conditions:
+                              BC_X_left::Symbol = :Reflect,
+                             BC_X_right::Symbol = :Outflow,
+                              BC_Y_left::Symbol = :Outflow,
+                             BC_Y_right::Symbol = :Outflow
+                                     )
 
     N_X, N_Y, N_Scalars = size( Scalars )
     dN_X                = 1:N_X 
@@ -4441,46 +4556,432 @@ function ForwardEuler_Scalars!( Scalars::AbstractArray{Float64, 3},  # Array of 
     for k in dN_Scalars 
         @threads for j in dN_Y
             @inbounds @simd for i in dN_X 
-                # Clamp indices that enter x, which implicitly assumes 
-                # zero gradient extrapolation BC's:
-                ip1 = min( i + 1, N_X )
-                im1 = max( i - 1, 1 )   
-                jp1 = min( j + 1, N_Y )
-                jm1 = max( j - 1, 1 )       
                 
-                # Reconstruct x on X-interfaces, using a simple first-order method: 
-                if F_ρ_X[i,j] ≥ 0.0
-                    xL_X = Scalars_old[im1,j,k] / ρ_old[im1,j]  # Flow left → right
+                ###############################################################
+                #######                                                 #######
+                #######         X - R E C O N S T R U C T I O N         #######
+                #######                                                 #######
+                ###############################################################
+
+                if i == 1
+                    # ----- RECONSTRUCT i - 1/2 ---------------
+
+                    x_1 = Scalars_old[1,j,k] / ρ_old[1,j]
+                    x_2 = Scalars_old[2,j,k] / ρ_old[2,j]
+
+                    if BC_X_left === :Reflect  
+                        # Reflective boundary condition:
+                        x_0  = x_1 
+                        x_m1 = x_2
+                    elseif BC_X_left === :Outflow 
+                        # Outflow boundary condition:
+                        x_0  = x_1 
+                        x_m1 = x_1
+                    elseif BC_X_left === :Periodic
+                        # Periodic boundary condition:
+                        x_0  = Scalars_old[N_X,j,k]   / ρ_old[N_X,j]
+                        x_m1 = Scalars_old[N_X-1,j,k] / ρ_old[N_X-1,j]
+                    else
+                        error("Unknown BC_X_left in ForwardEuler_Scalar.")
+                    end
+
+                    x_im1 = x_0 
+                    x_i   = x_1 
+                    x_ip1 = x_2
+                    x_im2 = x_m1 
+
+                    # Reconstruct left and right values at i-1/2:
+                    x_imhalf_L, x_imhalf_R = ReconstructScalarInterface( 
+                                             x_im1, x_i, x_ip1, x_im2,
+                                             ΔX_L_InnerBoundary, ΔX_R_InnerBoundary, 
+                                             inv_dX_i_im1_InnerBoundary, 
+                                             inv_dX_ip1_i_InnerBoundary, 
+                                             inv_dX_ip2_ip1_InnerBoundary )
+
+                    # ----- RECONSTRUCT i + 1/2 ---------------
+
+                    # Besides the values of x listed earlier, here we 
+                    # also need:
+                    x_ip2 = Scalars_old[i+2,j,k] / ρ_old[i+2,j]
+
+                    # Reconstruct left and right values at i+1/2:
+                    x_iphalf_L, x_iphalf_R = ReconstructScalarInterface( 
+                                             x_i, x_ip1, x_ip2, x_im1,
+                                             ΔX_L[i], ΔX_R[i], inv_dX_i_im1[i], 
+                                             inv_dX_ip1_i[i], inv_dX_ip2_ip1[i] )
+                    
+                elseif i == 2
+                    # ----- RECONSTRUCT i - 1/2 ---------------
+
+                    x_im1 = Scalars_old[i-1,j,k] / ρ_old[i-1,j]
+                    x_i   = Scalars_old[i,j,k]   / ρ_old[i,j]
+                    x_ip1 = Scalars_old[i+1,j,k] / ρ_old[i+1,j]
+
+                    if BC_X_left === :Reflect  ||  BC_X_left === :Outflow
+                        # Reflective & outflow BC give same answer:
+                        x_0 = x_im1
+                    elseif BC_X_left === :Periodic
+                        # Periodic boundary condition:
+                        x_0 = Scalars_old[N_X,j,k] / ρ_old[N_X,j]
+                    else
+                        error("Unknown BC_X_left in ForwardEuler_Scalar.")
+                    end
+
+                    x_im2 = x_0  # i - 2 = 2 - 2 = 0
+
+                    # Reconstruct left and right values at i-1/2:
+                    x_imhalf_L, x_imhalf_R = ReconstructScalarInterface( 
+                                             x_im1, x_i, x_ip1, x_im2,
+                                             ΔX_L[i-1], ΔX_R[i-1], inv_dX_i_im1[i-1], 
+                                             inv_dX_ip1_i[i-1], inv_dX_ip2_ip1[i-1] )
+
+                    # ----- RECONSTRUCT i + 1/2 ---------------
+
+                    # Besides the values of x listed earlier, here we 
+                    # also need:
+                    x_ip2 = Scalars_old[i+2,j,k] / ρ_old[i+2,j]
+
+                    # Reconstruct left and right values at i+1/2:
+                    x_iphalf_L, x_iphalf_R = ReconstructScalarInterface( 
+                                             x_i, x_ip1, x_ip2, x_im1,
+                                             ΔX_L[i], ΔX_R[i], inv_dX_i_im1[i], 
+                                             inv_dX_ip1_i[i], inv_dX_ip2_ip1[i] )
+
+                elseif i ≥ 3  &&  i ≤ N_X - 2
+
+                    # ----- RECONSTRUCT i - 1/2 ---------------
+
+                    x_im2 = Scalars_old[i-2,j,k] / ρ_old[i-2,j]
+                    x_im1 = Scalars_old[i-1,j,k] / ρ_old[i-1,j]
+                    x_i   = Scalars_old[i,j,k]   / ρ_old[i,j]
+                    x_ip1 = Scalars_old[i+1,j,k] / ρ_old[i+1,j]
+
+                    # Reconstruct left and right values at i-1/2:
+                    x_imhalf_L, x_imhalf_R = ReconstructScalarInterface( 
+                                             x_im1, x_i, x_ip1, x_im2,
+                                             ΔX_L[i-1], ΔX_R[i-1], inv_dX_i_im1[i-1], 
+                                             inv_dX_ip1_i[i-1], inv_dX_ip2_ip1[i-1] )
+
+                    # ----- RECONSTRUCT i + 1/2 ---------------
+
+                    # Besides the values of x listed earlier, here we 
+                    # also need:
+                    x_ip2 = Scalars_old[i+2,j,k] / ρ_old[i+2,j]
+
+                    # Reconstruct left and right values at i+1/2:
+                    x_iphalf_L, x_iphalf_R = ReconstructScalarInterface( 
+                                             x_i, x_ip1, x_ip2, x_im1,
+                                             ΔX_L[i], ΔX_R[i], inv_dX_i_im1[i], 
+                                             inv_dX_ip1_i[i], inv_dX_ip2_ip1[i] )
+
+                elseif i == N_X - 1
+
+                    # ----- RECONSTRUCT i - 1/2 ---------------
+                    x_im2 = Scalars_old[i-2,j,k] / ρ_old[i-2,j]
+                    x_im1 = Scalars_old[i-1,j,k] / ρ_old[i-1,j]
+                    x_i   = Scalars_old[i,j,k]   / ρ_old[i,j]
+                    x_ip1 = Scalars_old[i+1,j,k] / ρ_old[i+1,j]
+
+                    # Reconstruct left and right values at i-1/2:
+                    x_imhalf_L, x_imhalf_R = ReconstructScalarInterface( 
+                                             x_im1, x_i, x_ip1, x_im2,
+                                             ΔX_L[i-1], ΔX_R[i-1], inv_dX_i_im1[i-1], 
+                                             inv_dX_ip1_i[i-1], inv_dX_ip2_ip1[i-1] )
+
+                    # ----- RECONSTRUCT i + 1/2 ---------------
+
+                    # Besides the values of x listed earlier, here we 
+                    # also need x_ip2 = x[N_X+1]:
+                    if BC_X_right === :Reflect  ||  BC_X_right === :Outflow
+                        # Reflective & outflow BC give same answer:
+                        x_ip2 = Scalars_old[N_X,j,k] / ρ_old[N_X,j]
+                    elseif BC_X_right === :Periodic
+                        # Periodic boundary condition:
+                        x_ip2 = Scalars_old[1,j,k] / ρ_old[1,j]
+                    else
+                        error("Unknown BC_X_right in ForwardEuler_Scalar.")
+                    end
+
+                    # Reconstruct left and right values at i+1/2:
+                    x_iphalf_L, x_iphalf_R = ReconstructScalarInterface( 
+                                             x_i, x_ip1, x_ip2, x_im1,
+                                             ΔX_L[i], ΔX_R[i], inv_dX_i_im1[i], 
+                                             inv_dX_ip1_i[i], inv_dX_ip2_ip1[i] )
+
                 else
-                    xL_X = Scalars_old[i,j,k] / ρ_old[i,j]      # Flow right → left
+                    # In this case i = N_X 
+                    x_im2 = Scalars_old[N_X-2,j,k] / ρ_old[N_X-2,j]
+                    x_im1 = Scalars_old[N_X-1,j,k] / ρ_old[N_X-1,j]
+                    x_i   = Scalars_old[N_X,j,k]   / ρ_old[N_X,j]
+
+                    if BC_X_right === :Reflect  
+                        # Reflective boundary condition:
+                        x_ip1 = x_i 
+                        x_ip2 = x_im1
+                    elseif BC_X_right === :Outflow
+                        # Outflow boundary condition:
+                        x_ip1 = x_i 
+                        x_ip2 = x_ip1
+                    elseif BC_X_right === :Periodic
+                        # Periodic boundary condition:
+                        x_ip1 = Scalars_old[1,j,k] / ρ_old[1,j]
+                        x_ip2 = Scalars_old[2,j,k] / ρ_old[2,j]
+                    else
+                        error("Unknown BC_X_right in ForwardEuler_Scalar.")
+                    end
+
+                    # ----- RECONSTRUCT i - 1/2 ---------------
+
+                    # Reconstruct left and right values at i-1/2:
+                    x_imhalf_L, x_imhalf_R = ReconstructScalarInterface( 
+                                             x_im1, x_i, x_ip1, x_im2,
+                                             ΔX_L[i-1], ΔX_R[i-1], inv_dX_i_im1[i-1], 
+                                             inv_dX_ip1_i[i-1], inv_dX_ip2_ip1[i-1] )
+
+                    # ----- RECONSTRUCT i + 1/2 ---------------
+
+                    # Reconstruct left and right values at i+1/2:
+                    x_iphalf_L, x_iphalf_R = ReconstructScalarInterface( 
+                                             x_i, x_ip1, x_ip2, x_im1,
+                                             ΔX_L_OuterBoundary, ΔX_R_OuterBoundary, 
+                                             inv_dX_i_im1_OuterBoundary, 
+                                             inv_dX_ip1_i_OuterBoundary, 
+                                             inv_dX_ip2_ip1_OuterBoundary )                         
+
+                end
+
+                # Reconstruct x on X-interfaces, using upwind: 
+                if F_ρ_X[i,j] ≥ 0.0
+                    x_imhalf = x_imhalf_L  # Flow left → right
+                else
+                    x_imhalf = x_imhalf_R  # Flow right → left
                 end
 
                 if F_ρ_X[i+1,j] ≥ 0.0
-                    xR_X = Scalars_old[i,j,k] / ρ_old[i,j]      # Flow left → right
+                    x_iphalf = x_iphalf_L   # Flow left → right
                 else
-                    xR_X = Scalars_old[ip1,j,k] / ρ_old[ip1,j]  # Flow right → left
+                    x_iphalf = x_iphalf_R  # Flow right → left
                 end
 
-                # Reconstruct x on Y-interfaces, using a simple first-order method:
-                if F_ρ_Y[i,j] ≥ 0.0
-                    xL_Y = Scalars_old[i,jm1,k] / ρ_old[i,jm1]  # Flow left → right
+                ###############################################################
+                #######                                                 #######
+                #######         Y - R E C O N S T R U C T I O N         #######
+                #######                                                 #######
+                ###############################################################
+
+                if j == 1
+                    # ----- RECONSTRUCT j - 1/2 ---------------
+
+                    x_1 = Scalars_old[i,1,k] / ρ_old[i,1]
+                    x_2 = Scalars_old[i,2,k] / ρ_old[i,2]
+
+                    if BC_Y_left === :Reflect  
+                        # Reflective boundary condition:
+                        x_0  = x_1 
+                        x_m1 = x_2
+                    elseif BC_Y_left === :Outflow 
+                        # Outflow boundary condition:
+                        x_0  = x_1 
+                        x_m1 = x_1
+                    elseif BC_Y_left === :Periodic
+                        # Periodic boundary condition:
+                        x_0  = Scalars_old[i,N_Y,k]   / ρ_old[i,N_Y]
+                        x_m1 = Scalars_old[i,N_Y-1,k] / ρ_old[i,N_Y-1]
+                    else
+                        error("Unknown BC_Y_left in ForwardEuler_Scalar.")
+                    end
+
+                    x_jm1 = x_0 
+                    x_j   = x_1 
+                    x_jp1 = x_2
+                    x_jm2 = x_m1 
+
+                    # Reconstruct left and right values at j-1/2:
+                    x_jmhalf_L, x_jmhalf_R = ReconstructScalarInterface( 
+                                             x_jm1, x_j, x_jp1, x_jm2,
+                                             ΔY_L_InnerBoundary, ΔY_R_InnerBoundary, 
+                                             inv_dY_j_jm1_InnerBoundary, 
+                                             inv_dY_jp1_j_InnerBoundary, 
+                                             inv_dY_jp2_jp1_InnerBoundary )
+
+                    # ----- RECONSTRUCT j + 1/2 ---------------
+
+                    # Besides the values of x listed earlier, here we 
+                    # also need:
+                    x_jp2 = Scalars_old[i,j+2,k] / ρ_old[i,j+2]
+
+                    # Reconstruct left and right values at j+1/2:
+                    x_jphalf_L, x_jphalf_R = ReconstructScalarInterface( 
+                                             x_j, x_jp1, x_jp2, x_jm1,
+                                             ΔY_L[j], ΔY_R[j], inv_dY_j_jm1[j], 
+                                             inv_dY_jp1_j[j], inv_dY_jp2_jp1[j] )
+                    
+                elseif j == 2
+                    # ----- RECONSTRUCT j - 1/2 ---------------
+
+                    x_jm1 = Scalars_old[i,j-1,k] / ρ_old[i,j-1]
+                    x_j   = Scalars_old[i,j,k]   / ρ_old[i,j]
+                    x_jp1 = Scalars_old[i,j+1,k] / ρ_old[i,j+1]
+
+                    if BC_Y_left === :Reflect  ||  BC_Y_left === :Outflow
+                        # Reflective & outflow BC give same answer:
+                        x_0 = x_jm1
+                    elseif BC_Y_left === :Periodic
+                        # Periodic boundary condition:
+                        x_0 = Scalars_old[i,N_Y,k] / ρ_old[i,N_Y]
+                    else
+                        error("Unknown BC_Y_left in ForwardEuler_Scalar.")
+                    end
+
+                    x_jm2 = x_0  # j - 2 = 2 - 2 = 0
+
+                    # Reconstruct left and right values at j-1/2:
+                    x_jmhalf_L, x_jmhalf_R = ReconstructScalarInterface( 
+                                             x_jm1, x_j, x_jp1, x_jm2,
+                                             ΔY_L[j-1], ΔY_R[j-1], inv_dY_j_jm1[j-1], 
+                                             inv_dY_jp1_j[j-1], inv_dY_jp2_jp1[j-1] )
+
+                    # ----- RECONSTRUCT j + 1/2 ---------------
+
+                    # Besides the values of x listed earlier, here we 
+                    # also need:
+                    x_jp2 = Scalars_old[i,j+2,k] / ρ_old[i,j+2]
+
+                    # Reconstruct left and right values at j+1/2:
+                    x_jphalf_L, x_jphalf_R = ReconstructScalarInterface( 
+                                             x_j, x_jp1, x_jp2, x_jm1,
+                                             ΔY_L[j], ΔY_R[j], inv_dY_j_jm1[j], 
+                                             inv_dY_jp1_j[j], inv_dY_jp2_jp1[j] )
+
+                elseif j ≥ 3  &&  j ≤ N_Y - 2
+
+                    # ----- RECONSTRUCT j - 1/2 ---------------
+
+                    x_jm2 = Scalars_old[i,j-2,k] / ρ_old[i,j-2]
+                    x_jm1 = Scalars_old[i,j-1,k] / ρ_old[i,j-1]
+                    x_j   = Scalars_old[i,j,k]   / ρ_old[i,j]
+                    x_jp1 = Scalars_old[i,j+1,k] / ρ_old[i,j+1]
+
+                    # Reconstruct left and right values at j-1/2:
+                    x_jmhalf_L, x_jmhalf_R = ReconstructScalarInterface( 
+                                             x_jm1, x_j, x_jp1, x_jm2,
+                                             ΔY_L[j-1], ΔY_R[j-1], inv_dY_j_jm1[j-1], 
+                                             inv_dY_jp1_j[j-1], inv_dY_jp2_jp1[j-1] )
+
+                    # ----- RECONSTRUCT j + 1/2 ---------------
+
+                    # Besides the values of x listed earlier, here we 
+                    # also need:
+                    x_jp2 = Scalars_old[i,j+2,k] / ρ_old[i,j+2]
+
+                    # Reconstruct left and right values at j+1/2:
+                    x_jphalf_L, x_jphalf_R = ReconstructScalarInterface( 
+                                             x_j, x_jp1, x_jp2, x_jm1,
+                                             ΔY_L[j], ΔY_R[j], inv_dY_j_jm1[j], 
+                                             inv_dY_jp1_j[j], inv_dY_jp2_jp1[j] )
+
+                elseif j == N_Y - 1
+
+                    # ----- RECONSTRUCT j - 1/2 ---------------
+                    x_jm2 = Scalars_old[i,j-2,k] / ρ_old[i,j-2]
+                    x_jm1 = Scalars_old[i,j-1,k] / ρ_old[i,j-1]
+                    x_j   = Scalars_old[i,j,k]   / ρ_old[i,j]
+                    x_jp1 = Scalars_old[i,j+1,k] / ρ_old[i,j+1]
+
+                    # Reconstruct left and right values at j-1/2:
+                    x_jmhalf_L, x_jmhalf_R = ReconstructScalarInterface( 
+                                             x_jm1, x_j, x_jp1, x_jm2,
+                                             ΔY_L[j-1], ΔY_R[j-1], inv_dY_j_jm1[j-1], 
+                                             inv_dY_jp1_j[j-1], inv_dY_jp2_jp1[j-1] )
+
+                    # ----- RECONSTRUCT j + 1/2 ---------------
+
+                    # Besides the values of x listed earlier, here we 
+                    # also need x_jp2 = x[N_Y+1]:
+                    if BC_Y_right === :Reflect  ||  BC_Y_right === :Outflow
+                        # Reflective & outflow BC give same answer:
+                        x_jp2 = Scalars_old[i,N_Y,k] / ρ_old[i,N_Y]
+                    elseif BC_Y_right === :Periodic
+                        # Periodic boundary condition:
+                        x_jp2 = Scalars_old[i,1,k] / ρ_old[i,1]
+                    else
+                        error("Unknown BC_Y_right in ForwardEuler_Scalar.")
+                    end
+
+                    # Reconstruct left and right values at j+1/2:
+                    x_jphalf_L, x_jphalf_R = ReconstructScalarInterface( 
+                                             x_j, x_jp1, x_jp2, x_jm1,
+                                             ΔY_L[j], ΔY_R[j], inv_dY_j_jm1[j], 
+                                             inv_dY_jp1_j[j], inv_dY_jp2_jp1[j] )
+
                 else
-                    xL_Y = Scalars_old[i,j,k] / ρ_old[i,j]      # Flow right → left
+                    # In this case j = N_Y
+                    x_jm2 = Scalars_old[i,N_Y-2,k] / ρ_old[i,N_Y-2]
+                    x_jm1 = Scalars_old[i,N_Y-1,k] / ρ_old[i,N_Y-1]
+                    x_j   = Scalars_old[i,N_Y,k]   / ρ_old[i,N_Y]
+
+                    if BC_Y_right === :Reflect  
+                        # Reflective boundary condition:
+                        x_jp1 = x_j 
+                        x_jp2 = x_jm1
+                    elseif BC_Y_right === :Outflow
+                        # Outflow boundary condition:
+                        x_jp1 = x_j 
+                        x_jp2 = x_jp1
+                    elseif BC_Y_right === :Periodic
+                        # Periodic boundary condition:
+                        x_jp1 = Scalars_old[i,1,k] / ρ_old[i,1]
+                        x_jp2 = Scalars_old[i,2,k] / ρ_old[i,2]
+                    else
+                        error("Unknown BC_Y_right in ForwardEuler_Scalar.")
+                    end
+
+                    # ----- RECONSTRUCT j - 1/2 ---------------
+
+                    # Reconstruct left and right values at j-1/2:
+                    x_jmhalf_L, x_jmhalf_R = ReconstructScalarInterface( 
+                                             x_jm1, x_j, x_jp1, x_jm2,
+                                             ΔY_L[j-1], ΔY_R[j-1], inv_dY_j_jm1[j-1], 
+                                             inv_dY_jp1_j[j-1], inv_dY_jp2_jp1[j-1] )
+
+                    # ----- RECONSTRUCT j + 1/2 ---------------
+
+                    # Reconstruct left and right values at j+1/2:
+                    x_jphalf_L, x_jphalf_R = ReconstructScalarInterface( 
+                                             x_j, x_jp1, x_jp2, x_jm1,
+                                             ΔY_L_OuterBoundary, ΔY_R_OuterBoundary, 
+                                             inv_dY_j_jm1_OuterBoundary, 
+                                             inv_dY_jp1_j_OuterBoundary, 
+                                             inv_dY_jp2_jp1_OuterBoundary )                         
+
+                end
+
+                # Reconstruct x on Y-interfaces, using upwind:
+                if F_ρ_Y[i,j] ≥ 0.0
+                    x_jmhalf = x_jmhalf_L  # Flow left → right
+                else
+                    x_jmhalf = x_jmhalf_R  # Flow right → left
                 end
 
                 if F_ρ_Y[i,j+1] ≥ 0.0
-                    xR_Y = Scalars_old[i,j,k] / ρ_old[i,j]      # Flow left → right
+                    x_jphalf = x_jphalf_L  # Flow left → right
                 else
-                    xR_Y = Scalars_old[i,jp1,k] / ρ_old[i,jp1]  # Flow right → left
+                    x_jphalf = x_jphalf_R  # Flow right → left
                 end
 
+                ###############################################################
+                #######                                                 #######
+                #######            A D V E C T  S C A L A R             #######
+                #######                                                 #######
+                ###############################################################
+
                 # Get left (i-1/2) & right (i+1/2) X-interface fluxes:
-                F_L_X   = F_ρ_X[i,j]   * xL_X
-                F_R_X   = F_ρ_X[i+1,j] * xR_X
+                F_L_X   = F_ρ_X[i,j]   * x_imhalf 
+                F_R_X   = F_ρ_X[i+1,j] * x_iphalf 
 
                 # Get left (j-1/2) & right (j+1/2) Y-interface fluxes:
-                F_L_Y   = F_ρ_Y[i,j]   * xL_Y
-                F_R_Y   = F_ρ_Y[i,j+1] * xR_Y
+                F_L_Y   = F_ρ_Y[i,j]   * x_jmhalf
+                F_R_Y   = F_ρ_Y[i,j+1] * x_jphalf
 
                 # Get interface areas:
                 A_X_R   = A_X[i+1,j]
@@ -4537,7 +5038,38 @@ function UpdateHydro!( Δt::Float64,
              w_minus_j_p1::AbstractVector{Float64},  # WENO3 weights w⁻_{j,1}
 
                  CoordSys::CoordSystem,
-               inv_r_cell::AbstractVector{Float64}
+               inv_r_cell::AbstractVector{Float64},
+
+                   # Needed intervals for PLM reconstruction of passive scalars:
+                 ΔX_L::AbstractVector{Float64}, ΔX_R::AbstractVector{Float64},
+                  inv_dX_i_im1::AbstractVector{Float64},
+                  inv_dX_ip1_i::AbstractVector{Float64},
+                inv_dX_ip2_ip1::AbstractVector{Float64},
+
+                 ΔX_L_InnerBoundary::Float64, ΔX_R_InnerBoundary::Float64,
+                  inv_dX_i_im1_InnerBoundary::Float64,
+                  inv_dX_ip1_i_InnerBoundary::Float64,
+                  inv_dX_ip2_ip1_InnerBoundary::Float64,
+ 
+                 ΔX_L_OuterBoundary::Float64, ΔX_R_OuterBoundary::Float64,
+                  inv_dX_i_im1_OuterBoundary::Float64,
+                  inv_dX_ip1_i_OuterBoundary::Float64,
+                  inv_dX_ip2_ip1_OuterBoundary::Float64,
+
+                 ΔY_L::AbstractVector{Float64}, ΔY_R::AbstractVector{Float64},
+                  inv_dY_j_jm1::AbstractVector{Float64},
+                  inv_dY_jp1_j::AbstractVector{Float64},
+                  inv_dY_jp2_jp1::AbstractVector{Float64},
+
+                 ΔY_L_InnerBoundary::Float64, ΔY_R_InnerBoundary::Float64,
+                  inv_dY_j_jm1_InnerBoundary::Float64,
+                  inv_dY_jp1_j_InnerBoundary::Float64,
+                  inv_dY_jp2_jp1_InnerBoundary::Float64,
+ 
+                 ΔY_L_OuterBoundary::Float64, ΔY_R_OuterBoundary::Float64,
+                  inv_dY_j_jm1_OuterBoundary::Float64,
+                  inv_dY_jp1_j_OuterBoundary::Float64,
+                  inv_dY_jp2_jp1_OuterBoundary::Float64
                      )
 
     # Save the state at the start, before the update (needed later in RK3):
@@ -4626,7 +5158,27 @@ function UpdateHydro!( Δt::Float64,
 
     # Also advect passive scalars (using stored old density in ρ_stage):
     ForwardEuler_Scalars!( Hydro.Scalars, Hydro.Scalars_old, Hydro.ρ_stage, Hydro.F_ρ_X, Hydro.F_ρ_Y,
-                           inv_ΔV, A_X, A_Y, Δt )
+                           inv_ΔV, A_X, A_Y, Δt, 
+                           
+                           # Needed intervals for PLM reconstruction of passive scalars:
+                           ΔX_L, ΔX_R, inv_dX_i_im1, inv_dX_ip1_i, inv_dX_ip2_ip1,
+
+                           ΔX_L_InnerBoundary, ΔX_R_InnerBoundary, inv_dX_i_im1_InnerBoundary,
+                           inv_dX_ip1_i_InnerBoundary, inv_dX_ip2_ip1_InnerBoundary,
+ 
+                           ΔX_L_OuterBoundary, ΔX_R_OuterBoundary, inv_dX_i_im1_OuterBoundary,
+                           inv_dX_ip1_i_OuterBoundary, inv_dX_ip2_ip1_OuterBoundary,
+
+                           ΔY_L, ΔY_R, inv_dY_j_jm1, inv_dY_jp1_j, inv_dY_jp2_jp1,
+
+                           ΔY_L_InnerBoundary, ΔY_R_InnerBoundary, inv_dY_j_jm1_InnerBoundary,
+                           inv_dY_jp1_j_InnerBoundary, inv_dY_jp2_jp1_InnerBoundary,
+ 
+                           ΔY_L_OuterBoundary, ΔY_R_OuterBoundary, inv_dY_j_jm1_OuterBoundary,
+                           inv_dY_jp1_j_OuterBoundary, inv_dY_jp2_jp1_OuterBoundary,
+                           
+                           # Boundary conditions: 
+                           Hydro.BC_X_left, Hydro.BC_X_right, Hydro.BC_Y_left, Hydro.BC_Y_right  )
 
     @. Hydro.ρ_save      = Hydro.ρ        # Save density from after step 1 (before we update ρ), needed for scalar advection
     @. Hydro.Scalars_old = Hydro.Scalars  # Also store updated old state for the next stage 
@@ -4713,7 +5265,27 @@ function UpdateHydro!( Δt::Float64,
 
     # Also advect scalars (using stored density in ρ_save):
     ForwardEuler_Scalars!( Hydro.Scalars, Hydro.Scalars_old, Hydro.ρ_save, Hydro.F_ρ_X, Hydro.F_ρ_Y,
-                           inv_ΔV, A_X, A_Y, Δt )
+                           inv_ΔV, A_X, A_Y, Δt, 
+                           
+                           # Needed intervals for PLM reconstruction of passive scalars:
+                           ΔX_L, ΔX_R, inv_dX_i_im1, inv_dX_ip1_i, inv_dX_ip2_ip1,
+
+                           ΔX_L_InnerBoundary, ΔX_R_InnerBoundary, inv_dX_i_im1_InnerBoundary,
+                           inv_dX_ip1_i_InnerBoundary, inv_dX_ip2_ip1_InnerBoundary,
+ 
+                           ΔX_L_OuterBoundary, ΔX_R_OuterBoundary, inv_dX_i_im1_OuterBoundary,
+                           inv_dX_ip1_i_OuterBoundary, inv_dX_ip2_ip1_OuterBoundary,
+
+                           ΔY_L, ΔY_R, inv_dY_j_jm1, inv_dY_jp1_j, inv_dY_jp2_jp1,
+
+                           ΔY_L_InnerBoundary, ΔY_R_InnerBoundary, inv_dY_j_jm1_InnerBoundary,
+                           inv_dY_jp1_j_InnerBoundary, inv_dY_jp2_jp1_InnerBoundary,
+ 
+                           ΔY_L_OuterBoundary, ΔY_R_OuterBoundary, inv_dY_j_jm1_OuterBoundary,
+                           inv_dY_jp1_j_OuterBoundary, inv_dY_jp2_jp1_OuterBoundary,
+                           
+                           # Boundary conditions: 
+                           Hydro.BC_X_left, Hydro.BC_X_right, Hydro.BC_Y_left, Hydro.BC_Y_right )
 
     # Combine to get U^(**) = (3/4) U^(n)  +  (1/4)[ U^(*) + L^(*) Δt ]:
     @. Hydro.ρ       =  0.75 * Hydro.ρ_stage       +  0.25 * Hydro.ρ
@@ -4802,7 +5374,27 @@ function UpdateHydro!( Δt::Float64,
 
     # Also advect scalars (using stored density in ρ_save):
     ForwardEuler_Scalars!( Hydro.Scalars, Hydro.Scalars_old, Hydro.ρ_save, Hydro.F_ρ_X, Hydro.F_ρ_Y,
-                           inv_ΔV, A_X, A_Y, Δt )
+                           inv_ΔV, A_X, A_Y, Δt, 
+                           
+                           # Needed intervals for PLM reconstruction of passive scalars:
+                           ΔX_L, ΔX_R, inv_dX_i_im1, inv_dX_ip1_i, inv_dX_ip2_ip1,
+
+                           ΔX_L_InnerBoundary, ΔX_R_InnerBoundary, inv_dX_i_im1_InnerBoundary,
+                           inv_dX_ip1_i_InnerBoundary, inv_dX_ip2_ip1_InnerBoundary,
+ 
+                           ΔX_L_OuterBoundary, ΔX_R_OuterBoundary, inv_dX_i_im1_OuterBoundary,
+                           inv_dX_ip1_i_OuterBoundary, inv_dX_ip2_ip1_OuterBoundary,
+
+                           ΔY_L, ΔY_R, inv_dY_j_jm1, inv_dY_jp1_j, inv_dY_jp2_jp1,
+
+                           ΔY_L_InnerBoundary, ΔY_R_InnerBoundary, inv_dY_j_jm1_InnerBoundary,
+                           inv_dY_jp1_j_InnerBoundary, inv_dY_jp2_jp1_InnerBoundary,
+ 
+                           ΔY_L_OuterBoundary, ΔY_R_OuterBoundary, inv_dY_j_jm1_OuterBoundary,
+                           inv_dY_jp1_j_OuterBoundary, inv_dY_jp2_jp1_OuterBoundary,
+                           
+                           # Boundary conditions: 
+                           Hydro.BC_X_left, Hydro.BC_X_right, Hydro.BC_Y_left, Hydro.BC_Y_right )
 
     # Combine to get U^(n+1) = (1/3) U^(n)  +  (2/3)[ U^(**) + L^(**) Δt ]:
     @. Hydro.ρ       =  OneThird * Hydro.ρ_stage       +  TwoThirds * Hydro.ρ
@@ -4865,6 +5457,44 @@ function UpdateHydro!( Δt::Float64,
         w_plus_i_p1 = Geometry.w_plus_i_p1;  w_minus_i_p1 = Geometry.w_minus_i_p1   
         w_plus_j_p1 = Geometry.w_plus_j_p1;  w_minus_j_p1 = Geometry.w_minus_j_p1
 
+        # r-intervals:
+        ΔX_L            = Geometry.Δr_L
+        ΔX_R            = Geometry.Δr_R
+        inv_dX_i_im1    = Geometry.inv_dr_i_im1
+        inv_dX_ip1_i    = Geometry.inv_dr_ip1_i
+        inv_dX_ip2_ip1  = Geometry.inv_dr_ip2_ip1
+                             
+        ΔX_L_InnerBoundary           = Geometry.Δr_L_InnerBoundary
+        ΔX_R_InnerBoundary           = Geometry.Δr_R_InnerBoundary
+        inv_dX_i_im1_InnerBoundary   = Geometry.inv_dr_i_im1_InnerBoundary
+        inv_dX_ip1_i_InnerBoundary   = Geometry.inv_dr_ip1_i_InnerBoundary
+        inv_dX_ip2_ip1_InnerBoundary = Geometry.inv_dr_ip2_ip1_InnerBoundary
+                             
+        ΔX_L_OuterBoundary           = Geometry.Δr_L_OuterBoundary
+        ΔX_R_OuterBoundary           = Geometry.Δr_R_OuterBoundary
+        inv_dX_i_im1_OuterBoundary   = Geometry.inv_dr_i_im1_OuterBoundary
+        inv_dX_ip1_i_OuterBoundary   = Geometry.inv_dr_ip1_i_OuterBoundary
+        inv_dX_ip2_ip1_OuterBoundary = Geometry.inv_dr_ip2_ip1_OuterBoundary
+
+        # Z-intervals:
+        ΔY_L            = Geometry.ΔZ_L
+        ΔY_R            = Geometry.ΔZ_R
+        inv_dY_j_jm1    = Geometry.inv_dZ_j_jm1
+        inv_dY_jp1_j    = Geometry.inv_dZ_jp1_j
+        inv_dY_jp2_jp1  = Geometry.inv_dZ_jp2_jp1
+                             
+        ΔY_L_InnerBoundary           = Geometry.ΔZ_L_InnerBoundary
+        ΔY_R_InnerBoundary           = Geometry.ΔZ_R_InnerBoundary
+        inv_dY_j_jm1_InnerBoundary   = Geometry.inv_dZ_j_jm1_InnerBoundary
+        inv_dY_jp1_j_InnerBoundary   = Geometry.inv_dZ_jp1_j_InnerBoundary
+        inv_dY_jp2_jp1_InnerBoundary = Geometry.inv_dZ_jp2_jp1_InnerBoundary
+                             
+        ΔY_L_OuterBoundary           = Geometry.ΔZ_L_OuterBoundary
+        ΔY_R_OuterBoundary           = Geometry.ΔZ_R_OuterBoundary
+        inv_dY_j_jm1_OuterBoundary   = Geometry.inv_dZ_j_jm1_OuterBoundary
+        inv_dY_jp1_j_OuterBoundary   = Geometry.inv_dZ_jp1_j_OuterBoundary
+        inv_dY_jp2_jp1_OuterBoundary = Geometry.inv_dZ_jp2_jp1_OuterBoundary
+
     else
         # Coordinate system: 
         CoordSys   = Val(:Cartesian)
@@ -4888,6 +5518,44 @@ function UpdateHydro!( Δt::Float64,
         # WENO3 weights for interface reconstruction:
         w_plus_i_p1 = Geometry.w_plus_i_p1;  w_minus_i_p1 = Geometry.w_minus_i_p1   
         w_plus_j_p1 = Geometry.w_plus_j_p1;  w_minus_j_p1 = Geometry.w_minus_j_p1
+
+        # X-intervals:
+        ΔX_L            = Geometry.ΔX_L
+        ΔX_R            = Geometry.ΔX_R
+        inv_dX_i_im1    = Geometry.inv_dX_i_im1
+        inv_dX_ip1_i    = Geometry.inv_dX_ip1_i
+        inv_dX_ip2_ip1  = Geometry.inv_dX_ip2_ip1
+                             
+        ΔX_L_InnerBoundary           = Geometry.ΔX_L_InnerBoundary
+        ΔX_R_InnerBoundary           = Geometry.ΔX_R_InnerBoundary
+        inv_dX_i_im1_InnerBoundary   = Geometry.inv_dX_i_im1_InnerBoundary
+        inv_dX_ip1_i_InnerBoundary   = Geometry.inv_dX_ip1_i_InnerBoundary
+        inv_dX_ip2_ip1_InnerBoundary = Geometry.inv_dX_ip2_ip1_InnerBoundary
+                             
+        ΔX_L_OuterBoundary           = Geometry.ΔX_L_OuterBoundary
+        ΔX_R_OuterBoundary           = Geometry.ΔX_R_OuterBoundary
+        inv_dX_i_im1_OuterBoundary   = Geometry.inv_dX_i_im1_OuterBoundary
+        inv_dX_ip1_i_OuterBoundary   = Geometry.inv_dX_ip1_i_OuterBoundary
+        inv_dX_ip2_ip1_OuterBoundary = Geometry.inv_dX_ip2_ip1_OuterBoundary
+
+        # Y-intervals:
+        ΔY_L            = Geometry.ΔY_L
+        ΔY_R            = Geometry.ΔY_R
+        inv_dY_j_jm1    = Geometry.inv_dY_j_jm1
+        inv_dY_jp1_j    = Geometry.inv_dY_jp1_j
+        inv_dY_jp2_jp1  = Geometry.inv_dY_jp2_jp1
+                             
+        ΔY_L_InnerBoundary           = Geometry.ΔY_L_InnerBoundary
+        ΔY_R_InnerBoundary           = Geometry.ΔY_R_InnerBoundary
+        inv_dY_j_jm1_InnerBoundary   = Geometry.inv_dY_j_jm1_InnerBoundary
+        inv_dY_jp1_j_InnerBoundary   = Geometry.inv_dY_jp1_j_InnerBoundary
+        inv_dY_jp2_jp1_InnerBoundary = Geometry.inv_dY_jp2_jp1_InnerBoundary
+                             
+        ΔY_L_OuterBoundary           = Geometry.ΔY_L_OuterBoundary
+        ΔY_R_OuterBoundary           = Geometry.ΔY_R_OuterBoundary
+        inv_dY_j_jm1_OuterBoundary   = Geometry.inv_dY_j_jm1_OuterBoundary
+        inv_dY_jp1_j_OuterBoundary   = Geometry.inv_dY_jp1_j_OuterBoundary
+        inv_dY_jp2_jp1_OuterBoundary = Geometry.inv_dY_jp2_jp1_OuterBoundary
 
     end
 
@@ -4915,7 +5583,24 @@ function UpdateHydro!( Δt::Float64,
              w_minus_j_p1,  # WENO3 weights w⁻_{j,1}
 
                  CoordSys,
-               inv_r_cell )
+               inv_r_cell, 
+               
+               # Needed intervals for PLM reconstruction of passive scalars:
+               ΔX_L, ΔX_R, inv_dX_i_im1, inv_dX_ip1_i, inv_dX_ip2_ip1,
+
+               ΔX_L_InnerBoundary, ΔX_R_InnerBoundary, inv_dX_i_im1_InnerBoundary,
+               inv_dX_ip1_i_InnerBoundary, inv_dX_ip2_ip1_InnerBoundary,
+ 
+               ΔX_L_OuterBoundary, ΔX_R_OuterBoundary, inv_dX_i_im1_OuterBoundary,
+               inv_dX_ip1_i_OuterBoundary, inv_dX_ip2_ip1_OuterBoundary,
+
+               ΔY_L, ΔY_R, inv_dY_j_jm1, inv_dY_jp1_j, inv_dY_jp2_jp1,
+
+               ΔY_L_InnerBoundary, ΔY_R_InnerBoundary, inv_dY_j_jm1_InnerBoundary,
+               inv_dY_jp1_j_InnerBoundary, inv_dY_jp2_jp1_InnerBoundary,
+ 
+               ΔY_L_OuterBoundary, ΔY_R_OuterBoundary, inv_dY_j_jm1_OuterBoundary,
+               inv_dY_jp1_j_OuterBoundary, inv_dY_jp2_jp1_OuterBoundary,)
 
 
     return nothing 
@@ -5360,7 +6045,7 @@ function GenerateHydroArrays( X::AbstractVector{Float64},
                            YCoM::AbstractVector{Float64},
                               γ::Float64 = γmon,
                          N_dust::Int     = 3,
-                      N_Scalars::Int     = 18,
+                      N_Scalars::Int     = 26,
                       BC_X_left::Symbol  = :Reflect,
                      BC_X_right::Symbol  = :Outflow,
                       BC_Y_left::Symbol  = :Reflect, 

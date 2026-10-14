@@ -560,9 +560,9 @@ function Compute_Grid_Differences!( Δr_L::AbstractVector{T},
             dr_ip2_ip1 = rCoM_ip2  - rCoM_ip1
 
             # Precompute inverses of intervals:
-            inv_dr_i_im1[i]   = one(T) / dr_i_im1[i]
-            inv_dr_ip1_i[i]   = one(T) / dr_ip1_i[i]
-            inv_dr_ip2_ip1[i] = one(T) / dr_ip2_ip1[i]
+            inv_dr_i_im1[i]   = one(T) / dr_i_im1
+            inv_dr_ip1_i[i]   = one(T) / dr_ip1_i
+            inv_dr_ip2_ip1[i] = one(T) / dr_ip2_ip1
 
             # Intervals needed for left & right optical depths in the M1 transport: 
             Δr_L[i] = r[i+1]   - rCoM[i]
@@ -852,7 +852,7 @@ function SetupCylindricalGrid( rmax::T,      rmax_lin::T,
     Get_WENO3_w_plus_w_minus_r!( r, w_plus_i_p1, w_minus_i_p1 )
     Get_WENO3_w_plus_w_minus_Z!( Z, w_plus_j_p1, w_minus_j_p1 )
 
-    # Get grid r-intervals (and inverse intervals) needed for M1 advection:
+    # Get grid r-intervals (and inverse intervals) needed for M1 advection & scalar advection:
     Δr_L           = zeros( T, N_r ) # r[i+1]    - rCoM[i]
     Δr_R           = zeros( T, N_r ) # rCoM[i+1] - r[i+1]
     inv_dr_i_im1   = zeros( T, N_r ) # 1 / ( rCoM[i]   - rCoM[i-1] )
@@ -992,7 +992,7 @@ function SetupCylindricalGrid_FromSaved( r::AbstractArray{T}, rCoM::AbstractArra
                                              inv_dr_i_im1, inv_dr_ip1_i, inv_dr_ip2_ip1,
                                              r, rCoM )
 
-    # Get grid Z-intervals (and inverse intervals) needed for M1 advection:
+    # Get grid Z-intervals (and inverse intervals) needed for M1 advection & scalar advection:
     ΔZ_L           = zeros( T, N_Z ) # Z[j+1]    - ZCoM[j]
     ΔZ_R           = zeros( T, N_Z ) # ZCoM[j+1] - Z[j+1]
     inv_dZ_j_jm1   = zeros( T, N_Z ) # 1 / ( ZCoM[j]   - ZCoM[j-1] )
@@ -1437,6 +1437,38 @@ function SetupCartesianGrid( Xmax::T,     Xmax_lin::T,
     Get_WENO3_w_plus_w_minus_Z!( X, w_plus_i_p1, w_minus_i_p1 )
     Get_WENO3_w_plus_w_minus_Z!( Y, w_plus_j_p1, w_minus_j_p1 )
 
+    # Get grid X-intervals (and inverse intervals) needed for M1 advection & scalar advection:
+    ΔX_L           = zeros( T, N_X ) # X[i+1]    - XCoM[i]
+    ΔX_R           = zeros( T, N_X ) # XCoM[i+1] - X[i+1]
+    inv_dX_i_im1   = zeros( T, N_X ) # 1 / ( XCoM[i]   - XCoM[i-1] )
+    inv_dX_ip1_i   = zeros( T, N_X ) # 1 / ( XCoM[i+1] - XCoM[i]   )
+    inv_dX_ip2_ip1 = zeros( T, N_X ) # 1 / ( XCoM[i+2] - XCoM[i+1] )
+
+    # Fill the intervals for interior cells, and return the boundary values:
+
+    inv_dX_i_im1_InnerBoundary, inv_dX_ip1_i_InnerBoundary, inv_dX_ip2_ip1_InnerBoundary,
+    ΔX_L_InnerBoundary, ΔX_R_InnerBoundary,
+    inv_dX_i_im1_OuterBoundary, inv_dX_ip1_i_OuterBoundary, inv_dX_ip2_ip1_OuterBoundary,
+    ΔX_L_OuterBoundary, ΔX_R_OuterBoundary = Compute_Grid_Differences!( ΔX_L, ΔX_R, 
+                                             inv_dX_i_im1, inv_dX_ip1_i, inv_dX_ip2_ip1,
+                                             X, XCoM )
+
+    # Get grid Y-intervals (and inverse intervals) needed for M1 advection & scalar advection:
+    ΔY_L           = zeros( T, N_Y ) # Y[j+1]    - YCoM[j]
+    ΔY_R           = zeros( T, N_Y ) # YCoM[j+1] - Y[j+1]
+    inv_dY_j_jm1   = zeros( T, N_Y ) # 1 / ( YCoM[j]   - YCoM[j-1] )
+    inv_dY_jp1_j   = zeros( T, N_Y ) # 1 / ( YCoM[j+1] - YCoM[j]   )
+    inv_dY_jp2_jp1 = zeros( T, N_Y ) # 1 / ( YCoM[j+2] - YCoM[j+1] )
+
+    # Fill the intervals for interior cells, and return the boundary values:
+
+    inv_dY_j_jm1_InnerBoundary, inv_dY_jp1_j_InnerBoundary, inv_dY_jp2_jp1_InnerBoundary,
+    ΔY_L_InnerBoundary, ΔY_R_InnerBoundary,
+    inv_dY_j_jm1_OuterBoundary, inv_dY_jp1_j_OuterBoundary, inv_dY_jp2_jp1_OuterBoundary,
+    ΔY_L_OuterBoundary, ΔY_R_OuterBoundary = Compute_Grid_Differences!( ΔY_L, ΔY_R, 
+                                             inv_dY_j_jm1, inv_dY_jp1_j, inv_dY_jp2_jp1,
+                                             Y, YCoM )
+
     # Get 1 / ΔV:
     inv_ΔV  .= T(1.0) ./ ΔV
 
@@ -1448,5 +1480,17 @@ function SetupCartesianGrid( Xmax::T,     Xmax_lin::T,
                                  w_i_m1_X, w_i_0_X, w_i_p1_X, w_j_m1_Y, w_j_0_Y, w_j_p1_Y,
                                  q_i_m1_X, q_i_0_X, q_i_p1_X, q_j_m1_Y, q_j_0_Y, q_j_p1_Y,
                                  w_plus_i_p1, w_minus_i_p1, 
-                                 w_plus_j_p1, w_minus_j_p1 )
+                                 w_plus_j_p1, w_minus_j_p1,
+
+                                 ΔX_L, ΔX_R, inv_dX_i_im1, inv_dX_ip1_i, inv_dX_ip2_ip1,
+                                 inv_dX_i_im1_InnerBoundary, inv_dX_ip1_i_InnerBoundary, inv_dX_ip2_ip1_InnerBoundary,
+                                 ΔX_L_InnerBoundary, ΔX_R_InnerBoundary,
+                                 inv_dX_i_im1_OuterBoundary, inv_dX_ip1_i_OuterBoundary, inv_dX_ip2_ip1_OuterBoundary,
+                                 ΔX_L_OuterBoundary, ΔX_R_OuterBoundary,
+
+                                 ΔY_L, ΔY_R, inv_dY_j_jm1, inv_dY_jp1_j, inv_dY_jp2_jp1,
+                                 inv_dY_j_jm1_InnerBoundary, inv_dY_jp1_j_InnerBoundary, inv_dY_jp2_jp1_InnerBoundary,
+                                 ΔY_L_InnerBoundary, ΔY_R_InnerBoundary,
+                                 inv_dY_j_jm1_OuterBoundary, inv_dY_jp1_j_OuterBoundary, inv_dY_jp2_jp1_OuterBoundary,
+                                 ΔY_L_OuterBoundary, ΔY_R_OuterBoundary )
 end

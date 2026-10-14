@@ -41,9 +41,9 @@ using  ProgressMeter             # To show time step progress
 using  Dates, Printf
 
 const N_dust::Int           = 3      # 3 dust bins (Sil, C, PAH) 
-const N_passivescalars::Int = 19     # Number of passive scalars (for chemistry etc)
+const N_passivescalars::Int = 26     # Number of passive scalars (for chemistry etc)
 
-export SetupRHDsimulation, RestartRHDsimulation
+export SetupRHDsimulation
 
 
 """ This function performs a full RHD update over a hydro time-step Δt_Hydro. """
@@ -54,6 +54,7 @@ function UpdateRHD!( Δt_Hydro::Float64,
                      geometry::GeometryCylindrical{Float64},
                     ghostgrid::GhostPaddedGrid{Float64},
                            RT::StellarRTArrays,
+                    StellarAv::StellarBandAverages,
                   RadPressure::Bool    = true,
                    IRfeedback::Bool    = true,
                             z::Float64 = 0.0,
@@ -95,13 +96,6 @@ function UpdateRHD!( Δt_Hydro::Float64,
     ∂u_Z_∂Z    = hydrostate.∂u_Y_∂Y
     u_r_over_r = hydrostate.u_r_over_r
 
-    # Dust arrays:
-    ρd         = hydrostate.ρd
-    ρdud_r     = hydrostate.ρdud_X
-    ρdud_Z     = hydrostate.ρdud_Y
-    ud_r       = hydrostate.ud_X
-    ud_Z       = hydrostate.ud_Y
-
     # Boundary conditions:
     BC_Z_bot   = hydrostate.BC_Y_left
 
@@ -134,10 +128,12 @@ function UpdateRHD!( Δt_Hydro::Float64,
         @inbounds @simd for i in dN_r
             # Adiabatic index & mean molecular weight (needed to initialize temperature):
             γad[i,j] = Getγad( chemstate.xHII[i,j],  chemstate.xH2[i,j], 
-                               chemstate.xHeII[i,j], chemstate.xHeIII[i,j] )
+                               chemstate.xHeII[i,j], chemstate.xHeIII[i,j], 
+                               chemstate.HydrogenAndHelium )
 
             μ        = Getμ( chemstate.xHII[i,j],  chemstate.xH2[i,j], 
-                             chemstate.xHeII[i,j], chemstate.xHeIII[i,j] )
+                             chemstate.xHeII[i,j], chemstate.xHeIII[i,j], 
+                             chemstate.HydrogenAndHelium )
 
             # Recover primitives at geometric cell centers, from the 
             # conservative variables at the cell centers:
@@ -171,7 +167,7 @@ function UpdateRHD!( Δt_Hydro::Float64,
     Reset_Δρu!( RT.Δρu_IR_r,        RT.Δρu_IR_Z )
 
     # Determine an updated reduced speed of light for the radiative transfer:
-    RT.c̃  = FindRSL( RT.c̃, nothing, hydrostate, chemstate, duststate, geometry )
+    RT.c̃  = FindRSL_StellarRT( RT.c̃, RT, hydrostate, duststate, geometry )
 
     t_RT  = 0.0 # Initialize the RT time 
     while t_RT < Δt_Hydro
@@ -186,9 +182,10 @@ function UpdateRHD!( Δt_Hydro::Float64,
                                              duststate,
                                              z, CoolingHeating,
                                              geometry,
-                                             u_r_star_r, u_Z_star_Z, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r, 
+                                             u_r_star_r, u_Z_star_Z, ∂u_r_∂r, 
+                                             ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r, 
                                              nothing,  
-                                             RadPressure )
+                                             RadPressure, StellarAv )
 
         # Update time:
         t_RT += Δt_RT
@@ -243,10 +240,12 @@ function UpdateRHD!( Δt_Hydro::Float64,
             @inbounds begin 
                 # Compute the (updated) mean molecular weight & adiabatic index:
                 μ         = Getμ( chemstate.xHII[i,j],  chemstate.xH2[i,j], 
-                                  chemstate.xHeII[i,j], chemstate.xHeIII[i,j] )
+                                  chemstate.xHeII[i,j], chemstate.xHeIII[i,j], 
+                                  chemstate.HydrogenAndHelium )
 
                 γad[i,j]  = Getγad( chemstate.xHII[i,j],  chemstate.xH2[i,j], 
-                                    chemstate.xHeII[i,j], chemstate.xHeIII[i,j] )
+                                    chemstate.xHeII[i,j], chemstate.xHeIII[i,j], 
+                                    chemstate.HydrogenAndHelium )
 
                 # Get the latest temperature (from after thermochemistry update):
                 T[i,j]    = e[i,j] * μ * (γad[i,j] - 1) * mH / ( ρ[i,j] * kB )
@@ -282,6 +281,7 @@ end
 function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate from star 
                              dNdt_EUV2::Float64,  # EUV2 photon emission rate from star 
                              dNdt_EUV3::Float64,  # EUV2 photon emission rate from star 
+                                  Teff::Float64,  # Black-body effective temperature for the spectrum (K)
                                    DG₀::Float64,  # Dust-to-gas ratio (*not* normalized to Solar value)
                                    nH₀::Float64,  # H density (cm⁻³) inside cloud 
                                 nH_ext::Float64,  # H density (cm⁻³) far outside cloud 
@@ -291,6 +291,7 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
                             LZ_uniform::Float64,
                                   Rmax::Float64,
                                   Zmax::Float64,
+                        SharpCloudEdge::Bool,     # If true, the cloud edge is sharp. If false, there's a fast but smoother drop
                                     T₀::Float64,  # Temperature within cloud 
                                  T_ext::Float64,  # Temperature outside cloud 
                                   tmax::Float64,
@@ -302,9 +303,15 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
                                   xHD₀::Float64,  # HD fraction inside the cloud 
                                   xCI₀::Float64,
                                  xCII₀::Float64,
+                                xCIII₀::Float64,
                                   xCO₀::Float64,
                                   xOI₀::Float64,
                                  xOII₀::Float64,
+                                xOIII₀::Float64,
+                                 xOIV₀::Float64,
+                                 xSII₀::Float64,
+                                xSIII₀::Float64,
+                                 xSIV₀::Float64,
                               xHII_ext::Float64,  # H II fraction outside the cloud 
                                xH2_ext::Float64,  # H₂ fraction outside the cloud 
                              xHeII_ext::Float64,  # He II fraction outside the cloud 
@@ -313,17 +320,25 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
                                xHD_ext::Float64,  # HD fraction outside the cloud 
                                xCI_ext::Float64,
                               xCII_ext::Float64,
+                             xCIII_ext::Float64,
                                xCO_ext::Float64,
                                xOI_ext::Float64,
                               xOII_ext::Float64,
+                             xOIII_ext::Float64,
+                              xOIV_ext::Float64,
+                              xSII_ext::Float64,
+                             xSIII_ext::Float64,
+                              xSIV_ext::Float64,
                             Zgas_Zsun₀::Float64,
                                      z::Float64,
-                                 Hydro::Bool    = true,     # Hydrodynamics (on/off)
+                                 c̃_min::Float64 = 100 * kms, # Minimum RSL 
+                          Zcl_pos_norm::Float64 = 0.0,       # Z-position of the cloud, normalized by Zmax = Z[end]
+                                 Hydro::Bool    = true,      # Hydrodynamics (on/off)
                            RadPressure::Bool    = true,
                             IRfeedback::Bool    = true,
-                                   OTS::Bool    = false,    # On-the-spot approximation (on if true, off if false)
+                                   OTS::Bool    = false,     # On-the-spot approximation (on if true, off if false)
                      HydrogenAndHelium::Bool    = false,
-                             u_RMSturb::Float64 = 0.0,      # Initial turbulent RMS velocity 
+                             u_RMSturb::Float64 = 0.0,       # Initial turbulent RMS velocity 
                                N_r_lin::Int     = 64,
                                N_Z_lin::Int     = 64,
                                N_r_log::Int     = 64,
@@ -337,12 +352,15 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
                                 Nsaved::Int     = 300,
                             print_info::Bool    = true,
                               FileName::String  = "RHDSim.h5",
-                       FileDescription::String  = "RHD simulation test."
+                       FileDescription::String  = "RHD simulation test.",
+                   FluxMethodStellarRT::String  = "HLL"   # Stellar/IR M1 flux method: "HLL" or "GLF"
                              )
 
     PrintLYDIONLogo()
 
-    # Initialize the RSL for M1 stellar & Lyα RT (will be updated adaptively each time-step)
+    @assert FluxMethodStellarRT == "HLL" || FluxMethodStellarRT == "GLF" "FluxMethodStellarRT must be \"HLL\" or \"GLF\"."
+
+    # Initialize the RSL for M1 stellar/IR RT (will be updated adaptively each time-step)
     c̃          = c̃_min 
 
     # Setup uniform cylindrical grid:
@@ -364,14 +382,15 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
     dN_r       = 1:N_r 
     dN_Z       = 1:N_Z
 
-    # Center star & cloud appropriately:
+    # Place cloud at desired position:
+    Zcl_pos    = Zcl_pos_norm * Z[end]
+
+    # Center star appropriately:
     if BC_Z_left == :Reflect
-        # In this case there is symmetry around Z = 0, so we place the star & cloud at Z = 0:
-        Zcl_pos   = 0.0
+        # In this case there is symmetry around Z = 0, so we place the star at Z = 0:
         Zstar_pos = 0.0
     else
-        # Otherwise, we center the star & cloud:
-        Zcl_pos   = Z[end] / 2
+        # Otherwise, we center the star:
         Zstar_pos = Zcl_pos
     end
 
@@ -395,6 +414,7 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
                   
                   Hydrodynamics:              $(Hydro)
                   On-the-spot approximation:  $(OTS)
+                  Minimum RSL, c̃_min:         $(c̃_min / kms) km s⁻¹
 
                   """)
     end
@@ -480,15 +500,27 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
 
                     chemstate.xCI[i,j]    = xCI₀
                     chemstate.xCII[i,j]   = xCII₀
+                    chemstate.xCIII[i,j]  = xCIII₀
                     chemstate.xCO[i,j]    = xCO₀
+
                     chemstate.xOI[i,j]    = xOI₀
                     chemstate.xOII[i,j]   = xOII₀
+                    chemstate.xOIII[i,j]  = xOIII₀
+                    chemstate.xOIV[i,j]   = xOIV₀
+
+                    chemstate.xSII[i,j]   = xSII₀
+                    chemstate.xSIII[i,j]  = xSIII₀
+                    chemstate.xSIV[i,j]   = xSIV₀
 
                     # Adiabatic index:
-                    γad[i,j] = Getγad( xHII₀, xH2₀, xHeII₀, xHeIII₀ )
+                    γad[i,j] = Getγad( xHII₀, xH2₀, xHeII₀, xHeIII₀, chemstate.HydrogenAndHelium )
                 else
                     # Gas density much lower outside the cloud:
-                    ρ[i,j] = max( ρcl * exp( - ((R - Rcl)/δr)^2 ), ρext )
+                    if SharpCloudEdge
+                        ρ[i,j] = ρext
+                    else
+                        ρ[i,j] = max( ρcl * exp( - ((R - Rcl)/δr)^2 ), ρext )
+                    end
 
                     # Initial chemical abundances outside the cloud:
                     chemstate.xHII[i,j]   = xHII_ext
@@ -500,22 +532,31 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
 
                     chemstate.xCI[i,j]    = xCI_ext
                     chemstate.xCII[i,j]   = xCII_ext
+                    chemstate.xCIII[i,j]  = xCIII_ext
                     chemstate.xCO[i,j]    = xCO_ext
+
                     chemstate.xOI[i,j]    = xOI_ext
                     chemstate.xOII[i,j]   = xOII_ext
+                    chemstate.xOIII[i,j]  = xOIII_ext
+                    chemstate.xOIV[i,j]   = xOIV_ext
+
+                    chemstate.xSII[i,j]   = xSII_ext
+                    chemstate.xSIII[i,j]  = xSIII_ext
+                    chemstate.xSIV[i,j]   = xSIV_ext
 
                     # Adiabatic index:
                     γad[i,j] = Getγad( chemstate.xHII[i,j], chemstate.xH2[i,j], 
-                                       chemstate.xHeII[i,j], chemstate.xHeIII[i,j] )
+                                       chemstate.xHeII[i,j], chemstate.xHeIII[i,j], 
+                                       chemstate.HydrogenAndHelium )
                 end
 
                 # Gas temperature & pressure (just needed to set the right initial CFL time-step):
                 if R < Rcl
                     T[i,j] = T₀
-                    P[i,j] = ρ[i,j] * kB * T[i,j] / ( Getμ(xHII₀, xH2₀, xHeII₀, xHeIII₀) * mH )
+                    P[i,j] = ρ[i,j] * kB * T[i,j] / ( Getμ(xHII₀, xH2₀, xHeII₀, xHeIII₀, chemstate.HydrogenAndHelium) * mH )
                 else
                     T[i,j] = T_ext
-                    P[i,j] = ρ[i,j] * kB * T[i,j] / ( Getμ(xHII_ext, xH2_ext, xHeII_ext, xHeIII_ext) * mH )
+                    P[i,j] = ρ[i,j] * kB * T[i,j] / ( Getμ(xHII_ext, xH2_ext, xHeII_ext, xHeIII_ext, chemstate.HydrogenAndHelium) * mH )
                 end
 
                 # Gas momentum density:
@@ -574,13 +615,31 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
     #######                                                 #######
     ############################################################### 
 
+    if FluxMethodStellarRT == "HLL"
+        HLL_StellarRT = true 
+    else
+        HLL_StellarRT = false
+    end
+
+    # Compute SED-weighted quantities (H & He cross-sections etc) 
+    # & store in struct:
+    StellarAv = GetBBStellarAverages( Teff )
+
     # Generate all stellar RT arrays, including J, H, inteface fluxes, 
     # emissivities, and luminosities, for all 7 RT bands:
-    RT = GenerateStellarRTArrays_Idealized( dNdt_EUV1, dNdt_EUV2, dNdt_EUV3, ΔV, r, Z, 
-                                            Zstar_pos, σstar_cell, c̃, OTS )
+    RT = GenerateStellarRTArrays_Idealized( dNdt_EUV1, dNdt_EUV2, dNdt_EUV3, 
+                                            StellarAv.E_EUV1, StellarAv.E_EUV2, StellarAv.E_EUV3,
+                                            ΔV, r, Z, 
+                                            Zstar_pos, σstar_cell, c̃, c̃_min, OTS,
+                                            HLL_StellarRT )
 
     # Bolometric luminosity (for saving):
     L_bol = RT.Lum_bol
+
+    # Initialize equilibrium dust temperatures & grain charges from the
+    # initial gas, chemistry, radiation:
+    InitializeDustTemperaturesAndCharges!( duststate, hydrostate, 
+                                           chemstate, RT, nothing, z )
 
     ###############################################################
     #######                                                 #######
@@ -596,13 +655,13 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
         # Create save file:
         CreateHDF5File( FileName, dNdt_EUV1, dNdt_EUV2, dNdt_EUV3, L_bol,
                         N_r, N_Z, Nminsteps, Nmaxsteps, Nsaved,  
-                        RadPressure, IRfeedback,
+                        RadPressure, IRfeedback, c̃_min, 
                         OTS, z, 
                         tmax, σstar_cell, 
                         Zstar_pos,
                         DG₀, Zgas_Zsun₀,
                         BC_r_right, BC_Z_left, BC_Z_right,
-                        CFL, CFL_RT, c̃,
+                        CFL, CFL_RT, c̃, FluxMethodStellarRT,
                         FileDescription )
 
         # Save spatial grid:
@@ -623,7 +682,7 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
         Δt_Hydro   = 0.0
 
         SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, duststate, RT,
-                             save_index, t, Δt_Hydro )
+                             save_index, t )
     end
 
     Δt_Resolve  = tmax / Nminsteps
@@ -658,7 +717,7 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
                     duststate,
                     geometry, 
                     ghostgrid, 
-                    RT,
+                    RT, StellarAv,
                     RadPressure, IRfeedback,
                     z, Hydro, CoolingHeating )
 
@@ -667,12 +726,12 @@ function SetupRHDsimulation( dNdt_EUV1::Float64,  # EUV1 photon emission rate fr
         step += 1
 
         # ----------- Decide to save data --------------
-        if t ≥ t_next_save  -  save_tol # The last factor is to avoid missing a save because round-off errors 
+        if SaveData && t ≥ t_next_save  -  save_tol # The last factor is to avoid missing a save because round-off errors 
             save_index += 1
 
             # Save data:
             SaveRHDTimeStepHDF5( FileName, hydrostate, chemstate, duststate, RT,
-                                 save_index, t, Δt_Hydro )
+                                 save_index, t )
 
             # Move the 'next save' appointment forward until it is in the future 
             while t ≥ t_next_save - save_tol

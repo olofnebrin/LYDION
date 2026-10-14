@@ -18,7 +18,7 @@ using  Base.Threads               # For CPU acceleration
 export Initialize_ν_Scratch2D!, AdvectLyα!, FrequencyUpdateJLyα_AllCells!, UpdateLyαJandH! 
 
 const DEBUG_Lyα::Bool     = false    # For debugging/ensuring correct array sizes (default: false)
-const LOG_LYA_TIMES::Bool = false    # Set true to print per-step timings, only useful for benchmarking performance (default: false)
+const LOG_LYA_TIMES::Bool = false      # Set true to print per-step timings, only useful for benchmarking performance (default: false)
 
 
 const scratch_ν = Ref{Vector{NTuple{7, Vector{Float64}}}}(Vector{NTuple{7, Vector{Float64}}}())
@@ -53,20 +53,22 @@ const ϵ_Active::Float64 = 1e-10
     Δν   = Lyα.Δν
 
     # Grid size & intervals:
-    N_r, N_Z, N_ν  = size( J )   # Number of bins 
+    N_ν, N_r, N_Z  = size( J )   # Number of bins 
     dN_r           = 1:N_r 
     dN_Z           = 1:N_Z 
     dN_ν           = Lyα.dN_ν    # Useful ν-interval, 1:N_ν
 
     # Start by computing the total Lyα energy over the whole simulation box:
+
     Etot = 0.0
-    for k in dN_ν
-        for j in dN_Z
-            @inbounds @simd for i in dN_r
-                Etot += Δν[k] * max( J[i,j, k] - Jeps, 0.0 ) * ΔV[i,j]
+    for j in dN_Z 
+        @inbounds for i in dN_r 
+            ΔV_ij = ΔV[i,j]
+            @simd for k in dN_ν
+                Etot += Δν[k] * max( J[k,i,j] - Jeps, 0.0 ) * ΔV_ij
             end
-        end
-    end
+        end # End of i-loop 
+    end # End of j-loop 
 
     kmin = N_ν   # Initialize smallest value of k containing active J 
     kmax = 1     # Initialize largest value of k containing active J 
@@ -75,7 +77,7 @@ const ϵ_Active::Float64 = 1e-10
         Ebin = 0.0 # Initialize energy in bin 
         for j in dN_Z
             @inbounds @simd for i in dN_r
-                Ebin += Δν[k] * max( J[i,j, k] - 10 * Jeps, 0.0 ) * ΔV[i,j]
+                Ebin += Δν[k] * max( J[k,i,j] - 10 * Jeps, 0.0 ) * ΔV[i,j]
             end
         end
 
@@ -93,7 +95,6 @@ const ϵ_Active::Float64 = 1e-10
 
     return kmin, kmax
 end
-
 
 """ This function performs the M1 advection of Lyα J and H over a given time-step (times c̃), 
     for all (active) frequency bins. 
@@ -134,9 +135,6 @@ end
     F_r_Hr = Lyα.F_r_Hr_Lyα;  F_Z_Hr = Lyα.F_Z_Hr_Lyα
     F_r_HZ = Lyα.F_r_HZ_Lyα;  F_Z_HZ = Lyα.F_Z_HZ_Lyα
 
-    # Eddington tensor components:
-    D_rr   = Lyα.D_rr_Lyα;    D_ZZ = Lyα.D_ZZ_Lyα;   D_rZ = Lyα.D_rZ_Lyα
-
     # ϕϕ-component of radiation pressure tensor K = D × J at interfaces, 
     # needed for geometric source term:
     K_ϕϕ_iphalf = Lyα.K_ϕϕ_iphalf_Lyα
@@ -144,19 +142,6 @@ end
 
     # Flux opacity:
     α_F  = Lyα.α_F_Lyα
-
-    # Make sure the scratch arrays for interface fluxes & Kϕϕ have the correct size:
-    if DEBUG_Lyα
-        nthreads = Threads.maxthreadid()
-        @assert size( K_ϕϕ_iphalf, 3 ) == nthreads
-        @assert size( K_ϕϕ_imhalf, 3 ) == nthreads
-        @assert size( F_r, 3 )         == nthreads
-        @assert size( F_Z, 3 )         == nthreads
-        @assert size( F_r_Hr, 3 )      == nthreads
-        @assert size( F_Z_Hr, 3 )      == nthreads
-        @assert size( F_r_HZ, 3 )      == nthreads
-        @assert size( F_Z_HZ, 3 )      == nthreads
-    end
 
     # -------------------------------------------------------------------------------------
     # -------  M 1  A D V E C T I O N  O F  L Y M A N - α  F O R  A L L  B I N S  ---------
@@ -166,35 +151,16 @@ end
 
     # Find frequency bins that are active (non-negligible J):
     kmin, kmax = FindActiveBins( Lyα, geometry.ΔV )
-    
-    # M1 advection of Lyα J and H for all active bins:
-    @threads :static for k in kmin:kmax
-        # Get thread ID for the interface flux & Kϕϕ scratch arrays:
-        tid = Threads.threadid() 
-        @inbounds begin
 
-            # Spatial advection of J & H, and absorption of H (flux-absorption)
-            # for every frequency bin:
-            AdvectJandH!( c̃Δt,                  α_F[:,:,k],        
-                          J[:,:,k],             Jold[:,:,k], 
-                          H_r[:,:,k],           H_Z[:,:,k], 
-                          D_rr[:,:,k],          D_ZZ[:,:,k],        D_rZ[:,:,k],  # Eddington factors D = K / J
-                          K_ϕϕ_iphalf[:,:,tid], K_ϕϕ_imhalf[:,:,tid],
-                          F_r[:,:,tid],         F_Z[:,:,tid],                     # Fluxes of J 
-                          F_r_Hr[:,:,tid],      F_Z_Hr[:,:,tid],                  # Fluxes of H_r 
-                          F_r_HZ[:,:,tid],      F_Z_HZ[:,:,tid],                  # Fluxes of H_Z 
+    AdvectJandH!( c̃Δt, α_F, J, Jold, H_r, H_Z, K_ϕϕ_iphalf, K_ϕϕ_imhalf, 
+                  F_r, F_Z, F_r_Hr, F_Z_Hr, F_r_HZ, F_Z_HZ, 
+                  geometry, u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
 
-                          geometry, 
+                  # Other stuff:
+                  UpdateLyaJold, 
+                  BC_r_left,  BC_r_right,  BC_Z_bot,  BC_Z_top,
+                  kmin, kmax, Lyα.FluxMethod )
 
-                          u_r_star, u_Z_star, ∂u_r_∂r, ∂u_r_∂Z, ∂u_Z_∂r, ∂u_Z_∂Z, u_r_over_r,
-
-                          # Other stuff:
-                          UpdateLyaJold, 
-                          BC_r_left,  BC_r_right,  BC_Z_bot,  BC_Z_top,
-                          Val(:Serial) )
-            
-        end # End of inbounds 
-    end # End of k (frequency-bin)-loop 
 
     # Update old H components (important for sub-cycling of emission/absorption,
     # so old values are up to date) (J_old is already set to J within AdvectJandH!):
@@ -209,36 +175,52 @@ end
     Doppler shifts, and atomic recoil. H is also updated for consistency 
     with assumed fixed Eddington tensor. A BDF1 method is used over a 
     time-step Δt, with Δw ≡ 1 / c̃ Δt. """
-@views @fastmath function FrequencyUpdateJLyα!( Δw::Float64, 
-                                                 J::AbstractArray{Float64},
-                                              Jold::AbstractArray{Float64},
-                                            Fij_kp::AbstractArray{Float64}, 
-                                             Fij_k::AbstractArray{Float64}, 
-                                            Fij_km::AbstractArray{Float64},
-                                               A_ν::AbstractArray{Float64},
-                                               B_ν::AbstractArray{Float64},
-                                               C_ν::AbstractArray{Float64},
-                                               D_ν::AbstractArray{Float64},
+@inline @fastmath function FrequencyUpdateJLyα!( Δw::Float64, 
+                                                  J::Array{Float64,3},
+                                               Jold::Array{Float64,3},
+                                             Fij_kp::Array{Float64,3}, 
+                                              Fij_k::Array{Float64,3}, 
+                                             Fij_km::Array{Float64,3},
+                                                A_ν::Vector{Float64},
+                                                B_ν::Vector{Float64},
+                                                C_ν::Vector{Float64},
+                                                D_ν::Vector{Float64},
 
-                                          Cprime_ν::AbstractArray{Float64},
-                                          Dprime_ν::AbstractArray{Float64},
-                                               x_ν::AbstractArray{Float64},  # Holds the tridiagonal solution (length N_ν - 2)
-                                          dN_ν_int::UnitRange,               # Must be 2:(N_ν-1), where N_ν is the number of frequency bins
-                                               )
+                                           Cprime_ν::Vector{Float64},
+                                           Dprime_ν::Vector{Float64},
+                                                x_ν::Vector{Float64},  # Holds the tridiagonal solution (length N_ν - 2)
+                                                  i::Int,
+                                                  j::Int,
+                                                N_ν::Int
+                                                )
 
-    @inbounds begin 
-        # Lower diagonal (copyto! is slightly better than .=):
-        A_ν         .= Fij_km[dN_ν_int]
+    # Number of interior frequency bins included in the tridiagonal solve.
+    Nint = N_ν - 2
+
+    @inbounds @simd for row in 1:Nint
+        # row = 1 corresponds to k = 2, row = Nint corresponds to k = N_ν - 1.
+        k = row + 1
+
+        # Lower diagonal:
+        A_ν[row] = Fij_km[k,i,j]
+
         # Diagonal:
-        B_ν         .= .- ( Fij_k[dN_ν_int] .+ Δw )
+        B_ν[row] = - ( Fij_k[k,i,j] + Δw )
+
         # Upper diagonal:
-        C_ν         .= Fij_kp[dN_ν_int]
+        C_ν[row] = Fij_kp[k,i,j]
+
         # Right-hand side:
-        D_ν         .= .- Δw .* Jold[dN_ν_int] 
+        D_ν[row] = - Δw * Jold[k,i,j]
+    end
 
-        # Solve tridiagonal system:
-        J[dN_ν_int] .= TridiagonalSolve( A_ν, B_ν, C_ν, D_ν, Cprime_ν, Dprime_ν, x_ν )
+    # Solve tridiagonal system:
+    x_sol = TridiagonalSolve( A_ν, B_ν, C_ν, D_ν, Cprime_ν, Dprime_ν, x_ν )
 
+    # Copy solution back to J.
+    @inbounds @simd for row in 1:Nint
+        k = row + 1
+        J[k,i,j] = x_sol[row]
     end
     
     return nothing 
@@ -270,14 +252,23 @@ end
     Fij_kp = Lyα.Fij_kp;   Fij_k = Lyα.Fij_k;   Fij_km = Lyα.Fij_km
 
     # Grid size & intervals:
-    N_r, N_Z, N_ν  = size( J )               # Grid size 
-    dN_r           = 1:N_r                   # Useful r-interval 
-    dN_ν_int       = Lyα.dN_ν_int            # 2:(N_ν-1), useful ν-interval for the frequency update 
+    N_ν, N_r, N_Z  = size( J )               # Grid size 
+    dN_ν           = Lyα.dN_ν
     Δw             = @fastmath 1 / c̃Δt       # Useful constant for frequency diffusion/advection
+
+    if LOG_LYA_TIMES
+        t_freq_factors = 0.0
+        t_freq_solve   = 0.0
+        t_freq_Hcorr   = 0.0
+    end
 
     # Update frequency leakage factors so that they use the latest, post-advection, 
     # Eddington factors D:
     if UpdateFreqFactors
+        if LOG_LYA_TIMES
+            t0 = time_ns()
+        end
+
         UpdateFreqFactors!( Lyα, # The Lyα state/arrays 
                               T, # Gas temperature for every cell 
                         ∂u_r_∂r, # ∂u_r/∂r
@@ -286,6 +277,10 @@ end
                         ∂u_Z_∂Z, # ∂u_Z/∂Z
                      u_r_over_r, # ⟨u_r / r⟩ 
                        )
+
+        if LOG_LYA_TIMES
+            t_freq_factors = time_ns() - t0
+        end
     end
 
     # Initialize the scratch arrays on the very first call 
@@ -299,8 +294,13 @@ end
     # -------  F R E Q U E N C Y  S O L V E  F O R  A L L  C E L L S  (i,j)  --------------
     # -------------------------------------------------------------------------------------
 
-    Ncells = N_r * N_Z
-    @threads :static for idx in 1:Ncells
+    N_cells = N_r * N_Z
+
+    if LOG_LYA_TIMES
+        t0 = time_ns()
+    end
+
+    @threads :static for idx in 1:N_cells
         tid  = Threads.threadid()
         A_ν, B_ν, C_ν, D_ν, Cprime_ν, Dprime_ν, x_ν = local_scratch[tid] # Scratch arrays
 
@@ -311,11 +311,15 @@ end
         @inbounds begin
             # Update J by frequency diffusion & Doppler shifting:
             FrequencyUpdateJLyα!( Δw,
-                                  J[i,j,:],       Jold[i,j,:],
-                                  Fij_kp[i,j,:],  Fij_k[i,j,:], Fij_km[i,j,:],
+                                  J, Jold,
+                                  Fij_kp, Fij_k, Fij_km,
                                   A_ν, B_ν, C_ν, D_ν, Cprime_ν, Dprime_ν, x_ν,
-                                  dN_ν_int )
+                                  i, j, N_ν )
         end
+    end
+
+    if LOG_LYA_TIMES
+        t_freq_solve = time_ns() - t0
     end
 
     # -------------------------------------------------------------------------------------
@@ -324,52 +328,64 @@ end
 
     # Update H such that the reduced flux f = |H|/J stay constant (consistent with the fixed-D 
     # assumption in the frequency update), and also update Jold: 
-    Npairs = N_ν * N_Z
-    @threads :static for idx in 1:Npairs
+    if LOG_LYA_TIMES
+        t0 = time_ns()
+    end
 
-        # Map linear idx → (k,j), consistent with loop over k as outer:
-        k = (idx - 1) ÷ N_Z + 1
-        j = (idx - 1) % N_Z + 1 
+    @threads :static for idx in 1:N_cells
 
-        @inbounds @simd for i in dN_r
+        # Map linear idx → (i,j), consistent with loop over j as outer:
+        i = (idx - 1) % N_r + 1
+        j = (idx - 1) ÷ N_r + 1 
+
+        @inbounds @simd for k in dN_ν
             @fastmath begin
                 # Enforce floor J ≥ Jeps::
-                J_ijk    = max( J[i,j,k], Jeps )
+                J_kij    = max( J[k,i,j], Jeps )
 
                 # Load values of J (again, but floored), H_r, and H_Z: 
-                J[i,j,k] = J_ijk
-                Hr_ijk   = H_r[i,j,k]
-                HZ_ijk   = H_Z[i,j,k]
+                J[k,i,j] = J_kij
+                Hr_kij   = H_r[k,i,j]
+                HZ_kij   = H_Z[k,i,j]
 
                 # Preliminary re-scaling of H_r and H_Z:
-                invJold  = 1 / max( Jold[i,j,k], Jeps )
-                Ratio    = J_ijk  * invJold
-                Hr_ijk   = Hr_ijk * Ratio
-                HZ_ijk   = HZ_ijk * Ratio 
+                invJold  = 1 / max( Jold[k,i,j], Jeps )
+                Ratio    = J_kij  * invJold
+                Hr_kij   = Hr_kij * Ratio
+                HZ_kij   = HZ_kij * Ratio 
 
                 # Also enforce causality f ≤ 1 (can change D slightly if triggered):
-                Hmag_squared = Hr_ijk * Hr_ijk  +  HZ_ijk * HZ_ijk
-                if Hmag_squared > J_ijk * J_ijk
-                    ScaleFact  = J_ijk / sqrt( Hmag_squared ) 
-                    Hr_ijk = Hr_ijk * ScaleFact 
-                    HZ_ijk = HZ_ijk * ScaleFact 
+                Hmag_squared = Hr_kij * Hr_kij  +  HZ_kij * HZ_kij
+                if Hmag_squared > J_kij * J_kij
+                    ScaleFact  = J_kij / sqrt( Hmag_squared ) 
+                    Hr_kij = Hr_kij * ScaleFact 
+                    HZ_kij = HZ_kij * ScaleFact 
                 end 
 
                 # Save updated H_r and H_Z:
-                H_r[i,j,k]     = Hr_ijk
-                H_Z[i,j,k]     = HZ_ijk
+                H_r[k,i,j]     = Hr_kij
+                H_Z[k,i,j]     = HZ_kij
 
                 # Finally, update Jold:
-                Jold[i,j,k]    = J_ijk
+                Jold[k,i,j]    = J_kij
 
                 # Also update H_r_old and H_Z_old a final time:
-                H_r_old[i,j,k] = Hr_ijk
-                H_Z_old[i,j,k] = HZ_ijk
+                H_r_old[k,i,j] = Hr_kij
+                H_Z_old[k,i,j] = HZ_kij
 
             end # End of fastmath 
 
-        end # End of i-loop 
-    end # End of idx-loop 
+        end # End of k-loop 
+    end # End of cell loop 
+
+    if LOG_LYA_TIMES
+        t_freq_Hcorr = time_ns() - t0
+
+        println("  UpdateFreqFactors!: ", t_freq_factors * 1e-9, " s")
+        println("  tridiagonal solve:  ", t_freq_solve   * 1e-9, " s")
+        println("  H correction:       ", t_freq_Hcorr   * 1e-9, " s")
+        println("  frequency subtotal: ", (t_freq_factors + t_freq_solve + t_freq_Hcorr) * 1e-9, " s")
+    end
 
     return nothing 
 end

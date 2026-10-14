@@ -18,15 +18,39 @@ sys.path.insert(0, str(cmastro_src))
 import cmastro
 
 # ---------------- User inputs ----------------
-Filename_noLya = "RHDSim_StarCluster_NoLya_64x64_2026-04-18.h5"    # Run ignoring Lyα feedback
-Filename_Lya   = "RHDSim_StarCluster_Lya_64x64_2026-04-18.h5"      # Run with Lyα feedback
+Filename_noLya = "RHDSim_StarCluster_NoLya_512x512_2026-04-19.h5"    # Run ignoring Lyα feedback
+Filename_Lya   = "RHDSim_StarCluster_Lya_512x512_2026-04-19.h5"      # Run with Lyα feedback
 FigureName     = "LYDION_Figure_LyaVsNoLya.pdf"                      # Or .png
 
 Time1_kyr      = 5.0    # Earlier snapshot time (in kyrs)
-Time2_kyr      = 30.0   # Later snapshot time (in kyrs)
+Time2_kyr      = 20.0   # Later snapshot time (in kyrs)
 
-fontsize_cbar_label = 26   # the "nH (cm-3)" text
-fontsize_cbar_ticks = 22   # the "10^3", "10^4" numbers
+fontsize_cbar_ticks  = 26  # the "10^3", "10^4" numbers
+fontsize_panel_label = 40  # the "nH (cm-3)" text
+fontsize_time        = 38
+
+cmap_nH   = 'cma:laguna'
+cmap_eLya = 'magma' 
+
+# Diagnostics text options
+ShowDiagnosticsText         = True
+ShowLyaForceText            = True
+ShowLyaMultiplierText       = True
+ShowLyaEscapeFractionText   = True
+ShowLyaLuminosityText       = False
+ShowDirectForceText         = True
+ShowIRForceText             = True
+
+# Force variant: which Lyα force measure to show in the nH panels.
+#   "radial_net"  -> uses M_F_Lya_radial (net outward radial force / (L_Lya/c)),
+#                    falling back to M_F_Lya if radial is unavailable
+#   "antigravity" -> uses M_F_Lya (total force multiplier, i.e. F_Lya / (L_Lya/c)),
+#                    without preferring the radial-net variant
+ForceVariant = "radial_net"    # "radial_net" | "antigravity"
+
+fontsize_diagnostics_text   = 32
+diagnostics_x               = 0.04
+diagnostics_y               = 0.85
 
 # Useful constants
 kB  = 1.38e-16
@@ -35,6 +59,8 @@ X   = 0.76
 yr  = 3.1556926e7
 kyr = 1e3 * yr
 pc  = 3.085677581e18
+c   = 2.99792458e10
+Lsun = 3.839e33
 
 ###############################################################
 #######                                                 #######
@@ -122,6 +148,64 @@ def reorder_history_3d(arr, t, r_edges, Z_edges):
         raise RuntimeError(
             f"After moving time axis, spatial dims {a1, a2} do not match Nr = {Nr}, Nz = {Nz}"
         )
+
+def read_dataset_if_exists(file, name, default=None):
+    return file[name][:] if name in file else default
+
+def read_attr_if_exists(group, name, default=None):
+    return group.attrs[name] if name in group.attrs else default
+
+def read_first_existing_dataset(file, names, default=None):
+    for name in names:
+        if name in file:
+            return file[name][:]
+    return default
+
+def safe_scalar_at_index(arr, idx):
+    if arr is None:
+        return None
+    if idx < 0 or idx >= len(arr):
+        return None
+    val = arr[idx]
+    try:
+        val = float(np.asarray(val))
+    except Exception:
+        return None
+    if not np.isfinite(val):
+        return None
+    return val
+
+def fmt_value(x):
+    if x is None or (not np.isfinite(x)):
+        return None
+    if x == 0.0:
+        return "0"
+    ax = abs(x)
+    if ax >= 100.0 or ax < 0.01:
+        return f"{x:.2e}"
+    elif ax >= 10.0:
+        return f"{x:.1f}"
+    else:
+        return f"{x:.2f}"
+
+def fmt_math_value(x):
+    """
+    Format number for mathtext. Uses scientific notation with superscript
+    for very small / very large values.
+    """
+    if x is None or (not np.isfinite(x)):
+        return None
+    if x == 0.0:
+        return "0"
+    ax = abs(x)
+    if ax >= 100.0 or ax < 0.01:
+        exp = int(np.floor(np.log10(ax)))
+        mant = x / (10.0**exp)
+        return rf"{mant:.2f}\times10^{{{exp}}}"
+    elif ax >= 10.0:
+        return f"{x:.1f}"
+    else:
+        return f"{x:.2f}"
     
 def read_run(filename, load_T=False):
     """
@@ -137,6 +221,25 @@ def read_run(filename, load_T=False):
 
         P_raw    = f["GasPressure_History"][:] if "GasPressure_History" in f else None
         eLya_raw = f["e_Lya_History"][:]       if "e_Lya_History"       in f else None
+
+        settings = f["Settings"] if "Settings" in f else None
+        L_bol    = read_attr_if_exists(settings, "L_bol", None) if settings is not None else None
+
+        M_F_Lya         = read_dataset_if_exists(f, "M_F_History")
+        M_F_Lya_radial  = read_dataset_if_exists(f, "M_F_radial_net_History")
+        L_Lya           = read_dataset_if_exists(f, "L_Lya_History")
+        f_esc_Lya       = read_first_existing_dataset(
+            f,
+            ["f_esc_Lya_History", "fesc_Lya_History", "f_esc_History_Lya"],
+            default=None
+        )
+
+        M_F_dir         = read_dataset_if_exists(f, "M_F_dir_History")
+        M_F_dir_radial  = read_dataset_if_exists(f, "M_F_dir_radial_net_History")
+
+        M_F_IR          = read_dataset_if_exists(f, "M_F_IR_History")
+        M_F_IR_radial   = read_dataset_if_exists(f, "M_F_IR_radial_net_History")
+        L_IR            = read_dataset_if_exists(f, "L_IR_History")
 
     rho_hist  = reorder_history_3d(rho_raw, t, r, Z)
     nH_hist   = X * rho_hist / mH
@@ -156,7 +259,17 @@ def read_run(filename, load_T=False):
         T_hist=T_hist,
         P_hist=P_hist,
         eLya_hist=eLya_hist,
-        saved_idx=saved_idx
+        saved_idx=saved_idx,
+        L_bol=L_bol,
+        M_F_Lya=M_F_Lya,
+        M_F_Lya_radial=M_F_Lya_radial,
+        L_Lya=L_Lya,
+        f_esc_Lya=f_esc_Lya,
+        M_F_dir=M_F_dir,
+        M_F_dir_radial=M_F_dir_radial,
+        M_F_IR=M_F_IR,
+        M_F_IR_radial=M_F_IR_radial,
+        L_IR=L_IR
     )
 
 def find_best_time_pair(target_time_kyr, run_noLya, run_Lya, mismatch_weight=1.0):
@@ -194,6 +307,134 @@ def fmt_log_tick(val):
         return r"$10$"
     else:
         return rf"$10^{{{exp}}}$"
+
+def _pick_Lya_force(run, k):
+    """
+    Return the Lyα force in units of L_bol/c, honouring ForceVariant.
+
+      "radial_net"  -> prefers M_F_Lya_radial * L_Lya / L_bol,
+                       falls back to M_F_Lya * L_Lya / L_bol
+      "antigravity" -> always uses M_F_Lya * L_Lya / L_bol (the total
+                       force multiplier, not projected onto the radial axis)
+
+    Returns the scalar value, or None if unavailable.
+    """
+    L_Lya_val = safe_scalar_at_index(run["L_Lya"], k)
+    L_bol_val = run["L_bol"]
+    try:
+        if L_bol_val is not None:
+            L_bol_val = float(np.asarray(L_bol_val))
+    except Exception:
+        L_bol_val = None
+
+    if (L_Lya_val is None) or (L_bol_val is None):
+        return None
+
+    M_F_val        = safe_scalar_at_index(run["M_F_Lya"], k)
+    M_F_radial_val = safe_scalar_at_index(run["M_F_Lya_radial"], k)
+
+    if ForceVariant == "radial_net":
+        if M_F_radial_val is not None:
+            return M_F_radial_val * L_Lya_val / L_bol_val
+        elif M_F_val is not None:
+            return M_F_val * L_Lya_val / L_bol_val
+    else:  # "antigravity"
+        if M_F_val is not None:
+            return M_F_val * L_Lya_val / L_bol_val
+
+    return None
+
+def make_radiation_diagnostics_lines(run, k):
+    """
+    Build diagnostic text lines for the nH panels.
+    Does NOT include f_esc_Lya — that goes in the e_Lyα panels via
+    make_eLya_diagnostics_lines().
+    """
+    lines = []
+
+    L_Lya_val      = safe_scalar_at_index(run["L_Lya"], k)
+
+    M_F_dir_val        = safe_scalar_at_index(run["M_F_dir"], k)
+    M_F_dir_radial_val = safe_scalar_at_index(run["M_F_dir_radial"], k)
+
+    M_F_IR_val         = safe_scalar_at_index(run["M_F_IR"], k)
+    M_F_IR_radial_val  = safe_scalar_at_index(run["M_F_IR_radial"], k)
+    L_IR_val           = safe_scalar_at_index(run["L_IR"], k)
+
+    L_bol_val = run["L_bol"]
+    try:
+        if L_bol_val is not None:
+            L_bol_val = float(np.asarray(L_bol_val))
+    except Exception:
+        L_bol_val = None
+
+    if ShowLyaForceText:
+        F_Lya = _pick_Lya_force(run, k)
+        if F_Lya is not None:
+            F_str = fmt_math_value(F_Lya)
+            if F_str is not None:
+                lines.append(rf"$F_{{Ly\alpha}} = {F_str}\,L_{{bol}}/c$")
+
+    if ShowDirectForceText and (L_bol_val is not None):
+        if M_F_dir_radial_val is not None:
+            F_dir_over_Lbolc = M_F_dir_radial_val
+            F_str = fmt_math_value(F_dir_over_Lbolc)
+            if F_str is not None:
+                lines.append(rf"$F_{{dir}} = {F_str}\,L_{{bol}}/c$")
+        elif M_F_dir_val is not None:
+            F_dir_over_Lbolc = M_F_dir_val
+            F_str = fmt_math_value(F_dir_over_Lbolc)
+            if F_str is not None:
+                lines.append(rf"$F_{{dir}} = {F_str}\,L_{{bol}}/c$")
+
+    if ShowIRForceText and (L_bol_val is not None) and (L_IR_val is not None):
+        if M_F_IR_radial_val is not None:
+            F_IR_over_Lbolc = M_F_IR_radial_val * L_IR_val / L_bol_val
+            F_str = fmt_math_value(F_IR_over_Lbolc)
+            if F_str is not None:
+                lines.append(rf"$F_{{IR}} = {F_str}\,L_{{bol}}/c$")
+        elif M_F_IR_val is not None:
+            F_IR_over_Lbolc = M_F_IR_val * L_IR_val / L_bol_val
+            F_str = fmt_math_value(F_IR_over_Lbolc)
+            if F_str is not None:
+                lines.append(rf"$F_{{IR}} = {F_str}\,L_{{bol}}/c$")
+
+    if ShowLyaMultiplierText:
+        if ForceVariant == "radial_net":
+            M_F_val = safe_scalar_at_index(run["M_F_Lya_radial"], k)
+            if M_F_val is None:
+                M_F_val = safe_scalar_at_index(run["M_F_Lya"], k)
+        else:
+            M_F_val = safe_scalar_at_index(run["M_F_Lya"], k)
+            
+        if M_F_val is not None:
+            M_str = fmt_math_value(M_F_val)
+            if M_str is not None:
+                lines.append(rf"$M_F = {M_str}$")
+
+    if ShowLyaLuminosityText and (L_bol_val is not None) and (L_Lya_val is not None):
+        ratio = L_Lya_val / L_bol_val
+        ratio_str = fmt_math_value(ratio)
+        if ratio_str is not None:
+            lines.append(rf"$L_{{Ly\alpha}} = {ratio_str}\,L_{{bol}}$")
+
+    return lines
+
+def make_eLya_diagnostics_lines(run, k):
+    """
+    Build diagnostic text lines for the e_Lyα panels.
+    Currently contains only f_esc_Lya.
+    """
+    lines = []
+
+    if ShowLyaEscapeFractionText:
+        f_esc_val = safe_scalar_at_index(run["f_esc_Lya"], k)
+        if f_esc_val is not None:
+            fesc_str = fmt_math_value(f_esc_val)
+            if fesc_str is not None:
+                lines.append(rf"$f_{{esc,Ly\alpha}} = {fesc_str}$")
+
+    return lines
 
 # -------------------------------------------------------------------
 # Read both runs
@@ -254,8 +495,8 @@ if (nH0_noLya_pos.size == 0) or (nH0_Lya_pos.size == 0):
 
 nH0_char = max(np.max(nH0_noLya_pos), np.max(nH0_Lya_pos))
 
-vmin_nH = 10.0**(np.log10(nH0_char) - 2.0 - 0.4)
-vmax_nH = 10.0**(np.log10(nH0_char) + 2.0 - 0.4)
+vmin_nH = 10.0**(np.log10(nH0_char) - 2.0 - 0.5)
+vmax_nH = 10.0**(np.log10(nH0_char) + 2.0 - 0.5)
 norm_nH = LogNorm(vmin=vmin_nH, vmax=vmax_nH)
 
 logmin_nH = int(np.ceil(np.log10(vmin_nH)))
@@ -270,7 +511,7 @@ ticklabels_nH = [fmt_log_tick(v) for v in ticks_nH]
 T_vmin, T_vmax = 1.0, 1e5      # adjust if needed: e.g. (1e3, 3e4) for HII focus
 norm_T = LogNorm(vmin=T_vmin, vmax=T_vmax, clip=True)
 
-ticks_T      = [1.0, 1e2, 1e4]
+ticks_T      = [1.0, 10.0, 1e2, 1e3, 1e4, 1e5]
 ticklabels_T = [fmt_log_tick(v) for v in ticks_T]
 
 cmap_T = 'coolwarm'
@@ -279,7 +520,7 @@ cmap_T = 'coolwarm'
 # Choose scales for Lyα-only panels
 # -------------------------------------------------------------------
 
-norm_eLya  = LogNorm(vmin=1e-16, vmax=1e-6)
+norm_eLya  = LogNorm(vmin=1e-14, vmax=1e-6)
 norm_ratio = LogNorm(vmin=0.1,   vmax=10.0)
 
 ticks_ratio      = [0.1, 1.0, 10.0]
@@ -379,8 +620,6 @@ ax33 = make_ax(fig, col2_left, bot_bottom,  wpanel, bot_height, sharex=ax11, sha
 # Plot density panels (rows 0–1, cols 0–1)
 # -------------------------------------------------------------------
 
-cmap_nH = 'cma:laguna'
-
 im11 = ax11.pcolormesh(R_edges_pc, Z_edges_pc, nH_11, norm=norm_nH, shading='auto',
                        cmap=cmap_nH, rasterized=True)
 im12 = ax12.pcolormesh(R_edges_pc, Z_edges_pc, nH_12, norm=norm_nH, shading='auto',
@@ -395,9 +634,9 @@ im22 = ax22.pcolormesh(R_edges_pc, Z_edges_pc, nH_22, norm=norm_nH, shading='aut
 # -------------------------------------------------------------------
 
 im13 = ax13.pcolormesh(R_edges_pc, Z_edges_pc, eLya_1, norm=norm_eLya,
-                       shading='auto', cmap='magma', rasterized=True)
+                       shading='auto', cmap = cmap_eLya, rasterized=True)
 im23 = ax23.pcolormesh(R_edges_pc, Z_edges_pc, eLya_2, norm=norm_eLya,
-                       shading='auto', cmap='magma', rasterized=True)
+                       shading='auto', cmap = cmap_eLya, rasterized=True)
 
 # -------------------------------------------------------------------
 # Plot bottom row: T (both runs) | P_Lyα/P
@@ -410,7 +649,7 @@ im32 = ax32.pcolormesh(R_edges_pc, Z_edges_pc, T_b2, norm=norm_T,
 im33 = ax33.pcolormesh(R_edges_pc, Z_edges_pc, Ratio_2, norm=norm_ratio,
                        shading='auto', cmap='cma:unph', rasterized=True)
 
-# Contours for P_Lyα / P on ax33
+# Contours for P_Lya / P on ax33
 #contour_levels = [1.5, 2.0]
 
 #cs33 = ax33.contour(
@@ -481,7 +720,33 @@ time_style = dict(
     path_effects=[pe.withStroke(linewidth=3, foreground='black')]
 )
 
-fontsize_time = 35
+time_style_dark = dict(
+    ha='left',
+    va='top',
+    color='black',
+    path_effects=[pe.withStroke(linewidth=3, foreground='white')]
+)
+
+panel_label_style_white = dict(
+    ha='right',
+    va='bottom',
+    color='white',
+    path_effects=[pe.withStroke(linewidth=3.5, foreground='black')]
+)
+
+panel_label_style_black = dict(
+    ha='right',
+    va='bottom',
+    color='black',
+    path_effects=[pe.withStroke(linewidth=3.5, foreground='white')]
+)
+
+diagnostics_style = dict(
+    ha='left',
+    va='top',
+    color='white',
+    path_effects=[pe.withStroke(linewidth=3, foreground='black')]
+)
 
 ax11.text(0.04, 0.96, f"t = {run_noLya['t'][k1_noLya]/kyr:.2f} kyr",
           transform=ax11.transAxes, **time_style, fontsize=fontsize_time)
@@ -496,21 +761,79 @@ ax22.text(0.04, 0.96, f"t = {run_Lya['t'][k2_Lya]/kyr:.2f} kyr",
 ax23.text(0.04, 0.96, f"t = {run_Lya['t'][k2_Lya]/kyr:.2f} kyr",
           transform=ax23.transAxes, **time_style, fontsize=fontsize_time)
 ax31.text(0.04, 0.96, f"t = {run_noLya['t'][k2_noLya]/kyr:.2f} kyr",
-          transform=ax31.transAxes, **time_style, fontsize=fontsize_time)
+          transform=ax31.transAxes, **time_style_dark, fontsize=fontsize_time)
 ax32.text(0.04, 0.96, f"t = {run_Lya['t'][k2_Lya]/kyr:.2f} kyr",
-          transform=ax32.transAxes, **time_style, fontsize=fontsize_time)
+          transform=ax32.transAxes, **time_style_dark, fontsize=fontsize_time)
 ax33.text(0.04, 0.96, f"t = {run_Lya['t'][k2_Lya]/kyr:.2f} kyr",
-          transform=ax33.transAxes, **time_style, fontsize=fontsize_time)
+          transform=ax33.transAxes, **time_style_dark, fontsize=fontsize_time)
+
+# Diagnostics text in nH panels (forces and multiplier, but NOT f_esc)
+if ShowDiagnosticsText:
+    lines_no_t1 = make_radiation_diagnostics_lines(run_noLya, k1_noLya)
+    lines_ly_t1 = make_radiation_diagnostics_lines(run_Lya,   k1_Lya)
+    lines_no_t2 = make_radiation_diagnostics_lines(run_noLya, k2_noLya)
+    lines_ly_t2 = make_radiation_diagnostics_lines(run_Lya,   k2_Lya)
+
+    if len(lines_no_t1) > 0:
+        ax11.text(diagnostics_x, diagnostics_y, "\n".join(lines_no_t1),
+                  transform=ax11.transAxes, fontsize=fontsize_diagnostics_text,
+                  **diagnostics_style)
+
+    if len(lines_ly_t1) > 0:
+        ax12.text(diagnostics_x, diagnostics_y, "\n".join(lines_ly_t1),
+                  transform=ax12.transAxes, fontsize=fontsize_diagnostics_text,
+                  **diagnostics_style)
+
+    if len(lines_no_t2) > 0:
+        ax21.text(diagnostics_x, diagnostics_y, "\n".join(lines_no_t2),
+                  transform=ax21.transAxes, fontsize=fontsize_diagnostics_text,
+                  **diagnostics_style)
+
+    if len(lines_ly_t2) > 0:
+        ax22.text(diagnostics_x, diagnostics_y, "\n".join(lines_ly_t2),
+                  transform=ax22.transAxes, fontsize=fontsize_diagnostics_text,
+                  **diagnostics_style)
+
+# f_esc_Lya text in e_Lyα panels (col 2, rows 0–1)
+if ShowDiagnosticsText:
+    esc_lines_t1 = make_eLya_diagnostics_lines(run_Lya, k1_Lya)
+    esc_lines_t2 = make_eLya_diagnostics_lines(run_Lya, k2_Lya)
+
+    if len(esc_lines_t1) > 0:
+        ax13.text(diagnostics_x, diagnostics_y, "\n".join(esc_lines_t1),
+                  transform=ax13.transAxes, fontsize=fontsize_diagnostics_text,
+                  **diagnostics_style)
+
+    if len(esc_lines_t2) > 0:
+        ax23.text(diagnostics_x, diagnostics_y, "\n".join(esc_lines_t2),
+                  transform=ax23.transAxes, fontsize=fontsize_diagnostics_text,
+                  **diagnostics_style)
+
+ax11.text(0.94, 0.08, r"$n_H$ (cm$^{-3}$)",
+          transform=ax11.transAxes, fontsize=fontsize_panel_label,
+          **panel_label_style_white)
+
+ax13.text(0.94, 0.08, r"$e_{Ly\alpha}$ (erg cm$^{-3}$)",
+          transform=ax13.transAxes, fontsize=fontsize_panel_label,
+          **panel_label_style_white)
+
+ax31.text(0.94, 0.08, r"$T$ (K)",
+          transform=ax31.transAxes, fontsize=fontsize_panel_label,
+          **panel_label_style_black)
+
+ax33.text(0.56, 0.75, r"$e_{Ly\alpha}/3P \approx P_{Ly\alpha}/P$",
+          transform=ax33.transAxes, fontsize=fontsize_panel_label,
+          **panel_label_style_white)
 
 # -------------------------------------------------------------------
 # Colorbars (all inset, top-right of their host panel)
 # -------------------------------------------------------------------
 
-def make_inset_cbar(fig, ax, im, rect, label, ticks, ticklabels, dark=False):
+def make_inset_cbar(fig, ax, im, rect, ticks, ticklabels, dark=False):
     """
     Shared helper for all inset horizontal colorbars.
-    dark=True  → black text/outline on white background (for bright colormaps like coolwarm)
-    dark=False → white text/outline on black background (default, for dark colormaps)
+    dark=True  -> black text/outline on white background
+    dark=False -> white text/outline on black background
     """
     fg = 'black' if dark else 'white'
     bg = 'white' if dark else 'black'
@@ -522,43 +845,39 @@ def make_inset_cbar(fig, ax, im, rect, label, ticks, ticklabels, dark=False):
     cbar.outline.set_edgecolor(fg)
     cbar.outline.set_linewidth(1.2)
     cbar.ax.tick_params(axis="x", which='both', colors=fg, labelsize=fontsize_cbar_ticks,
-                        length=0, width=0, pad=5,
+                        length=0, width=0, pad=10,
                         bottom=False, top=False)
-    cbar.ax.minorticks_off()   # suppress log-scale minor ticks that ignore tick_params
-    cbar.set_label(label, color=fg, fontsize=fontsize_cbar_label, labelpad=4)
+    cbar.ax.minorticks_off()
     cbar.ax.set_facecolor(bg)
     return cbar
 
 # Density colorbar — row 0, col 0
 make_inset_cbar(fig, ax11, im11,
-                rect=[0.60, 0.92, 0.34, 0.03],
-                label=r"n$_{H}$ (cm$^{-3}$)",
+                rect=[0.56, 0.91, 0.38, 0.045],
                 ticks=ticks_nH, ticklabels=ticklabels_nH)
 
 # e_Lyα colorbar — row 0, col 2
 ticks_eLya      = [1e-14, 1e-10, 1e-6]
 ticklabels_eLya = [fmt_log_tick(v) for v in ticks_eLya]
 make_inset_cbar(fig, ax13, im13,
-                rect=[0.58, 0.92, 0.34, 0.03],
-                label=r"$e_{Ly\alpha}$ (erg cm$^{-3}$)",
+                rect=[0.54, 0.91, 0.40, 0.045],
                 ticks=ticks_eLya, ticklabels=ticklabels_eLya)
 
 # Temperature colorbar — bottom row, col 0 (dark: coolwarm is bright)
 make_inset_cbar(fig, ax31, im31,
-                rect=[0.60, 0.92, 0.34, 0.03],
-                label=r"T (K)",
+                rect=[0.56, 0.91, 0.38, 0.045],
                 ticks=ticks_T, ticklabels=ticklabels_T,
                 dark=True)
 
 # P_Lyα/P colorbar — bottom row, col 2
 make_inset_cbar(fig, ax33, im33,
-                rect=[0.58, 0.92, 0.34, 0.03],
-                label=r"P$_{Ly\alpha}$/P",
-                ticks=ticks_ratio, ticklabels=ticklabels_ratio)
+                rect=[0.56, 0.91, 0.38, 0.045],
+                ticks=ticks_ratio, ticklabels=ticklabels_ratio,
+                dark = True)
 
 # -------------------------------------------------------------------
 # Save figure
 # -------------------------------------------------------------------
 
-plt.savefig(FigureName, bbox_inches='tight')
+plt.savefig(FigureName, bbox_inches='tight', dpi = 600)
 plt.show()

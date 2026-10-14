@@ -1,5 +1,5 @@
 
-""" FILE:            CosmicRays
+""" FILE:           CosmicRays
 
     PURPOSE:        This module contains everything related to cosmic ray ionization and heating.
              

@@ -8,17 +8,21 @@ Manifest.toml
 
 # Python
 ReadMeAnimation.py
+__pycache__/
+*.pyc
 
 # VS Code
 .vscode/
 
-# Outputs / data 
+# Outputs / data
 *.h5
+*.hdf5
 *.dat
 *.mp4
 *.png
 *.pdf
-#*.txt
+# *.txt
+
 .DS_Store
 
 # Local plotting dependencies

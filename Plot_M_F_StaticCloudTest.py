@@ -9,9 +9,8 @@ yr   = 3.1556926e7
 kyr  = 1e3 * yr
 kms  = 1e5
 
-#filename_Lya =  "Aaron_RHDSim_Solar_Lya_256.h5"
-filename_Lya =  "StaticCloudTest.h5"
-#filename_Lya =  "RHDSim_Lya_128x128_2026-02-06.h5"
+#filename_Lya =  "CloudTest_theta0.7853981633974483_rs0.5_tau1.0e8_T10000.0_umax0.0_tauabs0.0_pd0.0_256x256.h5"
+filename_Lya =  "CloudTest_rs1.0_tau1.0e8_T10000.0_umax1000.0_tauabs0.0_pd0.0_64x64.h5"
 
 with h5py.File(filename_Lya, "r") as file:
     M_F       = file["M_F_History"][:]
@@ -102,12 +101,12 @@ fig.set_size_inches(12.5, 7.5)
 
 #TotMomentum = np.sum(mom * cell_vols)
 
-ax.semilogy( t[0:last_idx]/kyr, M_F[0:last_idx], linewidth = 2.5, color = "crimson",
+ax.semilogy( t[0:last_idx], M_F[0:last_idx], linewidth = 2.5, color = "crimson",
              linestyle = 'dashed', dash_capstyle = 'round' )
 #ax.semilogy( t[0:last_idx]/kyr, M_F_anti[0:last_idx], linewidth = 2.5, color = "crimson" )
 #ax.axhline( 18.4, color = "crimson", linestyle = "dashed", linewidth = 2.0)
- 
-ax.semilogy( t[0:last_idx]/kyr, L_Lya[0:last_idx]/(1e4*Lsun), linewidth = 2.5, color = "black" )
+
+ax.semilogy( t[0:last_idx], L_Lya[0:last_idx]/(1e4*Lsun), linewidth = 2.5, color = "black" )
 
 yl = [0.01, 0.1, 1.0, 10.0, 100.0, 1e3, 1e4]
 ylabels = ['0.01', '0.1', '1', '10', '100', '10$^{3}$', '10$^{4}$']
@@ -126,13 +125,13 @@ ax.text(10, pos_Lyatext, "Lyα luminosity L$_{Lyα}$/10$^{4}$ L$_{\odot}$ ", col
 ax.text(30, pos_fescLya, "f$_{esc,Lyα}$", color = "dodgerblue", fontsize = 28)
 ax.text(130, pos_fescLyC, "f$_{esc,LyC}$", color = "orangered", fontsize = 28)
 
-ax.set_xlabel("Time (kyrs)", labelpad = 20)
+ax.set_xlabel("Time", labelpad = 20)
 ax.set_ylim(0.01, 1e3)
 # Set different lengths for major and minor ticks
 ax.minorticks_on()
 ax.tick_params(axis='both', which='major', direction='in', length=20, width=2.5)
 ax.tick_params(axis='both', which='minor', direction='in', length=10, width=2.5)
 
-#plt.tight_layout(pad = 0.4)
+plt.tight_layout(pad = 0.4)
 
 plt.show()

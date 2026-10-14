@@ -9,7 +9,7 @@ import re
 from matplotlib.ticker import AutoMinorLocator, LogLocator, NullFormatter
 
 ########## USER INPUT #########################
-FileName  = "CloudTest_rs1.0_NoRecoil_tau1.0e9_T10000.0_umax0.0_tauabs0.0_pd0.0_64x64.h5"
+FileName  = "CloudTest_rs1.0_tau1.0e8_T10000.0_umax0.0_tauabs0.0_pd0.0_32x32.h5"
 frameskip = 1
 save_mp4  = True
 outname   = "StaticCloud_eLya_withLyaSpec.mp4"
@@ -26,10 +26,10 @@ spectrum_selection = "two_boundaries"   # "manual" or "two_boundaries"
 edge_indices = [0]              # e.g. [0, 5, 10]
 
 # What to animate on the left panel: either the 2D map or the spherical average profile.
-left_panel_mode = "axis"        # "map" or "axis"
+left_panel_mode = "map"        # "map" or "axis"
 
 # Whether to use log or linear color scale for e_Lya map/profile:
-eLya_scale      = "linear"         # "log" or "linear"
+eLya_scale      = "log"         # "log" or "linear"
 
 # --- Optional: plot analytical solution in left panel (only used if left_panel_mode == "axis") ---
 plot_analytical_left = True
@@ -38,7 +38,7 @@ analytical_linestyle = "--"
 analytical_linewidth = 3
 
 # --- Optional: plot analytical spectrum in spectrum panel (ONLY if spectrum_xaxis == "x") ---
-plot_analytical_spectrum = True
+plot_analytical_spectrum = False
 analytical_spec_label    = r"Analytical"
 analytical_spec_color    = "gray"
 analytical_spec_ls       = "--"
@@ -52,7 +52,7 @@ spectrum_xaxis  = "x"           # "dnu" or "x"
 # ν-window settings for the spectrum panel
 use_nu_window       = True
 nu_Lya              = 2.466e15             # Hz
-nu_window_fraction  = 2.5 * 0.007                # total width = frac * nu_Lya
+nu_window_fraction  = 3*2.5 * 0.007                # total width = frac * nu_Lya
 
 # Auto spectrum limits
 spec_ylim_factor   = 2.0       # ymax = factor * Jmax_final
@@ -345,7 +345,7 @@ if eLya_scale == "linear":
     vmax_Lya = 2.0 * eLya_max
     norm_Lya = None
 elif eLya_scale == "log":
-    vmin_Lya = 1e-5 * eLya_max
+    vmin_Lya = 1e-8 * eLya_max
     vmax_Lya = 4.0 * eLya_max
     if vmin_Lya <= 0.0:
         vmin_Lya = 1e-30
