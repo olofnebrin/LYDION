@@ -108,7 +108,9 @@ techniques, please cite:
 
 [Nebrin et al. (2026), arXiv:2606.02711](https://arxiv.org/abs/2606.02711)
 
-A permanent software DOI for the version of LYDION associated with this paper will be added here upon release.
+The LYDION v1.0.0 software release associated with this paper is permanently archived on Zenodo:
+
+[Nebrin (2026), LYDION v1.0.0](https://doi.org/10.5281/zenodo.23374329)
 
 # License
 
