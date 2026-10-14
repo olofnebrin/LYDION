@@ -9,6 +9,8 @@ Manifest.toml
 # Python
 ReadMeAnimation.py
 LYDION_PostDocPlot.py
+LYDION_Clock.py
+LYDION_Clock_OneRow.py
 LYDION_PresentationAnimation_T_PLya.py
 LYDION_PresentationAnimation_nH.py
 LYDION_PaperFig_EmissionProbabilityPlot.py
@@ -30,6 +32,7 @@ __pycache__/
 *.pdf
 *.asc
 # *.txt
+!README_Figure.png
 
 .DS_Store
 
