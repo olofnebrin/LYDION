@@ -81,9 +81,30 @@ for a full list).
 You can analyze this data however you want. Some simple Python scripts for making simulation animations and plots are included, some of which were used to create figures for 
 the methodology paper (note however that they may use, e.g., non-standard fonts). 
 
+# Lyα radiative transfer tests
+
+LYDION can also be run in Lyα radiative transfer-only mode, without evolving the
+full radiation hydrodynamics. Several example and validation setups are included
+in the repository, many of which are described further in the methodology paper.
+
+Example run scripts include:
+
+- `RunStaticCloudTest.jl`   (primary script)
+- `RunMFStaticCloudTest.jl`
+- `RunLyaEscapeFractionStaticCloudTest.jl`
+- `RunSourceSizeStaticCloudTest.jl`
+- `RunVelocityGradientSpectraTest.jl`
+
+These setups can be useful both for reproducing validation tests in the
+methodology paper and for experimenting with Lyα transport in idealized
+configurations. Simulation data (e.g. the Lyα energy density, emergent spectra, 
+and force multiplier) are saved in an HDF5 file. The full list of saved quantities 
+can be found in **SaveHDF5Data_StaticCloudTests.jl**.
+
 # Citation
 
-If you use LYDION in scientific work, please cite:
+If you use LYDION in scientific work, or use some of its new modelling
+techniques, please cite:
 
 [Nebrin et al. (2026), arXiv:2606.02711](https://arxiv.org/abs/2606.02711)
 
