@@ -8,6 +8,13 @@ Manifest.toml
 
 # Python
 ReadMeAnimation.py
+LYDION_PostDocPlot.py
+LYDION_PresentationAnimation_T_PLya.py
+LYDION_PresentationAnimation_nH.py
+LYDION_PaperFig_EmissionProbabilityPlot.py
+LYDION_DramaticPaperFig.py
+AnimateShadowTest.py
+VelocityDispersion.py
 __pycache__/
 *.pyc
 
@@ -21,6 +28,7 @@ __pycache__/
 *.mp4
 *.png
 *.pdf
+*.asc
 # *.txt
 
 .DS_Store
@@ -28,4 +36,5 @@ __pycache__/
 # Local plotting dependencies
 src/cmastro/
 
+# Other local files
 ReadMeBanner.gif
