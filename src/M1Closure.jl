@@ -28,12 +28,6 @@ const DEBUG_M1Closure = false
 @inline @fastmath function χ_L84( f::Float64 )
     f2 = f * f
     χ  = ( 3  +  4 * f2 ) / ( 5  +  2 * sqrt( 4  -  3 * f2 ) )
-
-    #if f < OneThird
-    #  χ = OneThird
-    #else  
-    #  χ = 0.5  -  f  +  1.5 * f*f
-    #end
       
     return χ
 end
@@ -270,12 +264,9 @@ end
 
 ###############################################################
 #######                                                 #######
-#######                 O L D  C O D E                  #######
+#######              W A V E  S P E E D S               #######
 #######                                                 #######
 ###############################################################
-
-# The code below is old, from early testing of LYDION with the 
-# HLL flux, for which the eigenvalues were needed. 
 
 """ HLL eigenvalues (in units c̃), for a given f = |H| / J
     and μ = cos θ. See Skinner & Ostriker (2013). """
