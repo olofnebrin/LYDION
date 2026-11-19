@@ -21,27 +21,27 @@ function CreateHDF5File( FileName::String,
                        chunk = (1,))
 
         # Cell centers rCoM: one value per cell.
-        create_dataset(file, "rCoM", Float32,
+        create_dataset(file, "rCoM", Float64,
                        (N_r,) )
 
         # Cell centers ZCoM: one value per cell.
-        create_dataset(file, "ZCoM", Float32,
+        create_dataset(file, "ZCoM", Float64,
                        (N_Z,) )
         
         # Cell interface radii r: should have N_r+1 entries if storing cell boundaries.
-        create_dataset(file, "r", Float32,
+        create_dataset(file, "r", Float64,
                        (N_r+1,) )
 
         # Cell interface radii Z: should have N_Z+1 entries if storing cell boundaries.
-        create_dataset(file, "Z", Float32,
+        create_dataset(file, "Z", Float64,
                        (N_Z+1,) )
         
-        # Cell volumes ΔV: one value per cell.
-        create_dataset(file, "CellVolumes", Float32,
+        # Cell volumes ΔV: one value per cell (Float64).
+        create_dataset(file, "CellVolumes", Float64,
                        (N_r, N_Z) )
 
         # Radial bins:
-        create_dataset(file, "Rbins", Float32,
+        create_dataset(file, "Rbins", Float64,
                        (Nbins,) )
 
         ############################# QUANTITIES #################################

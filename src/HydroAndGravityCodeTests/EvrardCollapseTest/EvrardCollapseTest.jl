@@ -225,8 +225,8 @@ function SetupEvrardTest(
     # Create arrays to store the spherically averaged density profile:
     #R_binedges, R_bins = SphericalProfileBins(geometry)
     R_binedges = copy(r)
-    R_bins    = copy(rCoM)
-    N_bins = length(R_bins)
+    R_bins     = copy(rCoM)
+    N_bins     = length(R_bins)
     ρ_bins     = zeros( Float64, N_bins )
     P_bins     = zeros( Float64, N_bins )
     V_bins     = zeros( Float64, N_bins )
@@ -239,7 +239,7 @@ function SetupEvrardTest(
     end
     outdir   = @__DIR__    # .../src/HydroAndGravityCodeTests/EvrardCollapseTest
     FileName = joinpath( outdir, @sprintf( "EvrardTest_%03dx%03d_%s_t%.2f.h5",
-                         N_r_log, N_Z_log, BC_Z_tag, tmax_unitless ) )
+                         N_r, N_Z, BC_Z_tag, tmax_unitless ) )
     CreateHDF5File( FileName, N_r, N_Z, N_bins, Nsaved )
     SaveGridHDF5File( FileName, geometry, R_bins )
     params = ( Mcl = Mcl, Rcl = Rcl, tmax_unitless = tmax_unitless, gamma = γ)
@@ -262,8 +262,8 @@ function SetupEvrardTest(
 
     # Set up hydro state + ghost grid arrays:
     hydrostate, ghostgrid = GenerateHydroArrays( r, rCoM, Z, ZCoM, 5 / 3, N_dust, N_Scalars,
-                                                 :Reflect,  :Reflect,   # Reflective BCs at r = 0, outflow at Rmax
-                                                 BC_Z_bot,  :Reflect    # User dependent BCs at Z = 0, outflow at Zmax
+                                                 :Reflect,  :Reflect,   # Reflective BCs at r = 0, reflective at Rmax
+                                                 BC_Z_bot,  :Reflect    # User dependent BCs at Z = 0, reflective at Zmax
                                                   )
 
     # Hydro arrays:
@@ -286,9 +286,9 @@ function SetupEvrardTest(
 
 
     # Constants:
-    power_law = 1             # Power law exponent for the isothermal density profile:
-    ρcl    = IsothermalDensityProfile(Rcl, Mcl, Rcl, power_law )  # Cloud density at boundary (r = Rcl)
-    ρext   = 1e-4 * ρcl       # Gas density outside the cloud 
+    power_law = 1                                                    # Power law exponent for the isothermal density profile:
+    ρcl       = IsothermalDensityProfile( Rcl, Mcl, Rcl, power_law ) # Cloud density at boundary (r = Rcl)
+    ρext      = 1e-4 * Mcl / Rcl^3                                   # Gas density outside the cloud (10⁻⁴ times Mcl / Rcl^3, as in the PLUTO test)
   
 
     if BC_Z_bot == :Reflect
@@ -322,16 +322,18 @@ function SetupEvrardTest(
                 γad[i,j] = γ
 
                 # Gas density & chemistry:
-                if R <= Rcl 
+                if R ≤ Rcl 
+                    # In this case the cell is definitely inside the cloud. Get its 
+                    # CoM position:
+                    RCoM   = sqrt( rCoM[i]^2  +   ( ZCoM[j] - Zc )^2 )
                     # Gas density set by isothermal profile inside the cloud:
-                    ρ[i,j] = IsothermalDensityProfile(R, Mcl, Rcl, power_law)
+                    ρ[i,j] = IsothermalDensityProfile( RCoM, Mcl, Rcl, power_law )
                     # Gas pressure
                     P[i,j] = max( ( γ - 1) * ρ[i,j] * e_th, P_floor )
                 else
                     # Gas density much lower outside the cloud:
                     ρ[i,j] = ρext
                     # Gas pressure constant outside the cloud boundary:
-                    #P[i,j] = max( ( γ - 1) * ρ[i,j] * e_th, P_floor )
                     P[i,j] = max( ( γ - 1) * ρ[i,j] * e_th, P_floor )
                 end
 
